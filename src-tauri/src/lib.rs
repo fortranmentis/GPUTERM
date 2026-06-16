@@ -1,5 +1,6 @@
 mod ssh;
 
+use ssh::local_fs::{list_local_dir, load_app_settings, update_recent_local_path};
 use ssh::session::{
     delete_session, load_sessions, save_session, test_ssh_connection, AppState,
 };
@@ -15,10 +16,14 @@ use ssh::terminal::{
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             load_sessions,
             save_session,
             delete_session,
+            load_app_settings,
+            update_recent_local_path,
+            list_local_dir,
             test_ssh_connection,
             connect_terminal,
             terminal_write,

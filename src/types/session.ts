@@ -42,6 +42,23 @@ export type SftpListResponse = {
   entries: SftpEntry[];
 };
 
+export type LocalEntry = {
+  name: string;
+  path: string;
+  entryType: "file" | "directory" | "other";
+  size: number | null;
+  modifiedTime: number | null;
+};
+
+export type LocalListResponse = {
+  path: string;
+  entries: LocalEntry[];
+};
+
+export type AppSettings = {
+  recentLocalPath?: string | null;
+};
+
 export type SftpProgressPayload = {
   sessionId: string;
   operation: "download" | "upload";

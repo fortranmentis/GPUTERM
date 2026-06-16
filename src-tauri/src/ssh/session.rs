@@ -325,7 +325,7 @@ fn known_hosts_path() -> PathBuf {
     config_dir().join("known_hosts.json")
 }
 
-fn config_dir() -> PathBuf {
+pub(crate) fn config_dir() -> PathBuf {
     if cfg!(target_os = "windows") {
         if let Some(appdata) = env::var_os("APPDATA") {
             return PathBuf::from(appdata).join("GpuTerm");

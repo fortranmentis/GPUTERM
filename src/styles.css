@@ -179,6 +179,62 @@ input:disabled {
   min-width: 0;
 }
 
+.local-path-row {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.local-path-row input {
+  flex: 1 1 auto;
+}
+
+.local-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 142px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #0a1018;
+}
+
+.local-file-item {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 70px;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.local-file-item:hover,
+.local-file-item.selected {
+  border-color: var(--line);
+  background: #121d29;
+}
+
+.local-file-item span,
+.local-file-item small {
+  color: var(--subtle);
+  font-size: 11px;
+}
+
+.local-file-item strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .primary-button,
 .secondary-button,
 .disconnect-button,
@@ -717,38 +773,36 @@ button.telemetry-section:hover {
   min-width: 294px;
 }
 
-.disk-summary-list {
+.disk-summary-compact {
   display: flex;
-  flex-direction: column;
-  gap: 7px;
-}
-
-.disk-summary {
-  display: grid;
-  grid-template-columns: 54px minmax(0, 1fr);
   align-items: center;
-  gap: 5px 8px;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: #cbd5e1;
+  font-size: 13px;
 }
 
-.disk-summary strong,
-.disk-summary span {
+.disk-summary-compact span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   min-width: 0;
-  overflow: hidden;
-  font-size: 12px;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.disk-summary strong {
+.disk-summary-compact span:not(:last-child)::after {
+  content: "·";
+  margin-left: 6px;
+  color: var(--subtle);
+}
+
+.disk-summary-compact strong {
   color: #f1f7ff;
 }
 
-.disk-summary span {
-  color: #cbd5e1;
-}
-
-.disk-summary .mini-bar {
-  grid-column: 1 / -1;
+.disk-hidden-count {
+  color: var(--cyan);
+  font-weight: 800;
 }
 
 .gpu-telemetry-group {
@@ -801,7 +855,7 @@ button.telemetry-section:hover {
 
 .disk-detail-row {
   display: grid;
-  grid-template-columns: minmax(100px, 1fr) 80px 104px 104px 60px;
+  grid-template-columns: minmax(100px, 1fr) 74px 96px 96px 96px 54px;
   gap: 10px;
   min-height: 31px;
   align-items: center;

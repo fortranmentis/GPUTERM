@@ -86,6 +86,7 @@ The frontend calls Tauri commands through `@tauri-apps/api/core` and receives st
 - `system_monitor::start` opens a separate SSH connection so telemetry polling cannot break or block the terminal.
 - Telemetry emits `remote-telemetry`, which contains CPU, memory, disk, GPU, and per-section errors in one payload.
 - SFTP commands open separate SSH/SFTP sessions using the active in-memory credentials and emit `sftp-progress` during transfers.
+- The SFTP local panel uses Tauri's native folder picker for the local path and stores the last selected directory in app settings.
 
 Session profiles are stored in the user config directory:
 
@@ -94,6 +95,14 @@ Session profiles are stored in the user config directory:
 - Linux: `$XDG_CONFIG_HOME/GpuTerm/sessions.json` or `~/.config/GpuTerm/sessions.json`
 
 Host key fingerprints are stored in `known_hosts.json` in the same directory. The MVP uses trust-on-first-use: the first fingerprint is saved, and later mismatches are blocked with a clear error.
+
+The most recent SFTP local directory is stored as `recentLocalPath` in `app_settings.json` in the same config directory. Passwords and private key contents are never written to this settings file.
+
+## SFTP Local Browser
+
+The SFTP panel has a `Browse...` button next to the local path field. It opens the operating system folder selection dialog through the Tauri dialog plugin. Choosing a folder updates the local path, validates that the directory exists and is accessible, reloads the local file list, and persists it as the default path for the next app launch. Cancelling the dialog leaves the current path unchanged.
+
+Downloads are saved into the selected local directory. Uploads use the selected local file from the local file list and send it to the current remote directory. Paths are passed through platform-native strings so Windows, macOS, and Linux separators are preserved.
 
 ## Remote Telemetry
 
@@ -126,7 +135,15 @@ Disk collection uses:
 df -P -T -B1
 ```
 
-The default hidden filesystem types are `tmpfs`, `devtmpfs`, `squashfs`, `proc`, `sysfs`, `cgroup`, `cgroup2`, and `overlay`. Mount points under `/`, `/home`, `/data`, `/mnt`, and `/media` are prioritized in the bottom bar. Clicking the disk section shows the full non-ignored disk list.
+The default hidden filesystem types are `tmpfs`, `devtmpfs`, `squashfs`, `proc`, `sysfs`, `cgroup`, `cgroup2`, and `overlay`. Mount points are prioritized as `/`, `/home`, `/data`, `/mnt*`, `/media*`, then everything else.
+
+The bottom bar shows a compact disk summary with at most two mount points:
+
+```text
+Disk: / 46% · /data 43% · +2
+```
+
+Clicking the disk section opens the full disk detail popover with mount point, filesystem type, used, available, total, and usage percentage. Disk sizes are formatted automatically as GiB or TiB.
 
 ## GPU Monitoring Command
 
@@ -150,7 +167,7 @@ The Rust backend parses CSV rows into the frontend `GpuMetric` type and includes
 
 - Only one active terminal session is fully wired in the MVP, though the command and state shape use session IDs for future tabs.
 - Keyboard-interactive SSH authentication is not implemented yet.
-- SFTP uses typed local paths instead of native file picker dialogs.
+- SFTP local browsing is directory based; recursive upload/download and drag-and-drop are not implemented yet.
 - SFTP commands currently open fresh SSH sessions for reliability; pooled SFTP channels can be added later.
 - The known_hosts MVP stores SHA-256 fingerprints in JSON, not OpenSSH known_hosts format.
 - System telemetry is Linux-first and depends on `/proc`, `nproc`, `lscpu`, and GNU/POSIX-style `df`.

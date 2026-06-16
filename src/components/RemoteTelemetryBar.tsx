@@ -9,6 +9,7 @@ import {
   Zap,
 } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { DiskUsagePopover } from "./DiskUsagePopover";
 import { useSessionStore } from "../stores/sessionStore";
 import type {
   DiskMetric,
@@ -16,6 +17,10 @@ import type {
   TelemetryDisplayMode,
   TelemetrySettings,
 } from "../types/gpu";
+import {
+  createDiskSummary,
+  formatDiskUsagePercent,
+} from "../utils/diskPriority";
 
 export function RemoteTelemetryBar() {
   const connected = useSessionStore((state) => state.connected);
@@ -36,8 +41,8 @@ export function RemoteTelemetryBar() {
 
   const showSystem = settings.displayMode !== "gpu-only";
   const showGpu = settings.displayMode !== "system-only";
-  const primaryDisks = useMemo(
-    () => telemetry?.disks.slice(0, 3) ?? [],
+  const diskSummary = useMemo(
+    () => createDiskSummary(telemetry?.disks ?? [], 2),
     [telemetry?.disks],
   );
 
@@ -180,11 +185,17 @@ export function RemoteTelemetryBar() {
               <HardDrive size={16} />
               <span>Disk</span>
             </div>
-            {primaryDisks.length > 0 ? (
-              <div className="disk-summary-list">
-                {primaryDisks.map((disk) => (
-                  <DiskSummary disk={disk} key={`${disk.filesystem}:${disk.mountPoint}`} />
+            {diskSummary.visible.length > 0 ? (
+              <div className="disk-summary-compact">
+                {diskSummary.visible.map((disk) => (
+                  <span key={`${disk.filesystem}:${disk.mountPoint}`}>
+                    <strong>{disk.mountPoint}</strong>{" "}
+                    {formatDiskUsagePercent(disk.usagePercent)}
+                  </span>
                 ))}
+                {diskSummary.hiddenCount > 0 && (
+                  <span className="disk-hidden-count">+{diskSummary.hiddenCount}</span>
+                )}
               </div>
             ) : (
               <span>{telemetry.errors.disk ?? "Disk unavailable"}</span>
@@ -208,34 +219,7 @@ export function RemoteTelemetryBar() {
       )}
 
       {diskDetailsOpen && telemetry && (
-        <div className="disk-detail-popover">
-          <div className="disk-detail-title">
-            <HardDrive size={16} />
-            <strong>Disks</strong>
-            <span>{telemetry.disks.length}</span>
-          </div>
-          <div className="disk-detail-table">
-            <div className="disk-detail-row head">
-              <span>Mount</span>
-              <span>Type</span>
-              <span>Used</span>
-              <span>Total</span>
-              <span>Use</span>
-            </div>
-            {telemetry.disks.map((disk) => (
-              <div
-                className="disk-detail-row"
-                key={`${disk.filesystem}:${disk.mountPoint}`}
-              >
-                <span title={disk.mountPoint}>{disk.mountPoint}</span>
-                <span>{disk.fsType ?? "-"}</span>
-                <span>{formatBytes(disk.usedBytes)}</span>
-                <span>{formatBytes(disk.totalBytes)}</span>
-                <span>{formatPercent(disk.usagePercent)}</span>
-              </div>
-            ))}
-          </div>
-        </div>
+        <DiskUsagePopover disks={telemetry.disks} />
       )}
     </footer>
   );
@@ -258,18 +242,6 @@ function TelemetrySection({
       </div>
       <div className="telemetry-section-body">{children}</div>
     </section>
-  );
-}
-
-function DiskSummary({ disk }: { disk: DiskMetric }) {
-  return (
-    <div className="disk-summary">
-      <strong>{disk.mountPoint}</strong>
-      <span>
-        {formatBytes(disk.usedBytes)} / {formatBytes(disk.totalBytes)}
-      </span>
-      <MiniBar value={disk.usagePercent} />
-    </div>
   );
 }
 
@@ -347,16 +319,4 @@ function formatGiBFromMiB(value: number | null) {
     return "n/a";
   }
   return `${(value / 1024).toFixed(value >= 10 * 1024 ? 1 : 2)} GiB`;
-}
-
-function formatBytes(value: number | null) {
-  if (value == null) {
-    return "n/a";
-  }
-  const tib = 1024 ** 4;
-  const gib = 1024 ** 3;
-  if (value >= tib) {
-    return `${(value / tib).toFixed(1)} TiB`;
-  }
-  return `${(value / gib).toFixed(value >= 10 * gib ? 1 : 2)} GiB`;
 }

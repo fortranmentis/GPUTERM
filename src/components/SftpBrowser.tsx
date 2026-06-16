@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   ArrowUp,
   Download,
@@ -13,10 +14,14 @@ import {
 } from "lucide-react";
 import { useSessionStore } from "../stores/sessionStore";
 import type {
+  AppSettings,
+  LocalEntry,
+  LocalListResponse,
   SftpEntry,
   SftpListResponse,
   SftpProgressPayload,
 } from "../types/session";
+import { formatBytes } from "../utils/formatBytes";
 
 export function SftpBrowser() {
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
@@ -27,6 +32,8 @@ export function SftpBrowser() {
   const [entries, setEntries] = useState<SftpEntry[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [localPath, setLocalPath] = useState("");
+  const [localEntries, setLocalEntries] = useState<LocalEntry[]>([]);
+  const [selectedLocalPath, setSelectedLocalPath] = useState<string | null>(null);
   const [newFolderName, setNewFolderName] = useState("");
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState<SftpProgressPayload | null>(null);
@@ -35,6 +42,23 @@ export function SftpBrowser() {
     () => entries.find((entry) => entry.path === selectedPath) ?? null,
     [entries, selectedPath],
   );
+  const selectedLocalEntry = useMemo(
+    () => localEntries.find((entry) => entry.path === selectedLocalPath) ?? null,
+    [localEntries, selectedLocalPath],
+  );
+
+  useEffect(() => {
+    invoke<AppSettings>("load_app_settings")
+      .then((settings) => {
+        if (settings.recentLocalPath) {
+          setLocalPath(settings.recentLocalPath);
+          loadLocalDirectory(settings.recentLocalPath).catch((error) =>
+            setMessage({ kind: "error", text: String(error) }),
+          );
+        }
+      })
+      .catch(() => undefined);
+  }, [setMessage]);
 
   useEffect(() => {
     if (connected && activeSessionId) {
@@ -86,6 +110,45 @@ export function SftpBrowser() {
       setSelectedPath(null);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadLocalDirectory = async (nextPath: string) => {
+    const response = await invoke<LocalListResponse>("list_local_dir", {
+      path: nextPath,
+    });
+    setLocalPath(response.path);
+    setLocalEntries(response.entries);
+    setSelectedLocalPath(null);
+    return response;
+  };
+
+  const persistLocalPath = async (nextPath: string) => {
+    const settings = await invoke<AppSettings>("update_recent_local_path", {
+      path: nextPath,
+    });
+    return settings.recentLocalPath ?? nextPath;
+  };
+
+  const applyLocalPath = async (nextPath: string) => {
+    const normalized = await persistLocalPath(nextPath);
+    await loadLocalDirectory(normalized);
+  };
+
+  const browseLocalDirectory = async () => {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Select local SFTP folder",
+        defaultPath: localPath || undefined,
+      });
+      if (selected == null || Array.isArray(selected)) {
+        return;
+      }
+      await applyLocalPath(selected);
+    } catch (error) {
+      setMessage({ kind: "error", text: String(error) });
     }
   };
 
@@ -144,18 +207,24 @@ export function SftpBrowser() {
 
   const downloadSelected = async () => {
     if (!activeSessionId || !selectedEntry || !localPath.trim()) {
-      setMessage({ kind: "error", text: "Select a file and local path" });
+      setMessage({ kind: "error", text: "Select a remote file and local folder" });
       return;
     }
+    if (selectedEntry.type === "directory") {
+      setMessage({ kind: "error", text: "Select a remote file to download" });
+      return;
+    }
+    const targetLocalPath = joinLocalPath(localPath.trim(), selectedEntry.name);
     setLoading(true);
     try {
       await invoke("sftp_download_file", {
         request: {
           sessionId: activeSessionId,
           remotePath: selectedEntry.path,
-          localPath: localPath.trim(),
+          localPath: targetLocalPath,
         },
       });
+      await loadLocalDirectory(localPath.trim());
     } catch (error) {
       setMessage({ kind: "error", text: String(error) });
     } finally {
@@ -164,18 +233,18 @@ export function SftpBrowser() {
   };
 
   const uploadLocalFile = async () => {
-    if (!activeSessionId || !localPath.trim()) {
-      setMessage({ kind: "error", text: "Enter a local file path" });
+    if (!activeSessionId || !selectedLocalEntry || selectedLocalEntry.entryType !== "file") {
+      setMessage({ kind: "error", text: "Select a local file to upload" });
       return;
     }
-    const remoteName = basename(localPath.trim());
+    const remoteName = selectedLocalEntry.name;
     setLoading(true);
     try {
       await invoke("sftp_upload_file", {
         request: {
           sessionId: activeSessionId,
           remotePath: joinRemotePath(path, remoteName),
-          localPath: localPath.trim(),
+          localPath: selectedLocalEntry.path,
         },
       });
       await loadDirectory(path);
@@ -314,13 +383,62 @@ export function SftpBrowser() {
         </div>
         <label className="full-label">
           <span>Local path</span>
-          <input
-            value={localPath}
-            disabled={!connected}
-            placeholder="C:\\Users\\you\\Downloads\\model.log"
-            onChange={(event) => setLocalPath(event.target.value)}
-          />
+          <div className="local-path-row">
+            <input
+              value={localPath}
+              placeholder="C:\\Users\\you\\Downloads"
+              onChange={(event) => setLocalPath(event.target.value)}
+              onBlur={() => {
+                if (localPath.trim()) {
+                  applyLocalPath(localPath).catch((error) =>
+                    setMessage({ kind: "error", text: String(error) }),
+                  );
+                }
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && localPath.trim()) {
+                  applyLocalPath(localPath).catch((error) =>
+                    setMessage({ kind: "error", text: String(error) }),
+                  );
+                }
+              }}
+            />
+            <button
+              className="secondary-button compact"
+              type="button"
+              onClick={browseLocalDirectory}
+            >
+              <FolderOpen size={16} />
+              Browse
+            </button>
+          </div>
         </label>
+        {localEntries.length > 0 && (
+          <div className="local-file-list" aria-label="Local files">
+            {localEntries.slice(0, 6).map((entry) => (
+              <button
+                className={`local-file-item ${
+                  selectedLocalPath === entry.path ? "selected" : ""
+                }`}
+                key={entry.path}
+                type="button"
+                onClick={() => {
+                  if (entry.entryType === "directory") {
+                    applyLocalPath(entry.path).catch((error) =>
+                      setMessage({ kind: "error", text: String(error) }),
+                    );
+                  } else {
+                    setSelectedLocalPath(entry.path);
+                  }
+                }}
+              >
+                <span>{entry.entryType === "directory" ? "dir" : "file"}</span>
+                <strong>{entry.name}</strong>
+                <small>{formatBytes(entry.size)}</small>
+              </button>
+            ))}
+          </div>
+        )}
         <div className="button-row">
           <button
             className="secondary-button"
@@ -334,7 +452,7 @@ export function SftpBrowser() {
           <button
             className="secondary-button"
             type="button"
-            disabled={!connected || loading || !localPath.trim()}
+            disabled={!connected || loading || !selectedLocalEntry}
             onClick={uploadLocalFile}
           >
             <Upload size={16} />
@@ -382,25 +500,10 @@ function joinRemotePath(base: string, name: string) {
   return `${base}/${name}`;
 }
 
-function basename(path: string) {
-  return path.split(/[\\/]/).filter(Boolean).pop() ?? "upload.bin";
-}
-
-function formatBytes(value: number | null) {
-  if (value == null) {
-    return "-";
-  }
-  if (value < 1024) {
-    return `${value} B`;
-  }
-  const units = ["KiB", "MiB", "GiB", "TiB"];
-  let size = value / 1024;
-  let unit = 0;
-  while (size >= 1024 && unit < units.length - 1) {
-    size /= 1024;
-    unit += 1;
-  }
-  return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[unit]}`;
+export function joinLocalPath(base: string, name: string) {
+  const separator = base.includes("\\") && !base.includes("/") ? "\\" : "/";
+  const trimmedBase = base.replace(/[\\/]+$/, "");
+  return `${trimmedBase}${separator}${name}`;
 }
 
 function formatModified(value: number | null) {
