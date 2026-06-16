@@ -313,6 +313,12 @@ The Rust backend parses CSV rows into the frontend `GpuMetric` type and includes
 - `CredentialStore` is split into an interface and in-memory implementation so Windows Credential Manager, macOS Keychain, or Linux Secret Service can be added later.
 - Host key mismatch is reported and blocks the connection.
 
+## License
+
+GpuTerm is licensed under the MIT License. See [LICENSE](./LICENSE) for details.
+
+This project uses third-party open-source dependencies, including Tauri, React, xterm.js, ssh2, and related Rust/JavaScript packages. Their licenses remain with their respective authors.
+
 ## Known Limitations
 
 - Only one active terminal session is fully wired in the MVP, though the command and state shape use session IDs for future tabs.
