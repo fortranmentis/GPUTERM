@@ -1,4 +1,5 @@
 use crate::ssh::credentials::{CredentialStore, MemoryCredentialStore};
+use crate::ssh::system_monitor::SystemMonitorSettings;
 use crate::ssh::terminal::TerminalHandle;
 use serde::{Deserialize, Serialize};
 use ssh2::{HashType, Session};
@@ -17,7 +18,8 @@ use uuid::Uuid;
 pub struct AppState {
     pub terminals: Mutex<HashMap<String, TerminalHandle>>,
     pub active_connections: Mutex<HashMap<String, ActiveConnection>>,
-    pub gpu_stops: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    pub telemetry_stops: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    pub telemetry_settings: Arc<Mutex<SystemMonitorSettings>>,
     pub credentials: MemoryCredentialStore,
 }
 

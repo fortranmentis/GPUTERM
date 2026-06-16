@@ -17,7 +17,7 @@ export function TerminalPane() {
   const sessions = useSessionStore((state) => state.sessions);
   const setConnected = useSessionStore((state) => state.setConnected);
   const setActiveSession = useSessionStore((state) => state.setActiveSession);
-  const setGpuStatus = useSessionStore((state) => state.setGpuStatus);
+  const setRemoteTelemetry = useSessionStore((state) => state.setRemoteTelemetry);
   const setMessage = useSessionStore((state) => state.setMessage);
   const terminalHostRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -156,7 +156,7 @@ export function TerminalPane() {
       await invoke("disconnect_terminal", { sessionId: activeSessionId });
       setConnected(false);
       setActiveSession(null);
-      setGpuStatus(null);
+      setRemoteTelemetry(null);
       setMessage({ kind: "info", text: "Disconnected" });
     } catch (error) {
       setMessage({ kind: "error", text: String(error) });

@@ -2,12 +2,12 @@ import { useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { AlertCircle, CheckCircle2, Info, X } from "lucide-react";
-import { GpuStatusBar } from "./components/GpuStatusBar";
+import { RemoteTelemetryBar } from "./components/RemoteTelemetryBar";
 import { SessionSidebar } from "./components/SessionSidebar";
 import { SftpBrowser } from "./components/SftpBrowser";
 import { TerminalPane } from "./components/TerminalPane";
 import { useSessionStore } from "./stores/sessionStore";
-import type { GpuMetricsPayload } from "./types/gpu";
+import type { RemoteTelemetry, TelemetrySettings } from "./types/gpu";
 import type { SessionProfile, SftpProgressPayload } from "./types/session";
 
 type TerminalClosedPayload = {
@@ -20,7 +20,8 @@ function App() {
   const setSessions = useSessionStore((state) => state.setSessions);
   const setMessage = useSessionStore((state) => state.setMessage);
   const setConnected = useSessionStore((state) => state.setConnected);
-  const setGpuStatus = useSessionStore((state) => state.setGpuStatus);
+  const setRemoteTelemetry = useSessionStore((state) => state.setRemoteTelemetry);
+  const setTelemetrySettings = useSessionStore((state) => state.setTelemetrySettings);
 
   useEffect(() => {
     invoke<SessionProfile[]>("load_sessions")
@@ -28,17 +29,17 @@ function App() {
       .catch((error) =>
         setMessage({ kind: "error", text: String(error) }),
       );
-  }, [setMessage, setSessions]);
+    invoke<TelemetrySettings>("get_telemetry_settings")
+      .then(setTelemetrySettings)
+      .catch(() => undefined);
+  }, [setMessage, setSessions, setTelemetrySettings]);
 
   useEffect(() => {
     let disposed = false;
     const unlisteners: Array<() => void> = [];
 
-    listen<GpuMetricsPayload>("gpu-metrics", (event) => {
-      const activeSessionId = useSessionStore.getState().activeSessionId;
-      if (!activeSessionId || event.payload.sessionId === activeSessionId) {
-        setGpuStatus(event.payload);
-      }
+    listen<RemoteTelemetry>("remote-telemetry", (event) => {
+      setRemoteTelemetry(event.payload);
     }).then((unlisten) => {
       if (disposed) {
         unlisten();
@@ -51,7 +52,7 @@ function App() {
       const activeSessionId = useSessionStore.getState().activeSessionId;
       if (event.payload.sessionId === activeSessionId) {
         setConnected(false);
-        setGpuStatus(null);
+        setRemoteTelemetry(null);
         if (event.payload.message) {
           setMessage({ kind: "info", text: event.payload.message });
         }
@@ -89,7 +90,7 @@ function App() {
       disposed = true;
       unlisteners.forEach((unlisten) => unlisten());
     };
-  }, [setConnected, setGpuStatus, setMessage]);
+  }, [setConnected, setMessage, setRemoteTelemetry]);
 
   const messageIcon =
     message?.kind === "error" ? (
@@ -127,7 +128,7 @@ function App() {
             <SftpBrowser />
           </section>
         </div>
-        <GpuStatusBar />
+        <RemoteTelemetryBar />
       </main>
     </div>
   );

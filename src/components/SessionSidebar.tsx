@@ -43,7 +43,7 @@ export function SessionSidebar() {
   const setActiveSession = useSessionStore((state) => state.setActiveSession);
   const setConnected = useSessionStore((state) => state.setConnected);
   const setMessage = useSessionStore((state) => state.setMessage);
-  const setGpuStatus = useSessionStore((state) => state.setGpuStatus);
+  const setRemoteTelemetry = useSessionStore((state) => state.setRemoteTelemetry);
   const [form, setForm] = useState<SessionForm>(blankForm);
   const [busy, setBusy] = useState(false);
 
@@ -101,7 +101,7 @@ export function SessionSidebar() {
       });
       setActiveSession(info.sessionId);
       setConnected(true);
-      setGpuStatus(null);
+      setRemoteTelemetry(null);
       updateForm({
         id: info.profile.id,
         name: info.profile.name,
@@ -174,7 +174,7 @@ export function SessionSidebar() {
         await invoke("disconnect_terminal", { sessionId: form.id });
         setConnected(false);
         setActiveSession(null);
-        setGpuStatus(null);
+        setRemoteTelemetry(null);
       }
       const nextSessions = await invoke<SessionProfile[]>("delete_session", {
         id: form.id,
@@ -198,7 +198,7 @@ export function SessionSidebar() {
       await invoke("disconnect_terminal", { sessionId: activeSessionId });
       setConnected(false);
       setActiveSession(null);
-      setGpuStatus(null);
+      setRemoteTelemetry(null);
       setMessage({ kind: "info", text: "Disconnected" });
     } catch (error) {
       setMessage({ kind: "error", text: String(error) });

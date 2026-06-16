@@ -1,6 +1,6 @@
 # GpuTerm
 
-GpuTerm is a Tauri + React + TypeScript + Rust desktop MVP for managing SSH/SFTP sessions to GPU servers. It is shaped like an all-in-one SSH client, with a GPU monitoring status bar that polls the connected host through SSH.
+GpuTerm is a Tauri + React + TypeScript + Rust desktop MVP for managing SSH/SFTP sessions to GPU servers. It is shaped like an all-in-one SSH client, with a remote telemetry status bar that polls CPU, memory, disk, and NVIDIA GPU health through SSH.
 
 ## Features
 
@@ -10,7 +10,8 @@ GpuTerm is a Tauri + React + TypeScript + Rust desktop MVP for managing SSH/SFTP
 - Terminal resize propagation from xterm to the remote PTY.
 - SFTP directory browsing, upload, download, delete, and mkdir commands.
 - SFTP transfer progress event payloads for large file workflows.
-- GPU monitor that runs `nvidia-smi` every 2 seconds on a separate SSH session.
+- Remote telemetry monitor that polls Linux CPU, memory, disk, and NVIDIA GPU metrics on a separate SSH session.
+- Configurable telemetry interval, display mode, and ignored disk filesystem types.
 - Trust-on-first-use `known_hosts.json` structure with host key mismatch detection.
 
 ## Project Structure
@@ -18,7 +19,7 @@ GpuTerm is a Tauri + React + TypeScript + Rust desktop MVP for managing SSH/SFTP
 ```text
 src/
   components/
-    GpuStatusBar.tsx
+    RemoteTelemetryBar.tsx
     SessionSidebar.tsx
     SftpBrowser.tsx
     TerminalPane.tsx
@@ -35,6 +36,7 @@ src-tauri/
       mod.rs
       session.rs
       sftp.rs
+      system_monitor.rs
       terminal.rs
     lib.rs
     main.rs
@@ -81,7 +83,8 @@ The frontend calls Tauri commands through `@tauri-apps/api/core` and receives st
 - `connect_terminal` opens an SSH connection, creates a PTY, starts a shell, and emits `terminal-output`.
 - `terminal_write` sends xterm input to the SSH channel.
 - `terminal_resize` updates remote PTY dimensions.
-- `gpu_monitor::start` opens a separate SSH connection so GPU polling cannot break or block the terminal.
+- `system_monitor::start` opens a separate SSH connection so telemetry polling cannot break or block the terminal.
+- Telemetry emits `remote-telemetry`, which contains CPU, memory, disk, GPU, and per-section errors in one payload.
 - SFTP commands open separate SSH/SFTP sessions using the active in-memory credentials and emit `sftp-progress` during transfers.
 
 Session profiles are stored in the user config directory:
@@ -92,6 +95,39 @@ Session profiles are stored in the user config directory:
 
 Host key fingerprints are stored in `known_hosts.json` in the same directory. The MVP uses trust-on-first-use: the first fingerprint is saved, and later mismatches are blocked with a clear error.
 
+## Remote Telemetry
+
+GpuTerm polls telemetry every 2 seconds by default. The UI can switch the interval to 1, 2, 5, or 10 seconds and can show GPU only, system only, or GPU + system.
+
+CPU collection uses:
+
+```bash
+cat /proc/stat
+cat /proc/loadavg
+cat /proc/cpuinfo
+nproc --all
+nproc
+lscpu
+```
+
+CPU usage is calculated from the previous and current aggregate `/proc/stat` samples. The first sample can show `n/a` until a second sample is available.
+
+Memory collection uses:
+
+```bash
+cat /proc/meminfo
+```
+
+Memory is tracked internally in MiB and displayed in GiB. Used memory is calculated as `MemTotal - MemAvailable`.
+
+Disk collection uses:
+
+```bash
+df -P -T -B1
+```
+
+The default hidden filesystem types are `tmpfs`, `devtmpfs`, `squashfs`, `proc`, `sysfs`, `cgroup`, `cgroup2`, and `overlay`. Mount points under `/`, `/home`, `/data`, `/mnt`, and `/media` are prioritized in the bottom bar. Clicking the disk section shows the full non-ignored disk list.
+
 ## GPU Monitoring Command
 
 GpuTerm runs this command every 2 seconds after a successful SSH connection:
@@ -100,7 +136,7 @@ GpuTerm runs this command every 2 seconds after a successful SSH connection:
 nvidia-smi --query-gpu=index,name,uuid,driver_version,power.draw,power.limit,temperature.gpu,utilization.gpu,utilization.memory,memory.total,memory.used,memory.free --format=csv,noheader,nounits
 ```
 
-The Rust backend parses CSV rows into the frontend `GpuMetric` type and emits `gpu-metrics`. If `nvidia-smi` is missing, returns no GPUs, times out, or exits non-zero, the bottom bar displays `GPU metrics unavailable`. GPU polling errors are isolated from the terminal session.
+The Rust backend parses CSV rows into the frontend `GpuMetric` type and includes the result in `RemoteTelemetry.gpu`. If `nvidia-smi` is missing, returns no GPUs, times out, or exits non-zero, the GPU section displays `GPU metrics unavailable`. GPU polling errors are isolated from the terminal session and from CPU, memory, and disk collection.
 
 ## Security Notes
 
@@ -117,4 +153,5 @@ The Rust backend parses CSV rows into the frontend `GpuMetric` type and emits `g
 - SFTP uses typed local paths instead of native file picker dialogs.
 - SFTP commands currently open fresh SSH sessions for reliability; pooled SFTP channels can be added later.
 - The known_hosts MVP stores SHA-256 fingerprints in JSON, not OpenSSH known_hosts format.
-- GPU monitoring assumes NVIDIA GPUs and `nvidia-smi`.
+- System telemetry is Linux-first and depends on `/proc`, `nproc`, `lscpu`, and GNU/POSIX-style `df`.
+- GPU monitoring assumes NVIDIA GPUs and `nvidia-smi`; non-NVIDIA hosts still show CPU, memory, and disk telemetry.

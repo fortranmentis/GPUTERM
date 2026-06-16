@@ -6,6 +6,7 @@ use ssh::session::{
 use ssh::sftp::{
     sftp_delete, sftp_download_file, sftp_list_dir, sftp_mkdir, sftp_upload_file,
 };
+use ssh::system_monitor::{get_telemetry_settings, update_telemetry_settings};
 use ssh::terminal::{
     connect_terminal, disconnect_terminal, terminal_resize, terminal_write,
 };
@@ -23,6 +24,8 @@ pub fn run() {
             terminal_write,
             terminal_resize,
             disconnect_terminal,
+            get_telemetry_settings,
+            update_telemetry_settings,
             sftp_list_dir,
             sftp_download_file,
             sftp_upload_file,

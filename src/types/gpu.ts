@@ -13,10 +13,57 @@ export type GpuMetric = {
   memoryFreeMiB: number | null;
 };
 
-export type GpuMetricsPayload = {
-  sessionId: string;
-  status: "available" | "unavailable";
-  metrics: GpuMetric[];
-  message?: string | null;
-  updatedAt: number;
+export type CpuMetric = {
+  modelName: string | null;
+  usagePercent: number | null;
+  loadAvg1: number | null;
+  loadAvg5: number | null;
+  loadAvg15: number | null;
+  totalCores: number | null;
+  onlineCores: number | null;
+  avgClockGhz: number | null;
+};
+
+export type MemoryMetric = {
+  totalMiB: number | null;
+  usedMiB: number | null;
+  availableMiB: number | null;
+  freeMiB: number | null;
+  usagePercent: number | null;
+  swapTotalMiB: number | null;
+  swapUsedMiB: number | null;
+  swapFreeMiB: number | null;
+};
+
+export type DiskMetric = {
+  filesystem: string;
+  fsType: string | null;
+  mountPoint: string;
+  totalBytes: number | null;
+  usedBytes: number | null;
+  availableBytes: number | null;
+  usagePercent: number | null;
+};
+
+export type RemoteTelemetry = {
+  timestamp: string;
+  hostname: string | null;
+  cpu: CpuMetric | null;
+  memory: MemoryMetric | null;
+  disks: DiskMetric[];
+  gpu: GpuMetric[];
+  errors: {
+    cpu?: string;
+    memory?: string;
+    disk?: string;
+    gpu?: string;
+  };
+};
+
+export type TelemetryDisplayMode = "gpu-only" | "system-only" | "gpu-system";
+
+export type TelemetrySettings = {
+  telemetryIntervalSecs: 1 | 2 | 5 | 10;
+  displayMode: TelemetryDisplayMode;
+  diskIgnoreFsTypes: string[];
 };

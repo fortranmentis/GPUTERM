@@ -1,10 +1,10 @@
 use crate::ssh::credentials::CredentialStore;
-use crate::ssh::gpu_monitor;
 use crate::ssh::session::{
     profile_from_request, target_from_request, upsert_profile, ActiveConnection, AppState,
     SessionConnectRequest, TerminalSessionInfo,
 };
 use crate::ssh::session::open_ssh_session;
+use crate::ssh::system_monitor;
 use serde::Serialize;
 use ssh2::{Channel, ExtendedData, Session};
 use std::io::{ErrorKind, Read, Write};
@@ -108,7 +108,7 @@ pub fn connect_terminal(
 
     upsert_profile(profile.clone())?;
     start_terminal_reader(app.clone(), profile.id.clone(), channel, stop);
-    start_gpu_monitor(app, &state, target);
+    start_system_monitor(app, &state, target);
 
     Ok(TerminalSessionInfo {
         session_id: profile.id.clone(),
@@ -242,19 +242,19 @@ fn start_terminal_reader(
     });
 }
 
-fn start_gpu_monitor(app: AppHandle, state: &AppState, target: crate::ssh::session::SshTarget) {
+fn start_system_monitor(app: AppHandle, state: &AppState, target: crate::ssh::session::SshTarget) {
     let stop = Arc::new(AtomicBool::new(false));
-    if let Ok(mut stops) = state.gpu_stops.lock() {
+    if let Ok(mut stops) = state.telemetry_stops.lock() {
         if let Some(previous) = stops.remove(&target.session_id) {
             previous.store(true, Ordering::SeqCst);
         }
         stops.insert(target.session_id.clone(), Arc::clone(&stop));
     }
-    gpu_monitor::start(app, target, stop);
+    system_monitor::start(app, target, stop, Arc::clone(&state.telemetry_settings));
 }
 
 fn stop_existing_session(state: &AppState, session_id: &str) {
-    if let Ok(mut stops) = state.gpu_stops.lock() {
+    if let Ok(mut stops) = state.telemetry_stops.lock() {
         if let Some(stop) = stops.remove(session_id) {
             stop.store(true, Ordering::SeqCst);
         }
