@@ -42,39 +42,189 @@ src-tauri/
     main.rs
 ```
 
-## Development
+## Installation
 
 Prerequisites:
 
-- Node.js 20+
-- Rust stable toolchain
+- Node.js 20 or newer
+- npm 10 or newer
+- Rust stable toolchain with `cargo` and `rustc`
 - Tauri desktop prerequisites for your OS
 
-Install dependencies:
+Windows prerequisites:
+
+- Microsoft Visual Studio Build Tools 2022
+- Desktop development with C++ workload
+- WebView2 Runtime
+- Git for Windows
+
+macOS prerequisites:
+
+- Xcode Command Line Tools
+
+```bash
+xcode-select --install
+```
+
+Linux prerequisites vary by distribution. For Debian/Ubuntu, install the WebKitGTK, build, and SSL packages required by Tauri:
+
+```bash
+sudo apt update
+sudo apt install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+```
+
+Clone the repository:
+
+```bash
+git clone https://github.com/fortranmentis/GPUTERM.git
+cd GPUTERM
+```
+
+Install JavaScript dependencies:
 
 ```bash
 npm install
 ```
 
-Run the app in development:
+Check that the Rust toolchain is available:
+
+```bash
+cargo --version
+rustc --version
+```
+
+## Development Run
+
+Start the full Tauri desktop app:
 
 ```bash
 npm run tauri:dev
 ```
 
-Run only the Vite frontend:
+This starts the Vite frontend and opens the native Tauri desktop window. Use this mode for SSH terminal, SFTP, local folder browsing, and telemetry testing because those features depend on Tauri commands and events.
+
+Run only the browser-based Vite frontend:
 
 ```bash
 npm run dev
 ```
 
+The Vite-only mode is useful for layout work, but native Tauri APIs such as the folder picker and Rust SSH commands are not available in a normal browser tab.
+
+Run the test suite:
+
+```bash
+npm run test
+cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+Run production checks:
+
+```bash
+npm run build
+cargo check --manifest-path src-tauri/Cargo.toml
+```
+
 ## Build
+
+Create a packaged desktop build:
 
 ```bash
 npm run tauri:build
 ```
 
-The packaged app is emitted by Tauri under `src-tauri/target/release/bundle`.
+The packaged app is emitted by Tauri under:
+
+```text
+src-tauri/target/release/bundle
+```
+
+Typical outputs are `.msi`/`.exe` on Windows, `.dmg`/`.app` on macOS, and `.deb`/`.AppImage` depending on the Linux bundle configuration.
+
+## Usage
+
+Start the app with:
+
+```bash
+npm run tauri:dev
+```
+
+Create an SSH session:
+
+1. Open the session form in the left sidebar.
+2. Enter `host`, `port`, `username`, and either a password or private key path.
+3. Save the session.
+4. Click the saved session to connect.
+
+Session notes:
+
+- Passwords are used only for the active connection and are not saved.
+- Private key file contents are not stored; only the path is saved.
+- Host key fingerprints are stored after the first successful trust-on-first-use connection.
+
+Use the SSH terminal:
+
+1. Connect to a saved session.
+2. Type into the terminal pane.
+3. Resize the window as needed; the remote PTY size is updated automatically.
+
+Use the SFTP browser:
+
+1. Connect to a session.
+2. Use the remote path controls to list and navigate server directories.
+3. Use `Browse...` beside `Local path` to choose a local directory with the OS folder picker.
+4. Select a remote file and download it into the selected local directory.
+5. Select a local file and upload it into the current remote directory.
+6. Use delete and new-folder actions from the SFTP panel as needed.
+
+The last selected local directory is restored on the next app launch.
+
+Use remote telemetry:
+
+1. Connect to a Linux server through SSH.
+2. The bottom bar starts polling CPU, RAM, disk, and GPU status.
+3. Change the telemetry interval to 1, 2, 5, or 10 seconds.
+4. Switch the display mode between GPU only, system only, and GPU + system.
+5. Click the disk summary to open the full disk detail popover.
+
+For NVIDIA GPU servers, GpuTerm runs `nvidia-smi` every telemetry interval. If `nvidia-smi` is missing or the server has no NVIDIA GPU, the terminal remains connected and the GPU section shows an unavailable state.
+
+## Troubleshooting
+
+`npm install` fails:
+
+- Confirm Node.js 20+ and npm 10+ are installed.
+- Delete `node_modules` only when dependency installation is corrupted, then run `npm install` again.
+
+`cargo` or `rustc` is not found:
+
+- Install Rust with rustup.
+- Restart the terminal so the Cargo bin directory is added to `PATH`.
+- On Windows, the path is usually `%USERPROFILE%\.cargo\bin`.
+
+`npm run tauri:dev` fails on Windows:
+
+- Install Visual Studio Build Tools 2022 with the Desktop development with C++ workload.
+- Make sure WebView2 Runtime is installed.
+- Restart the terminal after installing build tools.
+
+SSH authentication fails:
+
+- Check host, port, username, password, and private key path.
+- Ensure the remote server allows password or public key authentication.
+- If the host key changed, remove the stale entry from `known_hosts.json` only after verifying the server fingerprint.
+
+SFTP local browsing fails:
+
+- Choose a directory that exists and is readable by the current OS user.
+- On Windows, paths such as `C:\Users\user\Downloads` are supported.
+- On macOS/Linux, paths such as `/Users/user/Downloads` or `/home/user/Downloads` are supported.
+
+GPU metrics are unavailable:
+
+- Confirm the remote server has NVIDIA drivers installed.
+- Run `nvidia-smi` manually on the remote host.
+- Non-NVIDIA servers can still show CPU, memory, and disk telemetry.
 
 ## Architecture Notes
 
