@@ -90,6 +90,15 @@ pub fn list_local_dir(path: String) -> Result<LocalListResponse, String> {
     })
 }
 
+#[tauri::command]
+pub fn local_path_exists(path: String) -> Result<bool, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Local path is required".to_string());
+    }
+    Ok(PathBuf::from(trimmed).exists())
+}
+
 fn validate_local_directory(path: &str) -> Result<String, String> {
     let trimmed = path.trim();
     if trimmed.is_empty() {

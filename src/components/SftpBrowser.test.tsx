@@ -1,9 +1,11 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { confirm, open } from "@tauri-apps/plugin-dialog";
 import { SftpBrowser } from "./SftpBrowser";
 import { useSessionStore } from "../stores/sessionStore";
+import { useTransferStore } from "../stores/transferStore";
+import type { LocalEntry, SftpEntry } from "../types/session";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -14,16 +16,58 @@ vi.mock("@tauri-apps/api/event", () => ({
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
+  confirm: vi.fn(),
   open: vi.fn(),
 }));
 
 const mockInvoke = vi.mocked(invoke);
 const mockOpen = vi.mocked(open);
+const mockConfirm = vi.mocked(confirm);
+const LOCAL_DRAG_TYPE = "application/x-gputerm-local-files";
+const REMOTE_DRAG_TYPE = "application/x-gputerm-remote-files";
+
+function localFile(name: string): LocalEntry {
+  return {
+    name,
+    path: `C:\\Users\\me\\${name}`,
+    entryType: "file",
+    size: 10,
+    modifiedTime: null,
+  };
+}
+
+function remoteFile(name: string): SftpEntry {
+  return {
+    name,
+    path: `/srv/${name}`,
+    type: "file",
+    size: 20,
+    modifiedTime: null,
+  };
+}
+
+function dragData(type: string, payload: unknown[]) {
+  return {
+    getData: (requestedType: string) =>
+      requestedType === type ? JSON.stringify(payload) : "",
+    files: [],
+    effectAllowed: "copy",
+    setData: vi.fn(),
+  };
+}
 
 describe("SftpBrowser local path browse", () => {
+  let localEntries: LocalEntry[];
+  let remoteEntries: SftpEntry[];
+
   beforeEach(() => {
     mockInvoke.mockReset();
     mockOpen.mockReset();
+    mockConfirm.mockReset();
+    mockConfirm.mockResolvedValue(true);
+    localEntries = [];
+    remoteEntries = [];
+    useTransferStore.setState({ tasks: [], activeDrag: null });
     useSessionStore.setState({
       activeSessionId: "session-1",
       connected: true,
@@ -36,7 +80,7 @@ describe("SftpBrowser local path browse", () => {
       if (command === "list_local_dir") {
         return Promise.resolve({
           path: (args as { path: string }).path,
-          entries: [],
+          entries: localEntries,
         });
       }
       if (command === "update_recent_local_path") {
@@ -45,7 +89,13 @@ describe("SftpBrowser local path browse", () => {
         });
       }
       if (command === "sftp_list_dir") {
-        return Promise.resolve({ path: ".", entries: [] });
+        return Promise.resolve({ path: "/srv", entries: remoteEntries });
+      }
+      if (command === "sftp_path_exists" || command === "local_path_exists") {
+        return Promise.resolve(false);
+      }
+      if (command === "sftp_upload_file" || command === "sftp_download_file") {
+        return Promise.resolve(undefined);
       }
       return Promise.resolve(undefined);
     });
@@ -90,5 +140,130 @@ describe("SftpBrowser local path browse", () => {
 
     await waitFor(() => expect(mockOpen).toHaveBeenCalled());
     expect(screen.getByLabelText(/local path/i)).toHaveValue("C:\\Users\\me");
+  });
+
+  it("creates an upload task when local files are dropped on the remote panel", async () => {
+    localEntries = [localFile("alpha.txt")];
+    render(<SftpBrowser />);
+
+    await waitFor(() => expect(screen.getByText("/srv")).toBeInTheDocument());
+    fireEvent.drop(screen.getByTestId("remote-drop-zone"), {
+      dataTransfer: dragData(LOCAL_DRAG_TYPE, [localEntries[0]]),
+    });
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("sftp_upload_file", {
+        request: expect.objectContaining({
+          localPath: "C:\\Users\\me\\alpha.txt",
+          remotePath: "/srv/alpha.txt",
+        }),
+      }),
+    );
+    expect(screen.getAllByText("alpha.txt").length).toBeGreaterThan(1);
+    expect(screen.getByText("upload")).toBeInTheDocument();
+  });
+
+  it("creates a download task when remote files are dropped on the local panel", async () => {
+    remoteEntries = [remoteFile("beta.log")];
+    render(<SftpBrowser />);
+
+    await waitFor(() => expect(screen.getByText("/srv")).toBeInTheDocument());
+    fireEvent.drop(screen.getByTestId("local-drop-zone"), {
+      dataTransfer: dragData(REMOTE_DRAG_TYPE, [remoteEntries[0]]),
+    });
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("sftp_download_file", {
+        request: expect.objectContaining({
+          remotePath: "/srv/beta.log",
+          localPath: "C:\\Users\\me\\beta.log",
+        }),
+      }),
+    );
+    expect(screen.getAllByText("beta.log").length).toBeGreaterThan(1);
+    expect(screen.getByText("download")).toBeInTheDocument();
+  });
+
+  it("creates multiple transfer tasks when multiple files are dropped", async () => {
+    const files = [localFile("one.txt"), localFile("two.txt")];
+    render(<SftpBrowser />);
+
+    await waitFor(() => expect(screen.getByText("/srv")).toBeInTheDocument());
+    fireEvent.drop(screen.getByTestId("remote-drop-zone"), {
+      dataTransfer: dragData(LOCAL_DRAG_TYPE, files),
+    });
+
+    await waitFor(() =>
+      expect(
+        mockInvoke.mock.calls.filter(([command]) => command === "sftp_upload_file"),
+      ).toHaveLength(2),
+    );
+    expect(screen.getByText("one.txt")).toBeInTheDocument();
+    expect(screen.getByText("two.txt")).toBeInTheDocument();
+  });
+
+  it("asks for overwrite confirmation and skips when rejected", async () => {
+    remoteEntries = [remoteFile("exists.dat")];
+    mockConfirm.mockResolvedValue(false);
+    mockInvoke.mockImplementation((command, args) => {
+      if (command === "load_app_settings") {
+        return Promise.resolve({ recentLocalPath: "C:\\Users\\me" });
+      }
+      if (command === "list_local_dir") {
+        return Promise.resolve({ path: (args as { path: string }).path, entries: [] });
+      }
+      if (command === "sftp_list_dir") {
+        return Promise.resolve({ path: "/srv", entries: remoteEntries });
+      }
+      if (command === "local_path_exists") {
+        return Promise.resolve(true);
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<SftpBrowser />);
+
+    await waitFor(() => expect(screen.getByText("/srv")).toBeInTheDocument());
+    fireEvent.drop(screen.getByTestId("local-drop-zone"), {
+      dataTransfer: dragData(REMOTE_DRAG_TYPE, [remoteEntries[0]]),
+    });
+
+    await waitFor(() => expect(mockConfirm).toHaveBeenCalled());
+    expect(
+      mockInvoke.mock.calls.some(([command]) => command === "sftp_download_file"),
+    ).toBe(false);
+    expect(screen.getByText("canceled")).toBeInTheDocument();
+  });
+
+  it("marks the task as failed when transfer command fails", async () => {
+    const file = localFile("broken.txt");
+    mockInvoke.mockImplementation((command, args) => {
+      if (command === "load_app_settings") {
+        return Promise.resolve({ recentLocalPath: "C:\\Users\\me" });
+      }
+      if (command === "list_local_dir") {
+        return Promise.resolve({ path: (args as { path: string }).path, entries: [] });
+      }
+      if (command === "sftp_list_dir") {
+        return Promise.resolve({ path: "/srv", entries: [] });
+      }
+      if (command === "sftp_path_exists") {
+        return Promise.resolve(false);
+      }
+      if (command === "sftp_upload_file") {
+        return Promise.reject("remote disk full");
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<SftpBrowser />);
+
+    await waitFor(() => expect(screen.getByText("/srv")).toBeInTheDocument());
+    fireEvent.drop(screen.getByTestId("remote-drop-zone"), {
+      dataTransfer: dragData(LOCAL_DRAG_TYPE, [file]),
+    });
+
+    await waitFor(() => expect(screen.getByText("failed")).toBeInTheDocument());
+    expect(screen.getByText("remote disk full")).toBeInTheDocument();
   });
 });

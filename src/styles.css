@@ -221,6 +221,10 @@ input:disabled {
   background: #121d29;
 }
 
+.local-file-item[draggable="true"] {
+  cursor: grab;
+}
+
 .local-file-item span,
 .local-file-item small {
   color: var(--subtle);
@@ -483,6 +487,34 @@ button:disabled {
   gap: 10px;
 }
 
+.sftp-subpanel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease;
+}
+
+.remote-drop-zone {
+  flex: 1 1 auto;
+}
+
+.local-drop-zone {
+  flex: 0 0 auto;
+  padding: 6px;
+  border-color: var(--line-soft);
+  background: #090f16;
+}
+
+.drop-active {
+  border-color: var(--cyan-strong);
+  background: rgba(34, 211, 238, 0.08);
+}
+
 .panel-title-row {
   display: flex;
   align-items: center;
@@ -579,6 +611,10 @@ button.file-row.selected {
   font-size: 13px;
 }
 
+.empty-list.compact {
+  height: 42px;
+}
+
 .sftp-actions {
   display: flex;
   flex: 0 0 auto;
@@ -594,6 +630,127 @@ button.file-row.selected {
   border: 1px solid var(--line-soft);
   border-radius: 8px;
   background: #0a1018;
+}
+
+.transfer-queue {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #0a1018;
+}
+
+.transfer-queue-title {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.transfer-queue-title strong {
+  color: #eef5ff;
+  font-size: 12px;
+}
+
+.transfer-queue-title span {
+  color: var(--subtle);
+  font-size: 12px;
+}
+
+.transfer-task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 164px;
+  overflow: auto;
+  padding: 6px;
+}
+
+.transfer-task {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 132px;
+  gap: 8px;
+  padding: 7px;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: #0d141d;
+}
+
+.transfer-task.done {
+  border-color: rgba(52, 211, 153, 0.28);
+}
+
+.transfer-task.failed {
+  border-color: rgba(248, 113, 113, 0.42);
+}
+
+.transfer-task.canceled {
+  opacity: 0.78;
+}
+
+.transfer-task-main,
+.transfer-task-side {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.transfer-task-main strong,
+.transfer-task-main small,
+.transfer-task-main span,
+.transfer-task-side span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.transfer-task-main strong {
+  color: #f1f7ff;
+  font-size: 12px;
+}
+
+.transfer-task-main span,
+.transfer-task-main small,
+.transfer-task-side span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.transfer-status {
+  width: fit-content;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #1d2734;
+  color: #d8e0ea;
+  font-weight: 800;
+}
+
+.transfer-status.done {
+  background: rgba(52, 211, 153, 0.16);
+  color: var(--green);
+}
+
+.transfer-status.failed {
+  background: rgba(248, 113, 113, 0.14);
+  color: var(--red);
+}
+
+.transfer-status.canceled {
+  color: var(--subtle);
+}
+
+.transfer-error {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--red);
+  font-size: 11px;
 }
 
 .transfer-progress > div:first-child {
@@ -819,12 +976,8 @@ button.telemetry-section:hover {
 }
 
 .disk-detail-popover {
-  position: absolute;
-  right: 10px;
-  bottom: 150px;
-  z-index: 4;
-  width: min(720px, calc(100vw - 360px));
-  max-height: 360px;
+  position: fixed;
+  z-index: 20;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -836,8 +989,8 @@ button.telemetry-section:hover {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 38px;
-  padding: 0 12px;
+  min-height: 42px;
+  padding: 6px 12px;
   border-bottom: 1px solid var(--line-soft);
   color: var(--cyan);
 }
@@ -848,16 +1001,36 @@ button.telemetry-section:hover {
   font-size: 12px;
 }
 
+.toggle-row {
+  display: inline-flex;
+  flex: 0 0 auto;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.toggle-row input {
+  width: 14px;
+  height: 14px;
+}
+
+.toggle-row span {
+  margin-left: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .disk-detail-table {
-  max-height: 320px;
+  max-height: 372px;
   overflow: auto;
 }
 
 .disk-detail-row {
   display: grid;
-  grid-template-columns: minmax(100px, 1fr) 74px 96px 96px 96px 54px;
+  grid-template-columns: minmax(92px, 0.9fr) minmax(110px, 1fr) 70px 82px 82px 82px 108px;
   gap: 10px;
-  min-height: 31px;
+  min-height: 36px;
   align-items: center;
   padding: 0 12px;
   border-bottom: 1px solid var(--line-soft);
@@ -871,6 +1044,14 @@ button.telemetry-section:hover {
   font-weight: 800;
 }
 
+.disk-detail-row.warning {
+  background: rgba(251, 191, 36, 0.07);
+}
+
+.disk-detail-row.critical {
+  background: rgba(248, 113, 113, 0.08);
+}
+
 .disk-detail-row span {
   min-width: 0;
   overflow: hidden;
@@ -878,6 +1059,39 @@ button.telemetry-section:hover {
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.disk-usage-cell {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+}
+
+.disk-usage-cell strong {
+  color: #f1f7ff;
+  font-size: 12px;
+}
+
+.disk-usage-bar {
+  overflow: hidden;
+  height: 6px;
+  border-radius: 999px;
+  background: #1d2734;
+}
+
+.disk-usage-bar > div {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--cyan), var(--green));
+}
+
+.disk-usage-bar.warning > div {
+  background: var(--amber);
+}
+
+.disk-usage-bar.critical > div {
+  background: var(--red);
 }
 
 .app-message {

@@ -9,6 +9,7 @@ GpuTerm is a Tauri + React + TypeScript + Rust desktop MVP for managing SSH/SFTP
 - xterm.js terminal connected to a Rust `ssh2` PTY shell.
 - Terminal resize propagation from xterm to the remote PTY.
 - SFTP directory browsing, upload, download, delete, and mkdir commands.
+- SFTP drag-and-drop upload/download with transfer queue progress.
 - SFTP transfer progress event payloads for large file workflows.
 - Remote telemetry monitor that polls Linux CPU, memory, disk, and NVIDIA GPU metrics on a separate SSH session.
 - Configurable telemetry interval, display mode, and ignored disk filesystem types.
@@ -175,9 +176,19 @@ Use the SFTP browser:
 3. Use `Browse...` beside `Local path` to choose a local directory with the OS folder picker.
 4. Select a remote file and download it into the selected local directory.
 5. Select a local file and upload it into the current remote directory.
-6. Use delete and new-folder actions from the SFTP panel as needed.
+6. Drag local files onto the remote panel to upload them into the current remote directory.
+7. Drag remote files onto the local panel to download them into the selected local directory.
+8. Use delete and new-folder actions from the SFTP panel as needed.
 
 The last selected local directory is restored on the next app launch.
+
+Transfer notes:
+
+- Multiple files can be dropped at once.
+- File transfers are streamed in 1 MiB chunks instead of loading the whole file into memory.
+- The transfer queue shows filename, direction, source path, target path, progress, status, and per-file errors.
+- If a target file already exists, GpuTerm asks whether to overwrite it before starting that file transfer.
+- Directory drag-and-drop is detected but not transferred in the MVP.
 
 Use remote telemetry:
 
@@ -254,6 +265,8 @@ The SFTP panel has a `Browse...` button next to the local path field. It opens t
 
 Downloads are saved into the selected local directory. Uploads use the selected local file from the local file list and send it to the current remote directory. Paths are passed through platform-native strings so Windows, macOS, and Linux separators are preserved.
 
+The same upload/download paths are used by drag-and-drop. Dropping local files on the remote SFTP panel uploads them to the current remote directory. Dropping remote files on the local panel downloads them to the selected local directory. Each dropped file becomes a transfer queue item and reports progress independently.
+
 ## Remote Telemetry
 
 GpuTerm polls telemetry every 2 seconds by default. The UI can switch the interval to 1, 2, 5, or 10 seconds and can show GPU only, system only, or GPU + system.
@@ -293,7 +306,7 @@ The bottom bar shows a compact disk summary with at most two mount points:
 Disk: / 46% · /data 43% · +2
 ```
 
-Clicking the disk section opens the full disk detail popover with mount point, filesystem type, used, available, total, and usage percentage. Disk sizes are formatted automatically as GiB or TiB.
+Clicking the disk section opens the full disk detail popover with mount point, filesystem, filesystem type, used, available, total, and usage percentage. Disk sizes are formatted automatically as GiB or TiB. The usage column includes a progress bar; disks at 80% or higher are marked as warning, and disks at 90% or higher are marked as critical. The popover can temporarily show filesystems hidden by the default ignore list.
 
 ## GPU Monitoring Command
 
@@ -323,7 +336,8 @@ This project uses third-party open-source dependencies, including Tauri, React, 
 
 - Only one active terminal session is fully wired in the MVP, though the command and state shape use session IDs for future tabs.
 - Keyboard-interactive SSH authentication is not implemented yet.
-- SFTP local browsing is directory based; recursive upload/download and drag-and-drop are not implemented yet.
+- SFTP local browsing is directory based; recursive upload/download and directory drag-and-drop are not implemented yet.
+- Transfer cancellation has a backend command placeholder, but active SFTP stream cancellation is not wired in the MVP.
 - SFTP commands currently open fresh SSH sessions for reliability; pooled SFTP channels can be added later.
 - The known_hosts MVP stores SHA-256 fingerprints in JSON, not OpenSSH known_hosts format.
 - System telemetry is Linux-first and depends on `/proc`, `nproc`, `lscpu`, and GNU/POSIX-style `df`.

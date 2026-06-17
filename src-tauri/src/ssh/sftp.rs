@@ -30,6 +30,7 @@ pub struct SftpTransferRequest {
     session_id: String,
     remote_path: String,
     local_path: String,
+    transfer_id: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -42,6 +43,7 @@ pub struct SftpPathRequest {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SftpProgressPayload {
+    transfer_id: Option<String>,
     session_id: String,
     operation: String,
     remote_path: String,
@@ -143,6 +145,22 @@ pub fn sftp_mkdir(state: State<AppState>, request: SftpPathRequest) -> Result<()
         .map_err(|error| format!("SFTP mkdir failed for {}: {}", request.remote_path, error))
 }
 
+#[tauri::command]
+pub fn sftp_path_exists(state: State<AppState>, request: SftpPathRequest) -> Result<bool, String> {
+    let target = target_for_active_session(&state, &request.session_id)?;
+    let session = open_ssh_session(&target)?;
+    let sftp = session
+        .sftp()
+        .map_err(|error| format!("SFTP failed to start: {}", error))?;
+    Ok(sftp.stat(Path::new(&request.remote_path)).is_ok())
+}
+
+#[tauri::command]
+pub fn cancel_transfer(_transfer_id: String) -> Result<(), String> {
+    // TODO: Wire cooperative cancellation into active transfer tasks.
+    Err("Transfer cancellation is not implemented yet".to_string())
+}
+
 fn download_file(
     app: AppHandle,
     target: SshTarget,
@@ -213,7 +231,8 @@ fn transfer_read_to_write<R: Read, W: Write>(
     operation: &str,
     total_bytes: Option<u64>,
 ) -> Result<(), String> {
-    let mut buffer = [0_u8; 64 * 1024];
+    const CHUNK_SIZE: usize = 1024 * 1024;
+    let mut buffer = [0_u8; CHUNK_SIZE];
     let mut transferred_bytes = 0_u64;
     emit_progress(app, request, operation, transferred_bytes, total_bytes, false, None);
 
@@ -273,6 +292,7 @@ fn emit_progress(
     let _ = app.emit(
         "sftp-progress",
         SftpProgressPayload {
+            transfer_id: request.transfer_id.clone(),
             session_id: request.session_id.clone(),
             operation: operation.to_string(),
             remote_path: request.remote_path.clone(),

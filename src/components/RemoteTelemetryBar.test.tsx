@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RemoteTelemetryBar } from "./RemoteTelemetryBar";
 import { useSessionStore } from "../stores/sessionStore";
@@ -74,5 +74,55 @@ describe("RemoteTelemetryBar disk summary", () => {
     render(<RemoteTelemetryBar />);
 
     expect(screen.getByText("?")).toBeInTheDocument();
+  });
+
+  it("opens disk detail popover and shows the full non-hidden mount list", () => {
+    useSessionStore.setState({
+      remoteTelemetry: telemetry([
+        disk("/", 46),
+        disk("/data", 43),
+        disk("/mnt/storage", 39),
+        { ...disk("/run", 1), fsType: "tmpfs" },
+      ]),
+    });
+
+    render(<RemoteTelemetryBar />);
+
+    fireEvent.click(screen.getByRole("button", { name: /disk/i }));
+
+    expect(screen.getByRole("dialog", { name: /disk details/i })).toBeInTheDocument();
+    expect(screen.getAllByText("/mnt/storage").length).toBeGreaterThan(0);
+    expect(screen.queryByText("/run")).not.toBeInTheDocument();
+  });
+
+  it("closes disk detail popover with Escape or outside click", () => {
+    useSessionStore.setState({
+      remoteTelemetry: telemetry([disk("/", 46)]),
+    });
+
+    render(<RemoteTelemetryBar />);
+
+    fireEvent.click(screen.getByRole("button", { name: /disk/i }));
+    expect(screen.getByRole("dialog", { name: /disk details/i })).toBeInTheDocument();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: /disk details/i })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /disk/i }));
+    fireEvent.mouseDown(document.body);
+    expect(screen.queryByRole("dialog", { name: /disk details/i })).not.toBeInTheDocument();
+  });
+
+  it("marks warning and critical disks in the detail popover", () => {
+    useSessionStore.setState({
+      remoteTelemetry: telemetry([disk("/warn", 82), disk("/critical", 93)]),
+    });
+
+    render(<RemoteTelemetryBar />);
+
+    fireEvent.click(screen.getByRole("button", { name: /disk/i }));
+
+    expect(document.querySelector('[data-usage-level="warning"]')).toBeTruthy();
+    expect(document.querySelector('[data-usage-level="critical"]')).toBeTruthy();
   });
 });

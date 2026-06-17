@@ -1,11 +1,12 @@
 mod ssh;
 
-use ssh::local_fs::{list_local_dir, load_app_settings, update_recent_local_path};
+use ssh::local_fs::{list_local_dir, load_app_settings, local_path_exists, update_recent_local_path};
 use ssh::session::{
     delete_session, load_sessions, save_session, test_ssh_connection, AppState,
 };
 use ssh::sftp::{
-    sftp_delete, sftp_download_file, sftp_list_dir, sftp_mkdir, sftp_upload_file,
+    cancel_transfer, sftp_delete, sftp_download_file, sftp_list_dir, sftp_mkdir, sftp_path_exists,
+    sftp_upload_file,
 };
 use ssh::system_monitor::{get_telemetry_settings, update_telemetry_settings};
 use ssh::terminal::{
@@ -24,6 +25,7 @@ pub fn run() {
             load_app_settings,
             update_recent_local_path,
             list_local_dir,
+            local_path_exists,
             test_ssh_connection,
             connect_terminal,
             terminal_write,
@@ -34,6 +36,8 @@ pub fn run() {
             sftp_list_dir,
             sftp_download_file,
             sftp_upload_file,
+            sftp_path_exists,
+            cancel_transfer,
             sftp_delete,
             sftp_mkdir,
         ])

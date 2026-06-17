@@ -192,7 +192,7 @@ fn emit_telemetry(app: &AppHandle, telemetry: RemoteTelemetry) {
 
 fn collect_remote_telemetry(
     session: &Session,
-    settings: &SystemMonitorSettings,
+    _settings: &SystemMonitorSettings,
     previous_cpu: &mut Option<CpuStatSample>,
 ) -> RemoteTelemetry {
     let mut errors = TelemetryErrors::default();
@@ -225,7 +225,7 @@ fn collect_remote_telemetry(
     let disks = match run_remote_command(session, "df -P -T -B1 2>/dev/null")
         .and_then(|output| parse_df_output(&output))
     {
-        Ok(disks) => filter_and_sort_disks(disks, &settings.disk_ignore_fs_types),
+        Ok(disks) => filter_and_sort_disks(disks, &[]),
         Err(error) => {
             errors.disk = Some(error);
             Vec::new()

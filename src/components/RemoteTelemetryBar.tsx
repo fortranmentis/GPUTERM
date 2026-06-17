@@ -8,11 +8,10 @@ import {
   Thermometer,
   Zap,
 } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { DiskUsagePopover } from "./DiskUsagePopover";
 import { useSessionStore } from "../stores/sessionStore";
 import type {
-  DiskMetric,
   GpuMetric,
   TelemetryDisplayMode,
   TelemetrySettings,
@@ -31,6 +30,7 @@ export function RemoteTelemetryBar() {
   );
   const setMessage = useSessionStore((state) => state.setMessage);
   const [diskDetailsOpen, setDiskDetailsOpen] = useState(false);
+  const diskButtonRef = useRef<HTMLButtonElement | null>(null);
   const [ignoreDraft, setIgnoreDraft] = useState(
     settings.diskIgnoreFsTypes.join(", "),
   );
@@ -42,8 +42,8 @@ export function RemoteTelemetryBar() {
   const showSystem = settings.displayMode !== "gpu-only";
   const showGpu = settings.displayMode !== "system-only";
   const diskSummary = useMemo(
-    () => createDiskSummary(telemetry?.disks ?? [], 2),
-    [telemetry?.disks],
+    () => createDiskSummary(telemetry?.disks ?? [], 2, settings.diskIgnoreFsTypes),
+    [settings.diskIgnoreFsTypes, telemetry?.disks],
   );
 
   const updateSettings = async (nextSettings: TelemetrySettings) => {
@@ -177,8 +177,10 @@ export function RemoteTelemetryBar() {
           </TelemetrySection>
 
           <button
+            ref={diskButtonRef}
             className="telemetry-section disk-section"
             type="button"
+            aria-expanded={diskDetailsOpen}
             onClick={() => setDiskDetailsOpen((open) => !open)}
           >
             <div className="telemetry-section-title">
@@ -219,7 +221,12 @@ export function RemoteTelemetryBar() {
       )}
 
       {diskDetailsOpen && telemetry && (
-        <DiskUsagePopover disks={telemetry.disks} />
+        <DiskUsagePopover
+          disks={telemetry.disks}
+          ignoredFsTypes={settings.diskIgnoreFsTypes}
+          anchorRef={diskButtonRef}
+          onClose={() => setDiskDetailsOpen(false)}
+        />
       )}
     </footer>
   );

@@ -60,6 +60,7 @@ export type AppSettings = {
 };
 
 export type SftpProgressPayload = {
+  transferId?: string | null;
   sessionId: string;
   operation: "download" | "upload";
   remotePath: string;
