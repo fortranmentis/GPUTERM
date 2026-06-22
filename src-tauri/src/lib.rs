@@ -1,6 +1,7 @@
 mod ssh;
 
 use ssh::local_fs::{list_local_dir, load_app_settings, local_path_exists, update_recent_local_path};
+use ssh::resource_details::get_resource_details;
 use ssh::session::{
     delete_session, load_sessions, save_session, test_ssh_connection, AppState,
 };
@@ -33,6 +34,7 @@ pub fn run() {
             disconnect_terminal,
             get_telemetry_settings,
             update_telemetry_settings,
+            get_resource_details,
             sftp_list_dir,
             sftp_download_file,
             sftp_upload_file,

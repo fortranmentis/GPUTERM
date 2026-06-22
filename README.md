@@ -197,6 +197,7 @@ Use remote telemetry:
 3. Change the telemetry interval to 1, 2, 5, or 10 seconds.
 4. Switch the display mode between GPU only, system only, and GPU + system.
 5. Click the disk summary to open the full disk detail popover.
+6. Click CPU, RAM, or a GPU summary to open live resource details and top process usage.
 
 For NVIDIA GPU servers, GpuTerm runs `nvidia-smi` every telemetry interval. If `nvidia-smi` is missing or the server has no NVIDIA GPU, the terminal remains connected and the GPU section shows an unavailable state.
 
@@ -271,6 +272,8 @@ The same upload/download paths are used by drag-and-drop. Dropping local files o
 
 GpuTerm polls telemetry every 2 seconds by default. The UI can switch the interval to 1, 2, 5, or 10 seconds and can show GPU only, system only, or GPU + system.
 
+CPU, RAM, GPU, and Disk summaries are clickable. CPU/RAM/GPU detail popovers are collected separately from the status-bar telemetry and poll every 3 seconds only while the corresponding popover is open. Each detail request opens a separate SSH connection and command channel, so detail collection failures do not interrupt the terminal or the normal telemetry loop. Press `Esc` or click outside a popover to close it.
+
 CPU collection uses:
 
 ```bash
@@ -291,6 +294,38 @@ cat /proc/meminfo
 ```
 
 Memory is tracked internally in MiB and displayed in GiB. Used memory is calculated as `MemTotal - MemAvailable`.
+
+## Resource Detail Commands
+
+CPU details include model, usage, load average, core counts, average clock, uptime, optional logical-core usage, and the top CPU-consuming processes. The detail collector uses:
+
+```bash
+cat /proc/stat
+cat /proc/loadavg
+cat /proc/cpuinfo
+cat /proc/uptime
+nproc --all
+nproc
+lscpu
+ps -eo pid=,user=,%cpu=,%mem=,etime=,comm= --sort=-%cpu | head -n 15
+```
+
+RAM details include total, used, available, free, buffers, cache, swap, and the top RSS-consuming processes. The detail collector uses:
+
+```bash
+cat /proc/meminfo
+ps -eo pid=,user=,rss=,vsz=,%mem=,comm= --sort=-rss | head -n 15
+```
+
+GPU details include utilization, VRAM, temperature, power, fan speed, clocks, PCI bus ID, persistence mode, MIG mode, and active compute processes. The detail collector uses:
+
+```bash
+nvidia-smi --query-gpu=index,name,uuid,driver_version,power.draw,power.limit,temperature.gpu,utilization.gpu,utilization.memory,memory.total,memory.used,memory.free,fan.speed,clocks.current.graphics,clocks.current.memory,pci.bus_id,persistence_mode,mig.mode.current --format=csv,noheader,nounits
+nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv,noheader,nounits
+ps -p <PID_LIST> -o pid=,user=,args=
+```
+
+Process owners and command lines are resolved with the permissions of the connected SSH user. Other users' command lines may be hidden by Linux `/proc` or process visibility settings. Missing optional NVIDIA fields, including fan or MIG information, are shown as unavailable instead of failing the entire GPU panel.
 
 Disk collection uses:
 
@@ -342,3 +377,5 @@ This project uses third-party open-source dependencies, including Tauri, React, 
 - The known_hosts MVP stores SHA-256 fingerprints in JSON, not OpenSSH known_hosts format.
 - System telemetry is Linux-first and depends on `/proc`, `nproc`, `lscpu`, and GNU/POSIX-style `df`.
 - GPU monitoring assumes NVIDIA GPUs and `nvidia-smi`; non-NVIDIA hosts still show CPU, memory, and disk telemetry.
+- Resource detail panels are Linux-first; GPU details additionally require NVIDIA drivers and `nvidia-smi`.
+- Process user/command information can be incomplete when the connected SSH account lacks permission to inspect another process.

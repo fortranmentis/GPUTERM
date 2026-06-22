@@ -1,14 +1,5 @@
 import { HardDrive } from "lucide-react";
-import {
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-  type CSSProperties,
-  type RefObject,
-} from "react";
-import { createPortal } from "react-dom";
+import { useMemo, useState, type RefObject } from "react";
 import type { DiskMetric } from "../types/gpu";
 import { formatGiBOrTiB } from "../utils/formatBytes";
 import {
@@ -17,6 +8,7 @@ import {
   formatDiskUsagePercent,
   sortDisksByPriority,
 } from "../utils/diskPriority";
+import { ResourceDetailPopover } from "./ResourceDetailPopover";
 
 type DiskUsagePopoverProps = {
   disks: DiskMetric[];
@@ -32,8 +24,6 @@ export function DiskUsagePopover({
   onClose,
 }: DiskUsagePopoverProps) {
   const [showHidden, setShowHidden] = useState(false);
-  const [style, setStyle] = useState<CSSProperties>({});
-  const popoverRef = useRef<HTMLDivElement | null>(null);
   const visibleDisks = useMemo(
     () =>
       sortDisksByPriority(
@@ -42,76 +32,13 @@ export function DiskUsagePopover({
     [disks, ignoredFsTypes, showHidden],
   );
 
-  useEffect(() => {
-    const handlePointerDown = (event: MouseEvent) => {
-      if (
-        popoverRef.current?.contains(event.target as Node) ||
-        anchorRef.current?.contains(event.target as Node)
-      ) {
-        return;
-      }
-      onClose();
-    };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        onClose();
-      }
-    };
-    document.addEventListener("mousedown", handlePointerDown);
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", handlePointerDown);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [anchorRef, onClose]);
-
-  useLayoutEffect(() => {
-    const placePopover = () => {
-      const anchor = anchorRef.current;
-      if (!anchor) {
-        return;
-      }
-      const rect = anchor.getBoundingClientRect();
-      const margin = 16;
-      const maxHeight = Math.min(420, Math.max(260, window.innerHeight - margin * 2));
-      const width = Math.min(920, Math.max(360, window.innerWidth - margin * 2));
-      const left = Math.min(
-        Math.max(margin, rect.right - width),
-        window.innerWidth - width - margin,
-      );
-      const preferredTop = rect.top - maxHeight - 10;
-      const top =
-        preferredTop >= margin
-          ? preferredTop
-          : Math.min(rect.bottom + 10, window.innerHeight - maxHeight - margin);
-      setStyle({
-        left,
-        top: Math.max(margin, top),
-        width,
-        maxHeight,
-      });
-    };
-
-    placePopover();
-    window.addEventListener("resize", placePopover);
-    window.addEventListener("scroll", placePopover, true);
-    return () => {
-      window.removeEventListener("resize", placePopover);
-      window.removeEventListener("scroll", placePopover, true);
-    };
-  }, [anchorRef]);
-
-  const popover = (
-    <div
-      className="disk-detail-popover"
-      ref={popoverRef}
-      role="dialog"
-      aria-label="Disk details"
-      style={style}
-    >
-      <div className="disk-detail-title">
-        <HardDrive size={16} />
-        <strong>Disks</strong>
+  return (
+    <ResourceDetailPopover
+      anchorRef={anchorRef}
+      ariaLabel="Disk details"
+      title="Disks"
+      icon={<HardDrive size={16} />}
+      headerActions={
         <label className="toggle-row">
           <input
             type="checkbox"
@@ -120,8 +47,9 @@ export function DiskUsagePopover({
           />
           <span>Show hidden filesystems</span>
         </label>
-        <span>{visibleDisks.length}</span>
-      </div>
+      }
+      onClose={onClose}
+    >
       {visibleDisks.length === 0 ? (
         <div className="empty-list">Disk metrics unavailable</div>
       ) : (
@@ -155,10 +83,8 @@ export function DiskUsagePopover({
           ))}
         </div>
       )}
-    </div>
+    </ResourceDetailPopover>
   );
-
-  return createPortal(popover, document.body);
 }
 
 function DiskUsageBar({ value }: { value: number | null }) {

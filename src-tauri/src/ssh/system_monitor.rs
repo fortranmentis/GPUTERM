@@ -253,7 +253,7 @@ fn collect_remote_telemetry(
     }
 }
 
-fn run_remote_command(session: &Session, command: &str) -> Result<String, String> {
+pub(crate) fn run_remote_command(session: &Session, command: &str) -> Result<String, String> {
     let wrapped = format!(
         "timeout {}s sh -lc {}",
         COMMAND_TIMEOUT_SECS,

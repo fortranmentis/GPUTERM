@@ -1094,6 +1094,343 @@ button.telemetry-section:hover {
   background: var(--red);
 }
 
+.resource-detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.resource-detail-title .resource-detail-actions span {
+  margin-left: 0;
+}
+
+.resource-detail-content {
+  max-height: calc(100% - 43px);
+  overflow: auto;
+}
+
+.detail-refreshing {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.resource-unavailable {
+  display: flex;
+  min-height: 150px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.resource-unavailable strong {
+  color: #eef5ff;
+  font-size: 14px;
+}
+
+.resource-unavailable span {
+  max-width: 680px;
+  font-size: 12px;
+}
+
+.resource-detail-summary {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.7fr) minmax(0, 2fr);
+  gap: 16px;
+  padding: 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.resource-primary-metric {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+}
+
+.resource-primary-metric > strong {
+  color: #f1f7ff;
+  font-size: 28px;
+}
+
+.resource-primary-metric > span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resource-primary-metric strong.warning,
+.gpu-gauge-grid strong.warning,
+.resource-metric-grid .warning strong {
+  color: var(--amber);
+}
+
+.resource-primary-metric strong.critical,
+.gpu-gauge-grid strong.critical {
+  color: var(--red);
+}
+
+.resource-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: var(--line-soft);
+}
+
+.resource-metric-grid > div {
+  display: flex;
+  min-width: 0;
+  min-height: 56px;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  padding: 8px 10px;
+  background: #0f1720;
+}
+
+.resource-metric-grid span,
+.resource-metric-grid strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resource-metric-grid span {
+  color: var(--subtle);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.resource-metric-grid strong {
+  color: #e5edf7;
+  font-size: 12px;
+}
+
+.resource-usage-bar {
+  overflow: hidden;
+  height: 6px;
+  border-radius: 999px;
+  background: #1d2734;
+}
+
+.resource-usage-bar > div {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--cyan), var(--green));
+}
+
+.resource-usage-bar.warning > div {
+  background: var(--amber);
+}
+
+.resource-usage-bar.critical > div {
+  background: var(--red);
+}
+
+.logical-core-details {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.logical-core-details summary {
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.logical-core-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.logical-core-grid > div {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 5px;
+  padding: 7px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: #0f1720;
+}
+
+.logical-core-grid span,
+.logical-core-grid strong {
+  font-size: 11px;
+}
+
+.logical-core-grid span {
+  color: var(--subtle);
+}
+
+.logical-core-grid .resource-usage-bar {
+  grid-column: 1 / -1;
+}
+
+.process-table {
+  min-width: 720px;
+  max-height: 270px;
+  overflow: auto;
+}
+
+.process-row {
+  display: grid;
+  align-items: center;
+  gap: 10px;
+  min-height: 32px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.cpu-process-table .process-row {
+  grid-template-columns: 62px 100px 64px 64px 90px minmax(150px, 1fr);
+}
+
+.memory-process-table .process-row {
+  grid-template-columns: 62px 100px 88px 88px 64px minmax(150px, 1fr);
+}
+
+.gpu-process-table .process-row {
+  grid-template-columns: 46px 62px 100px 100px minmax(120px, 0.8fr) minmax(180px, 1.4fr);
+}
+
+.process-row.head {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  background: #111923;
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.process-row span {
+  min-width: 0;
+  overflow: hidden;
+  color: #cbd5e1;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.swap-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.swap-summary strong {
+  color: var(--amber);
+}
+
+.gpu-detail-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 8px 12px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.gpu-detail-tabs button {
+  min-width: 64px;
+  height: 30px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.gpu-detail-tabs button.selected {
+  border-bottom-color: var(--cyan);
+  color: #eef5ff;
+}
+
+.gpu-detail-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.gpu-detail-heading strong {
+  color: #eef5ff;
+  font-size: 14px;
+}
+
+.gpu-detail-heading span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--subtle);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gpu-gauge-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.gpu-gauge-grid > div {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px;
+}
+
+.gpu-gauge-grid span,
+.gpu-gauge-grid strong {
+  font-size: 11px;
+}
+
+.gpu-gauge-grid span {
+  color: var(--subtle);
+}
+
+.gpu-gauge-grid strong {
+  color: #eef5ff;
+}
+
+.gpu-gauge-grid .resource-usage-bar {
+  grid-column: 1 / -1;
+}
+
+.gpu-metric-grid {
+  margin: 0 14px 12px;
+}
+
+@media (max-width: 1180px) {
+  .resource-detail-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .gpu-gauge-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .app-message {
   position: absolute;
   z-index: 5;

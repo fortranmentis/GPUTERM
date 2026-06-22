@@ -8,36 +8,65 @@ import {
   Thermometer,
   Zap,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+  type RefObject,
+} from "react";
+import { CpuUsagePopover } from "./CpuUsagePopover";
 import { DiskUsagePopover } from "./DiskUsagePopover";
+import { GpuUsagePopover } from "./GpuUsagePopover";
+import { MemoryUsagePopover } from "./MemoryUsagePopover";
 import { useSessionStore } from "../stores/sessionStore";
 import type {
   GpuMetric,
   TelemetryDisplayMode,
   TelemetrySettings,
 } from "../types/gpu";
+import type {
+  ResourceDetails,
+  ResourceDetailType,
+} from "../types/resourceDetails";
 import {
   createDiskSummary,
   formatDiskUsagePercent,
 } from "../utils/diskPriority";
 
+type OpenResource = ResourceDetailType | "disk" | null;
+
 export function RemoteTelemetryBar() {
+  const activeSessionId = useSessionStore((state) => state.activeSessionId);
   const connected = useSessionStore((state) => state.connected);
   const telemetry = useSessionStore((state) => state.remoteTelemetry);
   const settings = useSessionStore((state) => state.telemetrySettings);
-  const setTelemetrySettings = useSessionStore(
-    (state) => state.setTelemetrySettings,
-  );
+  const setTelemetrySettings = useSessionStore((state) => state.setTelemetrySettings);
   const setMessage = useSessionStore((state) => state.setMessage);
-  const [diskDetailsOpen, setDiskDetailsOpen] = useState(false);
+  const [openResource, setOpenResource] = useState<OpenResource>(null);
+  const [resourceDetails, setResourceDetails] = useState<ResourceDetails | null>(null);
+  const [detailsLoading, setDetailsLoading] = useState(false);
+  const [detailsRequestError, setDetailsRequestError] = useState<string | null>(null);
+  const [selectedGpuUuid, setSelectedGpuUuid] = useState<string | null>(null);
+  const cpuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const memoryButtonRef = useRef<HTMLButtonElement | null>(null);
+  const gpuButtonRef = useRef<HTMLElement | null>(null);
+  const gpuAnchorUuidRef = useRef<string | null>(null);
   const diskButtonRef = useRef<HTMLButtonElement | null>(null);
-  const [ignoreDraft, setIgnoreDraft] = useState(
-    settings.diskIgnoreFsTypes.join(", "),
-  );
+  const [ignoreDraft, setIgnoreDraft] = useState(settings.diskIgnoreFsTypes.join(", "));
 
   useEffect(() => {
     setIgnoreDraft(settings.diskIgnoreFsTypes.join(", "));
   }, [settings.diskIgnoreFsTypes]);
+
+  useEffect(() => {
+    setSelectedGpuUuid(null);
+    gpuAnchorUuidRef.current = null;
+    setResourceDetails(null);
+    setOpenResource(null);
+  }, [activeSessionId]);
 
   const showSystem = settings.displayMode !== "gpu-only";
   const showGpu = settings.displayMode !== "system-only";
@@ -45,6 +74,64 @@ export function RemoteTelemetryBar() {
     () => createDiskSummary(telemetry?.disks ?? [], 2, settings.diskIgnoreFsTypes),
     [settings.diskIgnoreFsTypes, telemetry?.disks],
   );
+
+  useEffect(() => {
+    if (!connected) {
+      setOpenResource(null);
+    } else if (!showSystem && ["cpu", "memory", "disk"].includes(openResource ?? "")) {
+      setOpenResource(null);
+    } else if (!showGpu && openResource === "gpu") {
+      setOpenResource(null);
+    }
+  }, [connected, openResource, showGpu, showSystem]);
+
+  useEffect(() => {
+    if (!connected || !activeSessionId || !openResource || openResource === "disk") {
+      setResourceDetails(null);
+      setDetailsLoading(false);
+      setDetailsRequestError(null);
+      return;
+    }
+
+    let disposed = false;
+    let inFlight = false;
+    setResourceDetails(null);
+    setDetailsRequestError(null);
+
+    const loadDetails = async () => {
+      if (inFlight) {
+        return;
+      }
+      inFlight = true;
+      setDetailsLoading(true);
+      try {
+        const details = await invoke<ResourceDetails>("get_resource_details", {
+          sessionId: activeSessionId,
+          resourceType: openResource,
+        });
+        if (!disposed) {
+          setResourceDetails(details);
+          setDetailsRequestError(null);
+        }
+      } catch (error) {
+        if (!disposed) {
+          setDetailsRequestError(String(error));
+        }
+      } finally {
+        inFlight = false;
+        if (!disposed) {
+          setDetailsLoading(false);
+        }
+      }
+    };
+
+    void loadDetails();
+    const timer = window.setInterval(loadDetails, 3_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [activeSessionId, connected, openResource]);
 
   const updateSettings = async (nextSettings: TelemetrySettings) => {
     setTelemetrySettings(nextSettings);
@@ -59,13 +146,31 @@ export function RemoteTelemetryBar() {
   };
 
   const applyIgnoredFsTypes = () => {
-    updateSettings({
+    void updateSettings({
       ...settings,
       diskIgnoreFsTypes: ignoreDraft
         .split(",")
         .map((item) => item.trim())
         .filter(Boolean),
     });
+  };
+
+  const openDetail = (resource: OpenResource) => {
+    setOpenResource((current) => (current === resource ? null : resource));
+  };
+
+  const openGpuDetail = (
+    event: ReactMouseEvent<HTMLButtonElement>,
+    gpuUuid: string | null,
+  ) => {
+    gpuButtonRef.current = event.currentTarget;
+    const reopeningFromSameCard =
+      openResource !== "gpu" && gpuAnchorUuidRef.current === gpuUuid;
+    if (gpuUuid && !reopeningFromSameCard) {
+      setSelectedGpuUuid(gpuUuid);
+    }
+    gpuAnchorUuidRef.current = gpuUuid;
+    setOpenResource("gpu");
   };
 
   return (
@@ -80,16 +185,14 @@ export function RemoteTelemetryBar() {
           <select
             value={settings.telemetryIntervalSecs}
             onChange={(event) =>
-              updateSettings({
+              void updateSettings({
                 ...settings,
                 telemetryIntervalSecs: Number(event.target.value) as 1 | 2 | 5 | 10,
               })
             }
           >
             {[1, 2, 5, 10].map((value) => (
-              <option value={value} key={value}>
-                {value}s
-              </option>
+              <option value={value} key={value}>{value}s</option>
             ))}
           </select>
         </label>
@@ -98,7 +201,7 @@ export function RemoteTelemetryBar() {
           <select
             value={settings.displayMode}
             onChange={(event) =>
-              updateSettings({
+              void updateSettings({
                 ...settings,
                 displayMode: event.target.value as TelemetryDisplayMode,
               })
@@ -116,88 +219,69 @@ export function RemoteTelemetryBar() {
             onChange={(event) => setIgnoreDraft(event.target.value)}
             onBlur={applyIgnoredFsTypes}
             onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                applyIgnoredFsTypes();
-              }
+              if (event.key === "Enter") applyIgnoredFsTypes();
             }}
           />
         </label>
       </div>
 
-      {!connected && (
-        <div className="telemetry-unavailable">Remote telemetry unavailable</div>
-      )}
-      {connected && !telemetry && (
-        <div className="telemetry-unavailable">Waiting for remote telemetry</div>
-      )}
+      {!connected && <div className="telemetry-unavailable">Remote telemetry unavailable</div>}
+      {connected && !telemetry && <div className="telemetry-unavailable">Waiting for remote telemetry</div>}
 
       {connected && telemetry && showSystem && (
         <>
-          <TelemetrySection title="CPU" icon={<Cpu size={16} />}>
+          <TelemetryButton
+            buttonRef={cpuButtonRef}
+            title="CPU"
+            icon={<Cpu size={16} />}
+            expanded={openResource === "cpu"}
+            onClick={() => openDetail("cpu")}
+          >
             {telemetry.cpu ? (
               <>
                 <strong>{formatPercent(telemetry.cpu.usagePercent)}</strong>
-                <span>
-                  Load {formatNumber(telemetry.cpu.loadAvg1)} /{" "}
-                  {formatNumber(telemetry.cpu.loadAvg5)} /{" "}
-                  {formatNumber(telemetry.cpu.loadAvg15)}
-                </span>
-                <span>
-                  {formatCores(telemetry.cpu.onlineCores, telemetry.cpu.totalCores)} |{" "}
-                  {formatGhz(telemetry.cpu.avgClockGhz)}
-                </span>
-                <small title={telemetry.cpu.modelName ?? undefined}>
-                  {telemetry.cpu.modelName ?? "CPU model unavailable"}
-                </small>
+                <span>Load {formatNumber(telemetry.cpu.loadAvg1)} / {formatNumber(telemetry.cpu.loadAvg5)} / {formatNumber(telemetry.cpu.loadAvg15)}</span>
+                <span>{formatCores(telemetry.cpu.onlineCores, telemetry.cpu.totalCores)} | {formatGhz(telemetry.cpu.avgClockGhz)}</span>
+                <small title={telemetry.cpu.modelName ?? undefined}>{telemetry.cpu.modelName ?? "CPU model unavailable"}</small>
               </>
             ) : (
               <span>{telemetry.errors.cpu ?? "CPU unavailable"}</span>
             )}
-          </TelemetrySection>
+          </TelemetryButton>
 
-          <TelemetrySection title="RAM" icon={<MemoryStick size={16} />}>
+          <TelemetryButton
+            buttonRef={memoryButtonRef}
+            title="RAM"
+            icon={<MemoryStick size={16} />}
+            expanded={openResource === "memory"}
+            onClick={() => openDetail("memory")}
+          >
             {telemetry.memory ? (
               <>
-                <strong>
-                  {formatGiBFromMiB(telemetry.memory.usedMiB)} /{" "}
-                  {formatGiBFromMiB(telemetry.memory.totalMiB)}
-                </strong>
-                <span>
-                  Available {formatGiBFromMiB(telemetry.memory.availableMiB)}
-                </span>
-                <span>
-                  Swap {formatGiBFromMiB(telemetry.memory.swapUsedMiB)} /{" "}
-                  {formatGiBFromMiB(telemetry.memory.swapTotalMiB)}
-                </span>
+                <strong>{formatGiBFromMiB(telemetry.memory.usedMiB)} / {formatGiBFromMiB(telemetry.memory.totalMiB)}</strong>
+                <span>Available {formatGiBFromMiB(telemetry.memory.availableMiB)}</span>
+                <span>Swap {formatGiBFromMiB(telemetry.memory.swapUsedMiB)} / {formatGiBFromMiB(telemetry.memory.swapTotalMiB)}</span>
                 <MiniBar value={telemetry.memory.usagePercent} />
               </>
             ) : (
               <span>{telemetry.errors.memory ?? "Memory unavailable"}</span>
             )}
-          </TelemetrySection>
+          </TelemetryButton>
 
           <button
             ref={diskButtonRef}
             className="telemetry-section disk-section"
             type="button"
-            aria-expanded={diskDetailsOpen}
-            onClick={() => setDiskDetailsOpen((open) => !open)}
+            aria-expanded={openResource === "disk"}
+            onClick={() => openDetail("disk")}
           >
-            <div className="telemetry-section-title">
-              <HardDrive size={16} />
-              <span>Disk</span>
-            </div>
+            <div className="telemetry-section-title"><HardDrive size={16} /><span>Disk</span></div>
             {diskSummary.visible.length > 0 ? (
               <div className="disk-summary-compact">
                 {diskSummary.visible.map((disk) => (
-                  <span key={`${disk.filesystem}:${disk.mountPoint}`}>
-                    <strong>{disk.mountPoint}</strong>{" "}
-                    {formatDiskUsagePercent(disk.usagePercent)}
-                  </span>
+                  <span key={`${disk.filesystem}:${disk.mountPoint}`}><strong>{disk.mountPoint}</strong> {formatDiskUsagePercent(disk.usagePercent)}</span>
                 ))}
-                {diskSummary.hiddenCount > 0 && (
-                  <span className="disk-hidden-count">+{diskSummary.hiddenCount}</span>
-                )}
+                {diskSummary.hiddenCount > 0 && <span className="disk-hidden-count">+{diskSummary.hiddenCount}</span>}
               </div>
             ) : (
               <span>{telemetry.errors.disk ?? "Disk unavailable"}</span>
@@ -210,85 +294,125 @@ export function RemoteTelemetryBar() {
         <div className="gpu-telemetry-group">
           {telemetry.gpu.length > 0 ? (
             telemetry.gpu.map((metric) => (
-              <GpuTelemetryCard metric={metric} key={metric.uuid || metric.index} />
+              <GpuTelemetryCard
+                metric={metric}
+                expanded={openResource === "gpu" && selectedGpuUuid === metric.uuid}
+                key={metric.uuid || metric.index}
+                onClick={(event) => openGpuDetail(event, metric.uuid)}
+              />
             ))
           ) : (
-            <TelemetrySection title="GPU" icon={<Gauge size={16} />}>
+            <TelemetryButton
+              buttonRef={gpuButtonRef as RefObject<HTMLButtonElement | null>}
+              title="GPU"
+              icon={<Gauge size={16} />}
+              expanded={openResource === "gpu"}
+              onClick={(event) => openGpuDetail(event, null)}
+            >
               <span>{telemetry.errors.gpu ?? "GPU metrics unavailable"}</span>
-            </TelemetrySection>
+            </TelemetryButton>
           )}
         </div>
       )}
 
-      {diskDetailsOpen && telemetry && (
+      {openResource === "cpu" && (
+        <CpuUsagePopover
+          metric={resourceDetails?.cpu ?? null}
+          error={resourceDetails?.errors.cpu ?? detailsRequestError}
+          loading={detailsLoading}
+          anchorRef={cpuButtonRef}
+          onClose={() => setOpenResource(null)}
+        />
+      )}
+      {openResource === "memory" && (
+        <MemoryUsagePopover
+          metric={resourceDetails?.memory ?? null}
+          error={resourceDetails?.errors.memory ?? detailsRequestError}
+          loading={detailsLoading}
+          anchorRef={memoryButtonRef}
+          onClose={() => setOpenResource(null)}
+        />
+      )}
+      {openResource === "gpu" && (
+        <GpuUsagePopover
+          metrics={resourceDetails?.gpus ?? []}
+          selectedGpuUuid={selectedGpuUuid}
+          onSelectedGpuUuidChange={setSelectedGpuUuid}
+          error={resourceDetails?.errors.gpu ?? detailsRequestError}
+          loading={detailsLoading}
+          anchorRef={gpuButtonRef}
+          onClose={() => setOpenResource(null)}
+        />
+      )}
+      {openResource === "disk" && telemetry && (
         <DiskUsagePopover
           disks={telemetry.disks}
           ignoredFsTypes={settings.diskIgnoreFsTypes}
           anchorRef={diskButtonRef}
-          onClose={() => setDiskDetailsOpen(false)}
+          onClose={() => setOpenResource(null)}
         />
       )}
     </footer>
   );
 }
 
-function TelemetrySection({
+function TelemetryButton({
+  buttonRef,
   title,
   icon,
+  expanded,
+  onClick,
   children,
 }: {
+  buttonRef: RefObject<HTMLButtonElement | null>;
   title: string;
   icon: ReactNode;
+  expanded: boolean;
+  onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   children: ReactNode;
 }) {
   return (
-    <section className="telemetry-section">
-      <div className="telemetry-section-title">
-        {icon}
-        <span>{title}</span>
-      </div>
+    <button
+      ref={buttonRef}
+      className="telemetry-section"
+      type="button"
+      aria-expanded={expanded}
+      onClick={onClick}
+    >
+      <div className="telemetry-section-title">{icon}<span>{title}</span></div>
       <div className="telemetry-section-body">{children}</div>
-    </section>
+    </button>
   );
 }
 
-function GpuTelemetryCard({ metric }: { metric: GpuMetric }) {
-  const memoryPercent =
-    metric.memoryTotalMiB && metric.memoryUsedMiB != null
-      ? (metric.memoryUsedMiB / metric.memoryTotalMiB) * 100
-      : null;
-
+function GpuTelemetryCard({
+  metric,
+  expanded,
+  onClick,
+}: {
+  metric: GpuMetric;
+  expanded: boolean;
+  onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+}) {
+  const memoryPercent = metric.memoryTotalMiB && metric.memoryUsedMiB != null
+    ? metric.memoryUsedMiB / metric.memoryTotalMiB * 100
+    : null;
   return (
-    <section className="telemetry-section gpu-section">
-      <div className="telemetry-section-title">
-        <Gauge size={16} />
-        <span>GPU{metric.index}</span>
-      </div>
+    <button className="telemetry-section gpu-section" type="button" aria-expanded={expanded} onClick={onClick}>
+      <div className="telemetry-section-title"><Gauge size={16} /><span>GPU{metric.index}</span></div>
       <div className="telemetry-section-body">
         <strong title={metric.name}>{metric.name}</strong>
-        <span>
-          {formatPercent(metric.gpuUtilPercent)} | VRAM{" "}
-          {formatGiBFromMiB(metric.memoryUsedMiB)} /{" "}
-          {formatGiBFromMiB(metric.memoryTotalMiB)}
-        </span>
-        <span>
-          <Zap size={13} /> {formatWatts(metric.powerDrawW)} /{" "}
-          {formatWatts(metric.powerLimitW)}
-          <Thermometer size={13} /> {formatTemperature(metric.temperatureC)}
-        </span>
+        <span>{formatPercent(metric.gpuUtilPercent)} | VRAM {formatGiBFromMiB(metric.memoryUsedMiB)} / {formatGiBFromMiB(metric.memoryTotalMiB)}</span>
+        <span><Zap size={13} /> {formatWatts(metric.powerDrawW)} / {formatWatts(metric.powerLimitW)} <Thermometer size={13} /> {formatTemperature(metric.temperatureC)}</span>
         <MiniBar value={memoryPercent} />
       </div>
-    </section>
+    </button>
   );
 }
 
 function MiniBar({ value }: { value: number | null }) {
   const width = value == null ? 0 : Math.max(0, Math.min(100, value));
-  return (
-    <div className="mini-bar">
-      <div className="mini-bar-fill" style={{ width: `${width}%` }} />
-    </div>
-  );
+  return <div className="mini-bar"><div className="mini-bar-fill" style={{ width: `${width}%` }} /></div>;
 }
 
 function formatPercent(value: number | null | undefined) {
@@ -304,12 +428,8 @@ function formatGhz(value: number | null | undefined) {
 }
 
 function formatCores(online: number | null, total: number | null) {
-  if (online == null && total == null) {
-    return "cores n/a";
-  }
-  if (online != null && total != null && online !== total) {
-    return `${online}/${total} cores`;
-  }
+  if (online == null && total == null) return "cores n/a";
+  if (online != null && total != null && online !== total) return `${online}/${total} cores`;
   return `${total ?? online} cores`;
 }
 
@@ -322,8 +442,6 @@ function formatTemperature(value: number | null) {
 }
 
 function formatGiBFromMiB(value: number | null) {
-  if (value == null) {
-    return "n/a";
-  }
+  if (value == null) return "n/a";
   return `${(value / 1024).toFixed(value >= 10 * 1024 ? 1 : 2)} GiB`;
 }

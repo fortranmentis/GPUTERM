@@ -1,6 +1,6 @@
 [package]
 name = "gputerm"
-version = "1.0.1-beta"
+version = "1.0.2-beta"
 description = "GpuTerm desktop SSH/SFTP client with GPU monitoring"
 authors = ["GpuTerm"]
 license = "MIT"
