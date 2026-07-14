@@ -2,18 +2,22 @@
 
 GpuTerm is a Tauri + React + TypeScript + Rust desktop MVP for managing SSH/SFTP sessions to GPU servers. It is shaped like an all-in-one SSH client, with a remote telemetry status bar that polls CPU, memory, disk, and NVIDIA GPU health through SSH.
 
+Current prerelease: [`v1.0.3-beta`](https://github.com/fortranmentis/GPUTERM/releases/tag/v1.0.3-beta)
+
 ## Features
 
 - Local SSH session profiles with host, port, username, and private key path.
 - Passwords are accepted for connection attempts but are not written to local JSON.
 - xterm.js terminal connected to a Rust `ssh2` PTY shell.
 - Terminal resize propagation from xterm to the remote PTY.
+- Buffered UTF-8 terminal output so multibyte characters remain intact across SSH read chunks.
 - SFTP directory browsing, upload, download, delete, and mkdir commands.
 - SFTP drag-and-drop upload/download with transfer queue progress.
-- SFTP transfer progress event payloads for large file workflows.
+- Chunked SFTP transfers with progress events, per-file cancellation, and safe temporary downloads.
 - Remote telemetry monitor that polls Linux CPU, memory, disk, and NVIDIA GPU metrics on a separate SSH session.
 - Configurable telemetry interval, display mode, and ignored disk filesystem types.
-- Trust-on-first-use `known_hosts.json` structure with host key mismatch detection.
+- Explicit trust-on-first-use host key prompt with SHA-256 fingerprint and mismatch blocking.
+- Tauri content security policy for production and development windows.
 
 ## Project Structure
 
@@ -24,17 +28,23 @@ src/
     SessionSidebar.tsx
     SftpBrowser.tsx
     TerminalPane.tsx
+  hooks/
+    useDisconnectSession.ts
   stores/
     sessionStore.ts
   types/
     gpu.ts
     session.ts
+  utils/
+    format.ts
 src-tauri/
   src/
     ssh/
       credentials.rs
       gpu_monitor.rs
       mod.rs
+      parse_util.rs
+      resource_details.rs
       session.rs
       sftp.rs
       system_monitor.rs
@@ -161,7 +171,8 @@ Session notes:
 
 - Passwords are used only for the active connection and are not saved.
 - Private key file contents are not stored; only the path is saved.
-- Host key fingerprints are stored after the first successful trust-on-first-use connection.
+- On first contact, GpuTerm displays the server's SHA-256 host key fingerprint and asks whether to trust it.
+- Approved fingerprints are saved to `known_hosts.json`; later mismatches block the connection.
 
 Use the SSH terminal:
 
@@ -187,6 +198,8 @@ Transfer notes:
 - Multiple files can be dropped at once.
 - File transfers are streamed in 1 MiB chunks instead of loading the whole file into memory.
 - The transfer queue shows filename, direction, source path, target path, progress, status, and per-file errors.
+- Running transfers can be canceled independently from the transfer queue.
+- Downloads are written to a temporary file and renamed only after success, so failed or canceled transfers do not leave a partial target file.
 - If a target file already exists, GpuTerm asks whether to overwrite it before starting that file transfer.
 - Directory drag-and-drop is detected but not transferred in the MVP.
 
@@ -224,6 +237,7 @@ SSH authentication fails:
 
 - Check host, port, username, password, and private key path.
 - Ensure the remote server allows password or public key authentication.
+- On first contact, compare the displayed SHA-256 fingerprint with a trusted server-side source before accepting it.
 - If the host key changed, remove the stale entry from `known_hosts.json` only after verifying the server fingerprint.
 
 SFTP local browsing fails:
@@ -245,9 +259,11 @@ The frontend calls Tauri commands through `@tauri-apps/api/core` and receives st
 - `connect_terminal` opens an SSH connection, creates a PTY, starts a shell, and emits `terminal-output`.
 - `terminal_write` sends xterm input to the SSH channel.
 - `terminal_resize` updates remote PTY dimensions.
+- Terminal output keeps incomplete UTF-8 byte sequences between reads so split multibyte characters are reconstructed correctly.
 - `system_monitor::start` opens a separate SSH connection so telemetry polling cannot break or block the terminal.
 - Telemetry emits `remote-telemetry`, which contains CPU, memory, disk, GPU, and per-section errors in one payload.
 - SFTP commands open separate SSH/SFTP sessions using the active in-memory credentials and emit `sftp-progress` during transfers.
+- `cancel_transfer` signals the matching chunked transfer without stopping other queued files or the terminal session.
 - The SFTP local panel uses Tauri's native folder picker for the local path and stores the last selected directory in app settings.
 
 Session profiles are stored in the user config directory:
@@ -256,7 +272,7 @@ Session profiles are stored in the user config directory:
 - macOS: `~/Library/Application Support/GpuTerm/sessions.json`
 - Linux: `$XDG_CONFIG_HOME/GpuTerm/sessions.json` or `~/.config/GpuTerm/sessions.json`
 
-Host key fingerprints are stored in `known_hosts.json` in the same directory. The MVP uses trust-on-first-use: the first fingerprint is saved, and later mismatches are blocked with a clear error.
+Host key fingerprints are stored in `known_hosts.json` in the same directory. The first connection pauses for explicit approval of the SHA-256 fingerprint. Approved fingerprints are saved, and later mismatches are blocked with a clear error.
 
 The most recent SFTP local directory is stored as `recentLocalPath` in `app_settings.json` in the same config directory. Passwords and private key contents are never written to this settings file.
 
@@ -267,6 +283,8 @@ The SFTP panel has a `Browse...` button next to the local path field. It opens t
 Downloads are saved into the selected local directory. Uploads use the selected local file from the local file list and send it to the current remote directory. Paths are passed through platform-native strings so Windows, macOS, and Linux separators are preserved.
 
 The same upload/download paths are used by drag-and-drop. Dropping local files on the remote SFTP panel uploads them to the current remote directory. Dropping remote files on the local panel downloads them to the selected local directory. Each dropped file becomes a transfer queue item and reports progress independently.
+
+Transfers use 1 MiB chunks and can be canceled per file. Downloads first write to a temporary sibling file and replace the requested destination only after the complete stream succeeds.
 
 ## Remote Telemetry
 
@@ -359,7 +377,8 @@ The Rust backend parses CSV rows into the frontend `GpuMetric` type and includes
 - Passwords are held only in memory for active connections.
 - Private key file contents are never read into app settings.
 - `CredentialStore` is split into an interface and in-memory implementation so Windows Credential Manager, macOS Keychain, or Linux Secret Service can be added later.
-- Host key mismatch is reported and blocks the connection.
+- Unknown host keys require explicit user approval of the SHA-256 fingerprint; host key mismatches are reported and block the connection.
+- The Tauri window uses a restrictive content security policy, with only the local IPC and development server endpoints enabled where required.
 
 ## License
 
@@ -372,7 +391,7 @@ This project uses third-party open-source dependencies, including Tauri, React, 
 - Only one active terminal session is fully wired in the MVP, though the command and state shape use session IDs for future tabs.
 - Keyboard-interactive SSH authentication is not implemented yet.
 - SFTP local browsing is directory based; recursive upload/download and directory drag-and-drop are not implemented yet.
-- Transfer cancellation has a backend command placeholder, but active SFTP stream cancellation is not wired in the MVP.
+- Interrupted SFTP transfers cannot be resumed; they must be restarted.
 - SFTP commands currently open fresh SSH sessions for reliability; pooled SFTP channels can be added later.
 - The known_hosts MVP stores SHA-256 fingerprints in JSON, not OpenSSH known_hosts format.
 - System telemetry is Linux-first and depends on `/proc`, `nproc`, `lscpu`, and GNU/POSIX-style `df`.
