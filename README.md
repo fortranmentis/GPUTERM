@@ -1,5 +1,7 @@
 # GpuTerm
 
+[English](./README.md) | [한국어](./README.ko.md)
+
 GpuTerm is a Tauri + React + TypeScript + Rust desktop MVP for managing SSH/SFTP sessions to GPU servers. It is shaped like an all-in-one SSH client, with a remote telemetry status bar that polls CPU, memory, disk, and NVIDIA GPU health through SSH.
 
 Current prerelease: [`v1.0.3-beta`](https://github.com/fortranmentis/GPUTERM/releases/tag/v1.0.3-beta)
