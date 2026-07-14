@@ -259,6 +259,41 @@ describe("RemoteTelemetryBar disk summary", () => {
     expect(screen.getByText(/ps permission denied/i)).toBeInTheDocument();
   });
 
+  it("polls resource details on the configured telemetry interval", async () => {
+    const detailCalls = () =>
+      mockInvoke.mock.calls.filter(([command]) => command === "get_resource_details").length;
+    useSessionStore.setState({
+      telemetrySettings: {
+        telemetryIntervalSecs: 5,
+        displayMode: "gpu-system",
+        diskIgnoreFsTypes: [],
+      },
+    });
+    vi.useFakeTimers();
+    try {
+      render(<RemoteTelemetryBar />);
+      fireEvent.click(screen.getByRole("button", { name: /cpu/i }));
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(detailCalls()).toBe(1);
+
+      await act(async () => {
+        vi.advanceTimersByTime(3_000);
+        await Promise.resolve();
+      });
+      expect(detailCalls()).toBe(1);
+
+      await act(async () => {
+        vi.advanceTimersByTime(2_000);
+        await Promise.resolve();
+      });
+      expect(detailCalls()).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("clears the previous GPU selection when the active session changes", async () => {
     const sessionOneGpu0 = {
       ...resourceDetails.gpus[0],

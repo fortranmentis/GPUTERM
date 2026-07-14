@@ -5,6 +5,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { Terminal as TerminalIcon, X } from "lucide-react";
 import { useSessionStore } from "../stores/sessionStore";
+import { useDisconnectSession } from "../hooks/useDisconnectSession";
 
 type TerminalOutputPayload = {
   sessionId: string;
@@ -15,24 +16,31 @@ export function TerminalPane() {
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
   const connected = useSessionStore((state) => state.connected);
   const sessions = useSessionStore((state) => state.sessions);
-  const setConnected = useSessionStore((state) => state.setConnected);
-  const setActiveSession = useSessionStore((state) => state.setActiveSession);
-  const setRemoteTelemetry = useSessionStore((state) => state.setRemoteTelemetry);
   const setMessage = useSessionStore((state) => state.setMessage);
   const terminalHostRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const activeSessionRef = useRef<string | null>(activeSessionId);
   const connectedRef = useRef(connected);
+  const lastSessionRef = useRef<string | null>(activeSessionId);
+  const wasConnectedRef = useRef(connected);
+  const fitTimerRef = useRef<number | null>(null);
 
   const activeProfile =
     sessions.find((session) => session.id === activeSessionId) ?? null;
 
   useEffect(() => {
+    const sessionChanged = activeSessionId !== lastSessionRef.current;
+    const reconnected = connected && !wasConnectedRef.current;
+    lastSessionRef.current = activeSessionId;
+    wasConnectedRef.current = connected;
     activeSessionRef.current = activeSessionId;
     connectedRef.current = connected;
+    if (terminalRef.current && (sessionChanged || reconnected)) {
+      terminalRef.current.reset();
+    }
     if (terminalRef.current && connected) {
-      setTimeout(() => fitAndResize(), 60);
+      scheduleFit(60);
       terminalRef.current.focus();
     }
   }, [activeSessionId, connected]);
@@ -91,12 +99,16 @@ export function TerminalPane() {
     });
 
     const resizeObserver = new ResizeObserver(() => {
-      setTimeout(() => fitAndResize(), 20);
+      scheduleFit(20);
     });
     resizeObserver.observe(terminalHostRef.current);
-    setTimeout(() => fitAndResize(), 60);
+    scheduleFit(60);
 
     return () => {
+      if (fitTimerRef.current != null) {
+        window.clearTimeout(fitTimerRef.current);
+        fitTimerRef.current = null;
+      }
       dataDisposable.dispose();
       resizeObserver.disconnect();
       terminal.dispose();
@@ -127,6 +139,16 @@ export function TerminalPane() {
     };
   }, []);
 
+  const scheduleFit = (delayMs: number) => {
+    if (fitTimerRef.current != null) {
+      window.clearTimeout(fitTimerRef.current);
+    }
+    fitTimerRef.current = window.setTimeout(() => {
+      fitTimerRef.current = null;
+      fitAndResize();
+    }, delayMs);
+  };
+
   const fitAndResize = () => {
     const terminal = terminalRef.current;
     const fitAddon = fitAddonRef.current;
@@ -148,20 +170,7 @@ export function TerminalPane() {
     }
   };
 
-  const disconnect = async () => {
-    if (!activeSessionId) {
-      return;
-    }
-    try {
-      await invoke("disconnect_terminal", { sessionId: activeSessionId });
-      setConnected(false);
-      setActiveSession(null);
-      setRemoteTelemetry(null);
-      setMessage({ kind: "info", text: "Disconnected" });
-    } catch (error) {
-      setMessage({ kind: "error", text: String(error) });
-    }
-  };
+  const disconnect = useDisconnectSession();
 
   return (
     <div className="terminal-pane">

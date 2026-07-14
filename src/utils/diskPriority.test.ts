@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { DiskMetric } from "../types/gpu";
 import {
   createDiskSummary,
+  filterDisksByFsType,
   formatDiskUsagePercent,
   sortDisksByPriority,
 } from "./diskPriority";
@@ -49,5 +50,20 @@ describe("disk priority utilities", () => {
 
   it("formats null usage percent as ?", () => {
     expect(formatDiskUsagePercent(null)).toBe("?");
+  });
+
+  it("filters user-supplied fs types case-insensitively", () => {
+    const nfsDisk = { ...disk("/mnt/share"), fsType: "NFS" };
+    const filtered = filterDisksByFsType([disk("/"), nfsDisk], ["nfs"]);
+
+    expect(filtered.map((item) => item.mountPoint)).toEqual(["/"]);
+  });
+
+  it("honors added fs types in the disk summary", () => {
+    const tmpDisk = { ...disk("/run"), fsType: "tmpfs" };
+    const summary = createDiskSummary([disk("/"), tmpDisk], 2, ["tmpfs"]);
+
+    expect(summary.visible.map((item) => item.mountPoint)).toEqual(["/"]);
+    expect(summary.hiddenCount).toBe(0);
   });
 });

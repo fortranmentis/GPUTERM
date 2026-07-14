@@ -157,4 +157,32 @@ describe("GpuUsagePopover", () => {
     expect(screen.queryByRole("tablist", { name: "GPU selector" })).not.toBeInTheDocument();
     expect(screen.queryByText("Driver")).not.toBeInTheDocument();
   });
+
+  it("renders processes without GPU identity or with duplicate pids without key collisions", () => {
+    const anonymousProcess = {
+      gpuIndex: null,
+      gpuUuid: null,
+      pid: 4242,
+      user: "alice",
+      processName: "shared-worker",
+      command: "python shared.py",
+      usedMemoryMiB: 512,
+    };
+    const gpuWithAnonymousProcesses = {
+      ...gpu0,
+      processes: [anonymousProcess, { ...anonymousProcess, usedMemoryMiB: 256 }],
+    };
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      render(<Harness metrics={[gpuWithAnonymousProcesses]} initialGpuUuid={gpu0.uuid} />);
+
+      expect(screen.getAllByText("shared-worker")).toHaveLength(2);
+      const keyWarnings = consoleError.mock.calls.filter((call) =>
+        String(call[0]).includes("same key"),
+      );
+      expect(keyWarnings).toHaveLength(0);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
 });

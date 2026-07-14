@@ -1,5 +1,6 @@
 import { FormEvent, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import {
   KeyRound,
   PlugZap,
@@ -9,6 +10,7 @@ import {
   Unplug,
 } from "lucide-react";
 import { useSessionStore } from "../stores/sessionStore";
+import { useDisconnectSession } from "../hooks/useDisconnectSession";
 import type {
   SessionConnectRequest,
   SessionProfile,
@@ -35,6 +37,43 @@ const blankForm: SessionForm = {
   privateKeyPath: "",
 };
 
+const UNKNOWN_HOST_KEY_PREFIX = "UNKNOWN_HOST_KEY:";
+
+/**
+ * Runs an SSH action; when the backend reports an unknown host key, shows the
+ * fingerprint to the user and retries once after they choose to trust it.
+ */
+async function withHostKeyPrompt<T>(action: () => Promise<T>): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    const text = String(error);
+    const prefixIndex = text.indexOf(UNKNOWN_HOST_KEY_PREFIX);
+    if (prefixIndex < 0) {
+      throw error;
+    }
+    const payload = text.slice(prefixIndex + UNKNOWN_HOST_KEY_PREFIX.length).trim();
+    const separator = payload.indexOf("|");
+    const fingerprint = payload.slice(0, separator);
+    const hostKey = payload.slice(separator + 1);
+    const portIndex = hostKey.lastIndexOf(":");
+    if (separator <= 0 || portIndex <= 0) {
+      throw error;
+    }
+    const host = hostKey.slice(0, portIndex);
+    const port = Number(hostKey.slice(portIndex + 1));
+    const trusted = await confirm(
+      `First connection to ${hostKey}.\n\nSHA256 host key fingerprint:\n${fingerprint}\n\nTrust this host?`,
+      { title: "Unknown host key", kind: "warning" },
+    );
+    if (!trusted) {
+      throw new Error(`Connection canceled: ${hostKey} was not trusted`);
+    }
+    await invoke("trust_host_key", { host, port, fingerprint });
+    return await action();
+  }
+}
+
 export function SessionSidebar() {
   const sessions = useSessionStore((state) => state.sessions);
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
@@ -44,6 +83,7 @@ export function SessionSidebar() {
   const setConnected = useSessionStore((state) => state.setConnected);
   const setMessage = useSessionStore((state) => state.setMessage);
   const setRemoteTelemetry = useSessionStore((state) => state.setRemoteTelemetry);
+  const disconnectSession = useDisconnectSession();
   const [form, setForm] = useState<SessionForm>(blankForm);
   const [busy, setBusy] = useState(false);
 
@@ -96,9 +136,11 @@ export function SessionSidebar() {
     setBusy(true);
     try {
       validate();
-      const info = await invoke<TerminalSessionInfo>("connect_terminal", {
-        request: toRequest(),
-      });
+      const info = await withHostKeyPrompt(() =>
+        invoke<TerminalSessionInfo>("connect_terminal", {
+          request: toRequest(),
+        }),
+      );
       setActiveSession(info.sessionId);
       setConnected(true);
       setRemoteTelemetry(null);
@@ -127,9 +169,11 @@ export function SessionSidebar() {
     setBusy(true);
     try {
       validate();
-      const result = await invoke<string>("test_ssh_connection", {
-        request: toRequest(),
-      });
+      const result = await withHostKeyPrompt(() =>
+        invoke<string>("test_ssh_connection", {
+          request: toRequest(),
+        }),
+      );
       setMessage({ kind: "success", text: result });
     } catch (error) {
       setMessage({ kind: "error", text: String(error) });
@@ -195,13 +239,7 @@ export function SessionSidebar() {
     }
     setBusy(true);
     try {
-      await invoke("disconnect_terminal", { sessionId: activeSessionId });
-      setConnected(false);
-      setActiveSession(null);
-      setRemoteTelemetry(null);
-      setMessage({ kind: "info", text: "Disconnected" });
-    } catch (error) {
-      setMessage({ kind: "error", text: String(error) });
+      await disconnectSession();
     } finally {
       setBusy(false);
     }

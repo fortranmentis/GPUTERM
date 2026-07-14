@@ -35,6 +35,15 @@ import {
   createDiskSummary,
   formatDiskUsagePercent,
 } from "../utils/diskPriority";
+import {
+  formatCoreCount,
+  formatGhz,
+  formatGiBFromMiB,
+  formatNumber,
+  formatPercent,
+  formatTemperature,
+  formatWatts,
+} from "../utils/format";
 
 type OpenResource = ResourceDetailType | "disk" | null;
 
@@ -126,12 +135,13 @@ export function RemoteTelemetryBar() {
     };
 
     void loadDetails();
-    const timer = window.setInterval(loadDetails, 3_000);
+    const intervalMs = Math.max(1, settings.telemetryIntervalSecs) * 1000;
+    const timer = window.setInterval(loadDetails, intervalMs);
     return () => {
       disposed = true;
       window.clearInterval(timer);
     };
-  }, [activeSessionId, connected, openResource]);
+  }, [activeSessionId, connected, openResource, settings.telemetryIntervalSecs]);
 
   const updateSettings = async (nextSettings: TelemetrySettings) => {
     setTelemetrySettings(nextSettings);
@@ -241,7 +251,7 @@ export function RemoteTelemetryBar() {
               <>
                 <strong>{formatPercent(telemetry.cpu.usagePercent)}</strong>
                 <span>Load {formatNumber(telemetry.cpu.loadAvg1)} / {formatNumber(telemetry.cpu.loadAvg5)} / {formatNumber(telemetry.cpu.loadAvg15)}</span>
-                <span>{formatCores(telemetry.cpu.onlineCores, telemetry.cpu.totalCores)} | {formatGhz(telemetry.cpu.avgClockGhz)}</span>
+                <span>{formatCoreCount(telemetry.cpu.onlineCores, telemetry.cpu.totalCores)} | {formatGhz(telemetry.cpu.avgClockGhz)}</span>
                 <small title={telemetry.cpu.modelName ?? undefined}>{telemetry.cpu.modelName ?? "CPU model unavailable"}</small>
               </>
             ) : (
@@ -415,33 +425,3 @@ function MiniBar({ value }: { value: number | null }) {
   return <div className="mini-bar"><div className="mini-bar-fill" style={{ width: `${width}%` }} /></div>;
 }
 
-function formatPercent(value: number | null | undefined) {
-  return value == null ? "n/a" : `${Math.round(value)}%`;
-}
-
-function formatNumber(value: number | null | undefined) {
-  return value == null ? "n/a" : value.toFixed(2);
-}
-
-function formatGhz(value: number | null | undefined) {
-  return value == null ? "n/a GHz" : `${value.toFixed(1)} GHz`;
-}
-
-function formatCores(online: number | null, total: number | null) {
-  if (online == null && total == null) return "cores n/a";
-  if (online != null && total != null && online !== total) return `${online}/${total} cores`;
-  return `${total ?? online} cores`;
-}
-
-function formatWatts(value: number | null) {
-  return value == null ? "n/a" : `${value.toFixed(0)} W`;
-}
-
-function formatTemperature(value: number | null) {
-  return value == null ? "n/a" : `${value.toFixed(0)} C`;
-}
-
-function formatGiBFromMiB(value: number | null) {
-  if (value == null) return "n/a";
-  return `${(value / 1024).toFixed(value >= 10 * 1024 ? 1 : 2)} GiB`;
-}

@@ -74,7 +74,7 @@ function progressStatus(
   fallback: TransferStatus,
 ): TransferStatus {
   if (payload.error) {
-    return "failed";
+    return payload.error === "Transfer canceled" ? "canceled" : "failed";
   }
   if (payload.done) {
     return "done";

@@ -3,7 +3,7 @@ mod ssh;
 use ssh::local_fs::{list_local_dir, load_app_settings, local_path_exists, update_recent_local_path};
 use ssh::resource_details::get_resource_details;
 use ssh::session::{
-    delete_session, load_sessions, save_session, test_ssh_connection, AppState,
+    delete_session, load_sessions, save_session, test_ssh_connection, trust_host_key, AppState,
 };
 use ssh::sftp::{
     cancel_transfer, sftp_delete, sftp_download_file, sftp_list_dir, sftp_mkdir, sftp_path_exists,
@@ -28,6 +28,7 @@ pub fn run() {
             list_local_dir,
             local_path_exists,
             test_ssh_connection,
+            trust_host_key,
             connect_terminal,
             terminal_write,
             terminal_resize,

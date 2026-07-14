@@ -1,9 +1,12 @@
 use crate::ssh::gpu_monitor::{parse_nvidia_smi_csv, GpuMetric, NVIDIA_SMI_QUERY};
+use crate::ssh::parse_util::{
+    kib_to_mib, parse_average_clock, parse_cpu_model, parse_first_u64, parse_loadavg,
+    parse_lscpu_value, parse_meminfo_values, required_section, split_sections,
+};
 use crate::ssh::session::{open_ssh_session, AppState, SshTarget};
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use ssh2::Session;
-use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -134,6 +137,12 @@ pub fn update_telemetry_settings(
     Ok(settings)
 }
 
+const RECONNECT_BACKOFF_INITIAL: Duration = Duration::from_secs(2);
+const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(60);
+/// Consecutive polls where every section fails before the session is
+/// considered dead and reopened.
+const MAX_TOTAL_FAILURES: u32 = 2;
+
 pub fn start(
     app: AppHandle,
     target: SshTarget,
@@ -141,49 +150,74 @@ pub fn start(
     settings: Arc<Mutex<SystemMonitorSettings>>,
 ) {
     thread::spawn(move || {
-        let session = match open_ssh_session(&target) {
-            Ok(session) => session,
-            Err(error) => {
-                emit_telemetry(
-                    &app,
-                    RemoteTelemetry {
-                        timestamp: timestamp(),
-                        hostname: None,
-                        cpu: None,
-                        memory: None,
-                        disks: Vec::new(),
-                        gpu: Vec::new(),
-                        errors: TelemetryErrors {
-                            cpu: Some(format!(
-                                "Telemetry SSH connection failed: {}",
-                                error
-                            )),
-                            memory: Some("Telemetry SSH connection failed".to_string()),
-                            disk: Some("Telemetry SSH connection failed".to_string()),
-                            gpu: Some("Telemetry SSH connection failed".to_string()),
-                        },
-                    },
-                );
-                return;
-            }
-        };
-        session.set_timeout(COMMAND_TIMEOUT_MS);
-
-        let mut previous_cpu = None;
+        let mut backoff = RECONNECT_BACKOFF_INITIAL;
         while !stop.load(Ordering::SeqCst) {
-            let settings_snapshot = settings
-                .lock()
-                .map(|settings| settings.clone())
-                .unwrap_or_default();
-            let telemetry = collect_remote_telemetry(
-                &session,
-                &settings_snapshot,
-                &mut previous_cpu,
-            );
-            emit_telemetry(&app, telemetry);
-            sleep_with_stop(settings_snapshot.telemetry_interval_secs, &stop);
+            let session = match open_ssh_session(&target) {
+                Ok(session) => session,
+                Err(error) => {
+                    emit_connection_error_telemetry(&app, &error);
+                    sleep_with_stop_duration(backoff, &stop);
+                    backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
+                    continue;
+                }
+            };
+            backoff = RECONNECT_BACKOFF_INITIAL;
+            session.set_timeout(COMMAND_TIMEOUT_MS);
+
+            let mut previous_cpu = None;
+            let mut consecutive_total_failures = 0_u32;
+            while !stop.load(Ordering::SeqCst) {
+                let settings_snapshot = settings
+                    .lock()
+                    .map(|settings| settings.clone())
+                    .unwrap_or_default();
+                let telemetry = collect_remote_telemetry(&session, &mut previous_cpu);
+                consecutive_total_failures = if telemetry_all_failed(&telemetry) {
+                    consecutive_total_failures + 1
+                } else {
+                    0
+                };
+                emit_telemetry(&app, telemetry);
+                if consecutive_total_failures >= MAX_TOTAL_FAILURES {
+                    // Every section failed repeatedly — the transport is
+                    // likely dead. Drop the session and reconnect.
+                    break;
+                }
+                sleep_with_stop(settings_snapshot.telemetry_interval_secs, &stop);
+            }
         }
     });
+}
+
+fn emit_connection_error_telemetry(app: &AppHandle, error: &str) {
+    emit_telemetry(
+        app,
+        RemoteTelemetry {
+            timestamp: timestamp(),
+            hostname: None,
+            cpu: None,
+            memory: None,
+            disks: Vec::new(),
+            gpu: Vec::new(),
+            errors: TelemetryErrors {
+                cpu: Some(format!("Telemetry SSH connection failed: {}", error)),
+                memory: Some("Telemetry SSH connection failed".to_string()),
+                disk: Some("Telemetry SSH connection failed".to_string()),
+                gpu: Some("Telemetry SSH connection failed".to_string()),
+            },
+        },
+    );
+}
+
+fn telemetry_all_failed(telemetry: &RemoteTelemetry) -> bool {
+    telemetry.hostname.is_none()
+        && telemetry.cpu.is_none()
+        && telemetry.memory.is_none()
+        && telemetry.disks.is_empty()
+        && telemetry.gpu.is_empty()
+        && telemetry.errors.cpu.is_some()
+        && telemetry.errors.memory.is_some()
+        && telemetry.errors.disk.is_some()
 }
 
 fn emit_telemetry(app: &AppHandle, telemetry: RemoteTelemetry) {
@@ -192,7 +226,6 @@ fn emit_telemetry(app: &AppHandle, telemetry: RemoteTelemetry) {
 
 fn collect_remote_telemetry(
     session: &Session,
-    _settings: &SystemMonitorSettings,
     previous_cpu: &mut Option<CpuStatSample>,
 ) -> RemoteTelemetry {
     let mut errors = TelemetryErrors::default();
@@ -225,7 +258,9 @@ fn collect_remote_telemetry(
     let disks = match run_remote_command(session, "df -P -T -B1 2>/dev/null")
         .and_then(|output| parse_df_output(&output))
     {
-        Ok(disks) => filter_and_sort_disks(disks, &[]),
+        // The frontend filters by the user's disk_ignore_fs_types setting so the
+        // "show hidden filesystems" toggle can reveal them; the backend only sorts.
+        Ok(disks) => sort_disks(disks),
         Err(error) => {
             errors.disk = Some(error);
             Vec::new()
@@ -312,7 +347,7 @@ pub fn parse_cpu_command_output(
 
     let load = sections
         .get("LOADAVG")
-        .and_then(|content| parse_loadavg(content).ok())
+        .map(|content| parse_loadavg(content))
         .unwrap_or((None, None, None));
     let cpuinfo = sections.get("CPUINFO").map(String::as_str).unwrap_or("");
     let lscpu = sections.get("LSCPU").map(String::as_str).unwrap_or("");
@@ -329,14 +364,14 @@ pub fn parse_cpu_command_output(
         .or(total_cores);
 
     Ok(CpuMetric {
-        model_name: parse_cpu_model_name(cpuinfo).or_else(|| parse_lscpu_value(lscpu, "Model name")),
+        model_name: parse_cpu_model(cpuinfo).or_else(|| parse_lscpu_value(lscpu, "Model name")),
         usage_percent,
         load_avg1: load.0,
         load_avg5: load.1,
         load_avg15: load.2,
         total_cores,
         online_cores,
-        avg_clock_ghz: parse_average_cpu_clock_ghz(cpuinfo)
+        avg_clock_ghz: parse_average_clock(cpuinfo)
             .or_else(|| parse_lscpu_cpu_mhz(lscpu).map(|mhz| mhz / 1000.0)),
     })
 }
@@ -373,18 +408,7 @@ pub fn calculate_cpu_usage(previous: CpuStatSample, current: CpuStatSample) -> O
 }
 
 pub fn parse_meminfo(output: &str) -> Result<MemoryMetric, String> {
-    let mut values = HashMap::new();
-    for line in output.lines() {
-        let Some((key, rest)) = line.split_once(':') else {
-            continue;
-        };
-        let Some(value) = rest.split_whitespace().next() else {
-            continue;
-        };
-        if let Ok(kib) = value.parse::<u64>() {
-            values.insert(key.to_string(), kib);
-        }
-    }
+    let values = parse_meminfo_values(output);
 
     let total = values
         .get("MemTotal")
@@ -442,20 +466,7 @@ pub fn parse_df_output(output: &str) -> Result<Vec<DiskMetric>, String> {
     Ok(disks)
 }
 
-pub fn filter_and_sort_disks(
-    mut disks: Vec<DiskMetric>,
-    ignore_fs_types: &[String],
-) -> Vec<DiskMetric> {
-    let ignored = ignore_fs_types
-        .iter()
-        .map(|item| item.to_lowercase())
-        .collect::<HashSet<_>>();
-    disks.retain(|disk| {
-        disk.fs_type
-            .as_ref()
-            .map(|fs_type| !ignored.contains(&fs_type.to_lowercase()))
-            .unwrap_or(true)
-    });
+pub fn sort_disks(mut disks: Vec<DiskMetric>) -> Vec<DiskMetric> {
     disks.sort_by(|a, b| {
         disk_priority(&a.mount_point)
             .cmp(&disk_priority(&b.mount_point))
@@ -464,95 +475,12 @@ pub fn filter_and_sort_disks(
     disks
 }
 
-fn split_sections(output: &str) -> HashMap<String, String> {
-    let mut sections = HashMap::new();
-    let mut current = None::<String>;
-    for line in output.lines() {
-        if let Some(section) = line
-            .trim()
-            .strip_prefix("__")
-            .and_then(|value| value.strip_suffix("__"))
-        {
-            current = Some(section.to_string());
-            sections.entry(section.to_string()).or_insert_with(String::new);
-            continue;
-        }
-        if let Some(section) = &current {
-            sections
-                .entry(section.clone())
-                .or_insert_with(String::new)
-                .push_str(line);
-            sections
-                .entry(section.clone())
-                .or_insert_with(String::new)
-                .push('\n');
-        }
-    }
-    sections
-}
-
-fn required_section<'a>(
-    sections: &'a HashMap<String, String>,
-    name: &str,
-) -> Result<&'a str, String> {
-    sections
-        .get(name)
-        .map(String::as_str)
-        .filter(|content| !content.trim().is_empty())
-        .ok_or_else(|| format!("missing {} telemetry section", name))
-}
-
-fn parse_loadavg(output: &str) -> Result<(Option<f64>, Option<f64>, Option<f64>), String> {
-    let mut values = output.split_whitespace();
-    Ok((
-        values.next().and_then(|value| value.parse::<f64>().ok()),
-        values.next().and_then(|value| value.parse::<f64>().ok()),
-        values.next().and_then(|value| value.parse::<f64>().ok()),
-    ))
-}
-
-fn parse_cpu_model_name(cpuinfo: &str) -> Option<String> {
-    cpuinfo.lines().find_map(|line| {
-        let (key, value) = line.split_once(':')?;
-        if key.trim() == "model name" {
-            Some(value.trim().to_string())
-        } else {
-            None
-        }
-    })
-}
-
-fn parse_average_cpu_clock_ghz(cpuinfo: &str) -> Option<f64> {
-    let values = cpuinfo
-        .lines()
-        .filter_map(|line| {
-            let (key, value) = line.split_once(':')?;
-            if key.trim() == "cpu MHz" {
-                value.trim().parse::<f64>().ok()
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-    if values.is_empty() {
-        return None;
-    }
-    Some((values.iter().sum::<f64>() / values.len() as f64) / 1000.0)
-}
-
 fn parse_cpuinfo_processor_count(cpuinfo: &str) -> Option<u64> {
     let count = cpuinfo
         .lines()
         .filter(|line| line.split_once(':').map(|(key, _)| key.trim() == "processor").unwrap_or(false))
         .count();
     (count > 0).then_some(count as u64)
-}
-
-fn parse_lscpu_value(lscpu: &str, key: &str) -> Option<String> {
-    lscpu.lines().find_map(|line| {
-        let (line_key, value) = line.split_once(':')?;
-        (line_key.trim() == key).then(|| value.trim().to_string())
-    })
 }
 
 fn parse_lscpu_cpu_count(lscpu: &str) -> Option<u64> {
@@ -585,13 +513,6 @@ fn parse_cpu_list_count(value: &str) -> Option<u64> {
     Some(count)
 }
 
-fn parse_first_u64(output: &str) -> Option<u64> {
-    output
-        .split_whitespace()
-        .next()
-        .and_then(|value| value.parse::<u64>().ok())
-}
-
 fn disk_priority(mount_point: &str) -> u8 {
     match mount_point {
         "/" => 0,
@@ -601,10 +522,6 @@ fn disk_priority(mount_point: &str) -> u8 {
         path if path == "/media" || path.starts_with("/media/") => 40,
         _ => 100,
     }
-}
-
-fn kib_to_mib(value: u64) -> u64 {
-    value / 1024
 }
 
 fn sanitize_settings(mut settings: SystemMonitorSettings) -> SystemMonitorSettings {
@@ -627,7 +544,11 @@ fn sanitize_settings(mut settings: SystemMonitorSettings) -> SystemMonitorSettin
 }
 
 fn sleep_with_stop(interval_secs: u64, stop: &AtomicBool) {
-    let ticks = interval_secs.max(1) * 10;
+    sleep_with_stop_duration(Duration::from_secs(interval_secs.max(1)), stop);
+}
+
+fn sleep_with_stop_duration(duration: Duration, stop: &AtomicBool) {
+    let ticks = (duration.as_millis() / 100).max(1);
     for _ in 0..ticks {
         if stop.load(Ordering::SeqCst) {
             return;
@@ -692,15 +613,18 @@ mod tests {
     }
 
     #[test]
-    fn filters_and_prioritizes_disk_mounts() {
+    fn prioritizes_disk_mounts_without_filtering() {
         let disks = parse_df_output(
             "Filesystem Type 1-blocks Used Available Use% Mounted on\ntmpfs tmpfs 10 1 9 10% /run\n/dev/sdb1 xfs 100 20 80 20% /data\n/dev/sda1 ext4 100 30 70 30% /\n",
         )
         .unwrap();
-        let filtered = filter_and_sort_disks(disks, &["tmpfs".to_string()]);
-        assert_eq!(filtered.len(), 2);
-        assert_eq!(filtered[0].mount_point, "/");
-        assert_eq!(filtered[1].mount_point, "/data");
+        // Filtering by fs type is a frontend concern; the backend keeps every
+        // mount so the "show hidden filesystems" toggle can reveal them.
+        let sorted = sort_disks(disks);
+        assert_eq!(sorted.len(), 3);
+        assert_eq!(sorted[0].mount_point, "/");
+        assert_eq!(sorted[1].mount_point, "/data");
+        assert_eq!(sorted[2].mount_point, "/run");
     }
 
     #[test]
@@ -726,5 +650,28 @@ mod tests {
 
     fn mib_to_gib_for_test(value: u64) -> f64 {
         value as f64 / 1024.0
+    }
+
+    #[test]
+    fn detects_total_telemetry_failure() {
+        let mut telemetry = RemoteTelemetry {
+            timestamp: String::new(),
+            hostname: None,
+            cpu: None,
+            memory: None,
+            disks: Vec::new(),
+            gpu: Vec::new(),
+            errors: TelemetryErrors {
+                cpu: Some("failed".to_string()),
+                memory: Some("failed".to_string()),
+                disk: Some("failed".to_string()),
+                gpu: Some("failed".to_string()),
+            },
+        };
+        assert!(telemetry_all_failed(&telemetry));
+
+        // A healthy hostname (or any section) means the transport is alive.
+        telemetry.hostname = Some("node01".to_string());
+        assert!(!telemetry_all_failed(&telemetry));
     }
 }

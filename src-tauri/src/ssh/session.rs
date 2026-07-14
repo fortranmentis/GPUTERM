@@ -14,6 +14,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use uuid::Uuid;
 
+/// Shared per-session SSH connections reused for short operations
+/// (directory listings, stat calls, resource details). `ssh2::Session` is
+/// internally synchronized but operations on one session must be serialized,
+/// hence the per-entry mutex.
+pub type OpsSessions = Arc<Mutex<HashMap<String, Arc<Mutex<Session>>>>>;
+
 #[derive(Default)]
 pub struct AppState {
     pub terminals: Mutex<HashMap<String, TerminalHandle>>,
@@ -21,6 +27,8 @@ pub struct AppState {
     pub telemetry_stops: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub telemetry_settings: Arc<Mutex<SystemMonitorSettings>>,
     pub credentials: MemoryCredentialStore,
+    pub ops_sessions: OpsSessions,
+    pub transfer_cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
 #[derive(Clone)]
@@ -94,12 +102,76 @@ pub fn delete_session(id: String) -> Result<Vec<SessionProfile>, String> {
 }
 
 #[tauri::command]
-pub fn test_ssh_connection(request: SessionConnectRequest) -> Result<String, String> {
-    let profile = profile_from_request(&request);
-    let target = target_from_request(&profile, &request);
-    let session = open_ssh_session(&target)?;
-    let _ = session.disconnect(None, "GpuTerm connection test complete", None);
-    Ok(format!("SSH connection to {}:{} succeeded", profile.host, profile.port))
+pub async fn test_ssh_connection(request: SessionConnectRequest) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let profile = profile_from_request(&request);
+        let target = target_from_request(&profile, &request);
+        let session = open_ssh_session(&target)?;
+        let _ = session.disconnect(None, "GpuTerm connection test complete", None);
+        Ok(format!("SSH connection to {}:{} succeeded", profile.host, profile.port))
+    })
+    .await
+    .map_err(|error| format!("Connection test task failed: {}", error))?
+}
+
+/// Runs `f` against the shared operations connection for `target`'s session,
+/// creating or replacing the connection when missing or dead. Access is
+/// serialized per session, so keep the callbacks short — bulk transfers use
+/// their own dedicated connections.
+pub fn with_ops_session<T>(
+    ops: &OpsSessions,
+    target: &SshTarget,
+    timeout_ms: u32,
+    f: impl FnOnce(&Session) -> Result<T, String>,
+) -> Result<T, String> {
+    let existing = {
+        let map = ops
+            .lock()
+            .map_err(|_| "Operations connection state is unavailable".to_string())?;
+        map.get(&target.session_id).cloned()
+    };
+
+    if let Some(entry) = existing {
+        if let Ok(session) = entry.lock() {
+            session.set_timeout(timeout_ms);
+            // Cheap liveness probe before running a possibly non-idempotent
+            // operation: opening a channel round-trips to the server.
+            let alive = match session.channel_session() {
+                Ok(mut channel) => {
+                    let _ = channel.close();
+                    true
+                }
+                Err(_) => false,
+            };
+            if alive {
+                return f(&session);
+            }
+        }
+        if let Ok(mut map) = ops.lock() {
+            map.remove(&target.session_id);
+        }
+    }
+
+    let session = open_ssh_session(target)?;
+    session.set_keepalive(true, 15);
+    session.set_timeout(timeout_ms);
+    let entry = Arc::new(Mutex::new(session));
+    {
+        let mut map = ops
+            .lock()
+            .map_err(|_| "Operations connection state is unavailable".to_string())?;
+        map.insert(target.session_id.clone(), Arc::clone(&entry));
+    }
+    let session = entry
+        .lock()
+        .map_err(|_| "Operations connection is unavailable".to_string())?;
+    f(&session)
+}
+
+pub fn drop_ops_session(ops: &OpsSessions, session_id: &str) {
+    if let Ok(mut map) = ops.lock() {
+        map.remove(session_id);
+    }
 }
 
 pub fn profile_from_request(request: &SessionConnectRequest) -> SessionProfile {
@@ -158,7 +230,7 @@ pub fn upsert_profile(profile: SessionProfile) -> Result<Vec<SessionProfile>, St
     } else {
         profiles.push(profile);
     }
-    profiles.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    profiles.sort_by_key(|profile| profile.name.to_lowercase());
     write_profiles(&profiles)?;
     Ok(profiles)
 }
@@ -223,27 +295,42 @@ fn authenticate(session: &Session, target: &SshTarget) -> Result<(), String> {
         .map_err(|_| "SSH agent authentication failed. Enter a password or private key path.".to_string())
 }
 
+/// Prefix of the sentinel error raised when connecting to a host whose key has
+/// never been seen. Format: `UNKNOWN_HOST_KEY:{fingerprint}|{host}:{port}` —
+/// the fingerprint is hex so the first `|` separates it from the host key.
+pub const UNKNOWN_HOST_KEY_PREFIX: &str = "UNKNOWN_HOST_KEY:";
+
+#[tauri::command]
+pub fn trust_host_key(host: String, port: u16, fingerprint: String) -> Result<(), String> {
+    let host_key = format!("{}:{}", host.trim().to_lowercase(), port);
+    let fingerprint = fingerprint.trim().to_lowercase();
+    if fingerprint.is_empty() || !fingerprint.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("Invalid host key fingerprint".to_string());
+    }
+    let mut known_hosts = read_known_hosts()?;
+    known_hosts.insert(host_key, fingerprint);
+    write_known_hosts(&known_hosts)
+}
+
 fn verify_known_host(session: &Session, target: &SshTarget) -> Result<(), String> {
     let fingerprint = session
         .host_key_hash(HashType::Sha256)
         .map(bytes_to_hex)
         .ok_or_else(|| "Unable to read remote host key fingerprint".to_string())?;
     let host_key = format!("{}:{}", target.host.to_lowercase(), target.port);
-    let mut known_hosts = read_known_hosts()?;
+    let known_hosts = read_known_hosts()?;
 
-    if let Some(existing) = known_hosts.get(&host_key) {
-        if existing != &fingerprint {
-            return Err(format!(
-                "Host key mismatch for {}. Expected {}, got {}. Inspect known_hosts.json before reconnecting.",
-                host_key, existing, fingerprint
-            ));
-        }
-    } else {
-        known_hosts.insert(host_key, fingerprint);
-        write_known_hosts(&known_hosts)?;
+    match known_hosts.get(&host_key) {
+        Some(existing) if existing != &fingerprint => Err(format!(
+            "Host key mismatch for {}. Expected {}, got {}. Inspect known_hosts.json before reconnecting.",
+            host_key, existing, fingerprint
+        )),
+        Some(_) => Ok(()),
+        None => Err(format!(
+            "{}{}|{}",
+            UNKNOWN_HOST_KEY_PREFIX, fingerprint, host_key
+        )),
     }
-
-    Ok(())
 }
 
 fn normalize_profile(mut profile: SessionProfile) -> SessionProfile {

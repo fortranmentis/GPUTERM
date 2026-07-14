@@ -202,6 +202,43 @@ describe("SftpBrowser local path browse", () => {
     expect(screen.getByText("two.txt")).toBeInTheDocument();
   });
 
+  it("skips directories in a mixed drop with a single message and uploads only files", async () => {
+    const directoryEntry: LocalEntry = {
+      name: "logs",
+      path: "C:\\Users\\me\\logs",
+      entryType: "directory",
+      size: null,
+      modifiedTime: null,
+    };
+    const otherDirectoryEntry: LocalEntry = {
+      ...directoryEntry,
+      name: "cache",
+      path: "C:\\Users\\me\\cache",
+    };
+    render(<SftpBrowser />);
+
+    await waitFor(() => expect(screen.getByText("/srv")).toBeInTheDocument());
+    fireEvent.drop(screen.getByTestId("remote-drop-zone"), {
+      dataTransfer: dragData(LOCAL_DRAG_TYPE, [
+        directoryEntry,
+        localFile("kept.txt"),
+        otherDirectoryEntry,
+      ]),
+    });
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("sftp_upload_file", {
+        request: expect.objectContaining({ remotePath: "/srv/kept.txt" }),
+      }),
+    );
+    expect(
+      mockInvoke.mock.calls.filter(([command]) => command === "sftp_upload_file"),
+    ).toHaveLength(1);
+    expect(
+      useSessionStore.getState().message?.text,
+    ).toBe("Directory drag-and-drop is not supported yet");
+  });
+
   it("asks for overwrite confirmation and skips when rejected", async () => {
     remoteEntries = [remoteFile("exists.dat")];
     mockConfirm.mockResolvedValue(false);

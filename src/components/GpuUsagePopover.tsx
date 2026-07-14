@@ -1,10 +1,21 @@
 import { Gauge } from "lucide-react";
 import { useEffect, useMemo, type RefObject } from "react";
 import type { GpuDetailMetric } from "../types/resourceDetails";
-import { formatBytes } from "../utils/formatBytes";
+import {
+  formatClock,
+  formatMiB,
+  formatPercent,
+  formatWatts,
+  powerLevel,
+  ratio,
+  temperatureLevel,
+  vramLevel,
+  type UsageLevel,
+} from "../utils/format";
 import { GpuSelector } from "./GpuSelector";
 import {
   DetailUsageBar,
+  Metric,
   ResourceDetailPopover,
 } from "./ResourceDetailPopover";
 
@@ -81,8 +92,8 @@ export function GpuUsagePopover({
           </div>
           <div className="gpu-gauge-grid">
             <GpuGauge label="GPU" value={selectedGpu.gpuUtilPercent} level="normal" />
-            <GpuGauge label="VRAM" value={ratio(selectedGpu.memoryUsedMiB, selectedGpu.memoryTotalMiB)} level={vramLevel(selectedGpu)} />
-            <GpuGauge label="Power" value={ratio(selectedGpu.powerDrawW, selectedGpu.powerLimitW)} level={powerLevel(selectedGpu)} />
+            <GpuGauge label="VRAM" value={ratio(selectedGpu.memoryUsedMiB, selectedGpu.memoryTotalMiB)} level={vramLevel(selectedGpu.memoryUsedMiB, selectedGpu.memoryTotalMiB)} />
+            <GpuGauge label="Power" value={ratio(selectedGpu.powerDrawW, selectedGpu.powerLimitW)} level={powerLevel(selectedGpu.powerDrawW, selectedGpu.powerLimitW)} />
             <GpuGauge label="Temperature" value={selectedGpu.temperatureC} level={temperatureLevel(selectedGpu.temperatureC)} suffix=" C" />
           </div>
           <div className="resource-metric-grid gpu-metric-grid">
@@ -102,8 +113,11 @@ export function GpuUsagePopover({
               <span>GPU</span><span>PID</span><span>User</span><span>GPU memory</span><span>Process</span><span>Command</span>
             </div>
             {selectedProcesses.length === 0 && <div className="empty-list compact">No compute processes</div>}
-            {selectedProcesses.map((process) => (
-              <div className="process-row" key={`${process.gpuUuid}:${process.pid}`}>
+            {selectedProcesses.map((process, index) => (
+              <div
+                className="process-row"
+                key={`${process.gpuUuid ?? process.gpuIndex ?? "unknown"}:${process.pid}:${index}`}
+              >
                 <span>{process.gpuIndex ?? "-"}</span>
                 <span>{process.pid}</span>
                 <span>{process.user ?? "-"}</span>
@@ -119,51 +133,6 @@ export function GpuUsagePopover({
   );
 }
 
-function GpuGauge({ label, value, level, suffix = "%" }: { label: string; value: number | null; level: "normal" | "warning" | "critical" | "unknown"; suffix?: string }) {
+function GpuGauge({ label, value, level, suffix = "%" }: { label: string; value: number | null; level: UsageLevel; suffix?: string }) {
   return <div><span>{label}</span><strong className={level}>{value == null ? "n/a" : `${value.toFixed(0)}${suffix}`}</strong><DetailUsageBar value={value} level={level} /></div>;
-}
-
-function Metric({ label, value }: { label: string; value: string }) {
-  return <div><span>{label}</span><strong title={value}>{value}</strong></div>;
-}
-
-function ratio(used: number | null, total: number | null) {
-  return used != null && total != null && total > 0 ? used / total * 100 : null;
-}
-
-function vramLevel(metric: GpuDetailMetric) {
-  const value = ratio(metric.memoryUsedMiB, metric.memoryTotalMiB);
-  if (value == null) return "unknown" as const;
-  if (value >= 98) return "critical" as const;
-  if (value >= 90) return "warning" as const;
-  return "normal" as const;
-}
-
-function powerLevel(metric: GpuDetailMetric) {
-  const value = ratio(metric.powerDrawW, metric.powerLimitW);
-  if (value == null) return "unknown" as const;
-  return value >= 90 ? "warning" as const : "normal" as const;
-}
-
-function temperatureLevel(value: number | null) {
-  if (value == null) return "unknown" as const;
-  if (value >= 90) return "critical" as const;
-  if (value >= 80) return "warning" as const;
-  return "normal" as const;
-}
-
-function formatMiB(value: number | null) {
-  return value == null ? "n/a" : formatBytes(value * 1024 * 1024);
-}
-
-function formatPercent(value: number | null) {
-  return value == null ? "n/a" : `${value.toFixed(0)}%`;
-}
-
-function formatWatts(value: number | null) {
-  return value == null ? "n/a" : `${value.toFixed(0)} W`;
-}
-
-function formatClock(value: number | null) {
-  return value == null ? "n/a" : `${value.toFixed(0)} MHz`;
 }

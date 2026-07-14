@@ -2,8 +2,10 @@ import { MemoryStick } from "lucide-react";
 import { useEffect, useRef, useState, type RefObject } from "react";
 import type { MemoryDetailMetric } from "../types/resourceDetails";
 import { formatBytes } from "../utils/formatBytes";
+import { formatMiB, formatPercent, memoryLevel } from "../utils/format";
 import {
   DetailUsageBar,
+  Metric,
   MetricsUnavailable,
   ResourceDetailPopover,
 } from "./ResourceDetailPopover";
@@ -50,7 +52,7 @@ export function MemoryUsagePopover({
         <>
           <div className="resource-detail-summary">
             <div className="resource-primary-metric">
-              <strong className={level}>{formatPercent(metric.usagePercent)}</strong>
+              <strong className={level}>{formatPercent(metric.usagePercent, 1)}</strong>
               <span>{formatMiB(metric.usedMiB)} / {formatMiB(metric.totalMiB)}</span>
               <DetailUsageBar value={metric.usagePercent} level={level} />
             </div>
@@ -77,7 +79,7 @@ export function MemoryUsagePopover({
                 <span title={process.user ?? undefined}>{process.user ?? "-"}</span>
                 <span>{formatBytes(process.rssBytes)}</span>
                 <span>{formatBytes(process.vszBytes)}</span>
-                <span>{formatPercent(process.memoryPercent)}</span>
+                <span>{formatPercent(process.memoryPercent, 1)}</span>
                 <span title={process.command ?? undefined}>{process.command ?? "-"}</span>
               </div>
             ))}
@@ -88,21 +90,3 @@ export function MemoryUsagePopover({
   );
 }
 
-function Metric({ label, value, title, warning }: { label: string; value: string; title?: string; warning?: boolean }) {
-  return <div className={warning ? "warning" : ""} title={title}><span>{label}</span><strong>{value}</strong></div>;
-}
-
-function memoryLevel(value: number | null | undefined) {
-  if (value == null) return "unknown" as const;
-  if (value >= 95) return "critical" as const;
-  if (value >= 85) return "warning" as const;
-  return "normal" as const;
-}
-
-function formatPercent(value: number | null | undefined) {
-  return value == null ? "n/a" : `${value.toFixed(1)}%`;
-}
-
-function formatMiB(value: number | null | undefined) {
-  return value == null ? "n/a" : formatBytes(value * 1024 * 1024);
-}

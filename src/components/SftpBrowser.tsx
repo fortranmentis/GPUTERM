@@ -258,16 +258,13 @@ export function SftpBrowser() {
       setMessage({ kind: "error", text: "No active SFTP session" });
       return;
     }
-    const uploadable = files.filter((file) => {
-      if (file.entryType === "directory") {
-        setMessage({
-          kind: "error",
-          text: "Directory drag-and-drop is not supported yet",
-        });
-        return false;
-      }
-      return file.entryType === "file";
-    });
+    const uploadable = files.filter((file) => file.entryType === "file");
+    if (files.some((file) => file.entryType === "directory")) {
+      setMessage({
+        kind: "error",
+        text: "Directory drag-and-drop is not supported yet",
+      });
+    }
 
     await Promise.all(
       uploadable.map(async (file) => {
@@ -321,16 +318,13 @@ export function SftpBrowser() {
       setMessage({ kind: "error", text: "Select a local folder before download" });
       return;
     }
-    const downloadable = files.filter((file) => {
-      if (file.type === "directory") {
-        setMessage({
-          kind: "error",
-          text: "Directory drag-and-drop is not supported yet",
-        });
-        return false;
-      }
-      return file.type === "file";
-    });
+    const downloadable = files.filter((file) => file.type === "file");
+    if (files.some((file) => file.type === "directory")) {
+      setMessage({
+        kind: "error",
+        text: "Directory drag-and-drop is not supported yet",
+      });
+    }
 
     await Promise.all(
       downloadable.map(async (file) => {

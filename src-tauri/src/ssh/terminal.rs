@@ -35,9 +35,9 @@ struct TerminalClosedPayload {
 }
 
 #[tauri::command]
-pub fn connect_terminal(
+pub async fn connect_terminal(
     app: AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
     request: SessionConnectRequest,
 ) -> Result<TerminalSessionInfo, String> {
     let profile = profile_from_request(&request);
@@ -49,31 +49,39 @@ pub fn connect_terminal(
         state.credentials.clear_password(&profile.id);
     }
 
-    let session = match open_ssh_session(&target) {
-        Ok(session) => session,
+    let cols = request.cols.unwrap_or(120).max(1);
+    let rows = request.rows.unwrap_or(32).max(1);
+    let connect_target = target.clone();
+    let opened = tauri::async_runtime::spawn_blocking(
+        move || -> Result<(Session, Channel), String> {
+            let session = open_ssh_session(&connect_target)?;
+            session.set_keepalive(true, KEEPALIVE_INTERVAL_SECS);
+            let mut channel = session
+                .channel_session()
+                .map_err(|error| format!("Failed to open SSH channel: {}", error))?;
+            channel
+                .request_pty("xterm-256color", None, Some((cols, rows, 0, 0)))
+                .map_err(|error| format!("Failed to allocate remote PTY: {}", error))?;
+            channel
+                .handle_extended_data(ExtendedData::Merge)
+                .map_err(|error| format!("Failed to configure SSH stderr stream: {}", error))?;
+            channel
+                .shell()
+                .map_err(|error| format!("Failed to start remote shell: {}", error))?;
+            session.set_blocking(false);
+            Ok((session, channel))
+        },
+    )
+    .await
+    .map_err(|error| format!("Terminal connect task failed: {}", error))?;
+
+    let (session, channel) = match opened {
+        Ok(pair) => pair,
         Err(error) => {
             state.credentials.clear_password(&profile.id);
             return Err(error);
         }
     };
-
-    session.set_keepalive(false, 30);
-    let mut channel = session
-        .channel_session()
-        .map_err(|error| format!("Failed to open SSH channel: {}", error))?;
-    let cols = request.cols.unwrap_or(120).max(1);
-    let rows = request.rows.unwrap_or(32).max(1);
-    channel
-        .request_pty("xterm-256color", None, Some((cols, rows, 0, 0)))
-        .map_err(|error| format!("Failed to allocate remote PTY: {}", error))?;
-    channel
-        .handle_extended_data(ExtendedData::Merge)
-        .map_err(|error| format!("Failed to configure SSH stderr stream: {}", error))?;
-    channel
-        .shell()
-        .map_err(|error| format!("Failed to start remote shell: {}", error))?;
-
-    session.set_blocking(false);
 
     stop_existing_session(&state, &profile.id);
 
@@ -92,6 +100,7 @@ pub fn connect_terminal(
 
     let stop = Arc::new(AtomicBool::new(false));
     let channel = Arc::new(Mutex::new(channel));
+    let reader_session = session.clone();
     let handle = TerminalHandle {
         session,
         channel: Arc::clone(&channel),
@@ -107,7 +116,7 @@ pub fn connect_terminal(
     }
 
     upsert_profile(profile.clone())?;
-    start_terminal_reader(app.clone(), profile.id.clone(), channel, stop);
+    start_terminal_reader(app.clone(), profile.id.clone(), reader_session, channel, stop);
     start_system_monitor(app, &state, target);
 
     Ok(TerminalSessionInfo {
@@ -176,15 +185,61 @@ pub fn disconnect_terminal(state: State<AppState>, session_id: String) -> Result
     Ok(())
 }
 
+const KEEPALIVE_INTERVAL_SECS: u32 = 30;
+const MIN_IDLE_SLEEP: Duration = Duration::from_millis(2);
+const MAX_IDLE_SLEEP: Duration = Duration::from_millis(30);
+
+/// Appends `bytes` to `pending`, drains everything decodable into a String
+/// (invalid sequences become U+FFFD), and leaves at most 3 trailing bytes of a
+/// possibly-incomplete UTF-8 sequence in `pending`.
+fn drain_utf8_stream(pending: &mut Vec<u8>, bytes: &[u8]) -> String {
+    pending.extend_from_slice(bytes);
+    let mut output = String::new();
+    let mut cursor = 0;
+    loop {
+        match std::str::from_utf8(&pending[cursor..]) {
+            Ok(valid) => {
+                output.push_str(valid);
+                pending.clear();
+                return output;
+            }
+            Err(error) => {
+                let valid_up_to = error.valid_up_to();
+                output.push_str(
+                    std::str::from_utf8(&pending[cursor..cursor + valid_up_to])
+                        .expect("valid_up_to marks a valid UTF-8 prefix"),
+                );
+                cursor += valid_up_to;
+                match error.error_len() {
+                    Some(invalid_len) => {
+                        output.push('\u{FFFD}');
+                        cursor += invalid_len;
+                    }
+                    None => {
+                        // Incomplete trailing sequence: keep it for the next chunk.
+                        let remainder = pending.split_off(cursor);
+                        *pending = remainder;
+                        return output;
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn start_terminal_reader(
     app: AppHandle,
     session_id: String,
+    session: Session,
     channel: Arc<Mutex<Channel>>,
     stop: Arc<AtomicBool>,
 ) {
     thread::spawn(move || {
         let mut buffer = [0_u8; 8192];
+        let mut pending = Vec::new();
         let mut close_message = None;
+        let mut idle_sleep = MIN_IDLE_SLEEP;
+        let mut last_keepalive = Instant::now();
 
         while !stop.load(Ordering::SeqCst) {
             let read_result = {
@@ -203,30 +258,52 @@ fn start_terminal_reader(
                 result
             };
 
-            match read_result {
+            let idle = match read_result {
                 Ok(bytes_read) if bytes_read > 0 => {
-                    let data = String::from_utf8_lossy(&buffer[..bytes_read]).to_string();
-                    let _ = app.emit(
-                        "terminal-output",
-                        TerminalOutputPayload {
-                            session_id: session_id.clone(),
-                            data,
-                        },
-                    );
+                    idle_sleep = MIN_IDLE_SLEEP;
+                    let data = drain_utf8_stream(&mut pending, &buffer[..bytes_read]);
+                    if !data.is_empty() {
+                        let _ = app.emit(
+                            "terminal-output",
+                            TerminalOutputPayload {
+                                session_id: session_id.clone(),
+                                data,
+                            },
+                        );
+                    }
+                    false
                 }
-                Ok(_) => {
-                    thread::sleep(Duration::from_millis(12));
-                }
+                Ok(_) => true,
                 Err(error)
                     if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) =>
                 {
-                    thread::sleep(Duration::from_millis(12));
+                    true
                 }
                 Err(error) => {
                     close_message = Some(format!("Terminal stream failed: {}", error));
                     break;
                 }
+            };
+
+            if idle {
+                if last_keepalive.elapsed() >= Duration::from_secs(1) {
+                    let _ = session.keepalive_send();
+                    last_keepalive = Instant::now();
+                }
+                thread::sleep(idle_sleep);
+                idle_sleep = (idle_sleep * 2).min(MAX_IDLE_SLEEP);
             }
+        }
+
+        if !pending.is_empty() {
+            let data = String::from_utf8_lossy(&pending).to_string();
+            let _ = app.emit(
+                "terminal-output",
+                TerminalOutputPayload {
+                    session_id: session_id.clone(),
+                    data,
+                },
+            );
         }
 
         if let Ok(mut channel) = channel.lock() {
@@ -254,6 +331,8 @@ fn start_system_monitor(app: AppHandle, state: &AppState, target: crate::ssh::se
 }
 
 fn stop_existing_session(state: &AppState, session_id: &str) {
+    crate::ssh::session::drop_ops_session(&state.ops_sessions, session_id);
+
     if let Ok(mut stops) = state.telemetry_stops.lock() {
         if let Some(stop) = stops.remove(session_id) {
             stop.store(true, Ordering::SeqCst);
@@ -302,4 +381,63 @@ fn write_all_nonblocking(channel: &mut Channel, mut bytes: &[u8]) -> std::io::Re
         }
     }
     channel.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::drain_utf8_stream;
+
+    #[test]
+    fn passes_through_complete_utf8() {
+        let mut pending = Vec::new();
+        let text = "한글 테스트 メモリ 😀";
+        assert_eq!(drain_utf8_stream(&mut pending, text.as_bytes()), text);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn reassembles_multibyte_sequences_split_at_every_boundary() {
+        let text = "한글 테스트";
+        let bytes = text.as_bytes();
+        for split in 1..bytes.len() {
+            let mut pending = Vec::new();
+            let mut output = drain_utf8_stream(&mut pending, &bytes[..split]);
+            output.push_str(&drain_utf8_stream(&mut pending, &bytes[split..]));
+            assert_eq!(output, text, "split at byte {}", split);
+            assert!(pending.is_empty(), "split at byte {}", split);
+        }
+    }
+
+    #[test]
+    fn reassembles_four_byte_emoji_split_chunks() {
+        let bytes = "😀".as_bytes();
+        for split in [1, 2, 3] {
+            let mut pending = Vec::new();
+            let first = drain_utf8_stream(&mut pending, &bytes[..split]);
+            assert_eq!(first, "", "split at byte {}", split);
+            assert_eq!(pending.len(), split);
+            let second = drain_utf8_stream(&mut pending, &bytes[split..]);
+            assert_eq!(second, "😀", "split at byte {}", split);
+            assert!(pending.is_empty());
+        }
+    }
+
+    #[test]
+    fn replaces_invalid_bytes_mid_stream() {
+        let mut pending = Vec::new();
+        let mut input = b"ok".to_vec();
+        input.push(0xFF);
+        input.extend_from_slice("한".as_bytes());
+        assert_eq!(drain_utf8_stream(&mut pending, &input), "ok\u{FFFD}한");
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn keeps_truncated_lead_byte_pending() {
+        let mut pending = Vec::new();
+        let mut input = b"tail: ".to_vec();
+        input.push(0xED); // first byte of a 3-byte sequence
+        assert_eq!(drain_utf8_stream(&mut pending, &input), "tail: ");
+        assert_eq!(pending, vec![0xED]);
+    }
 }

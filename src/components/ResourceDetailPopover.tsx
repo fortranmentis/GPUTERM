@@ -121,6 +121,25 @@ export function DetailUsageBar({
   );
 }
 
+export function Metric({
+  label,
+  value,
+  title,
+  warning = false,
+}: {
+  label: string;
+  value: string;
+  title?: string;
+  warning?: boolean;
+}) {
+  return (
+    <div className={warning ? "warning" : ""} title={title}>
+      <span>{label}</span>
+      <strong title={value}>{value}</strong>
+    </div>
+  );
+}
+
 export function MetricsUnavailable({ error }: { error?: string | null }) {
   return (
     <div className="resource-unavailable">
