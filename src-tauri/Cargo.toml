@@ -19,7 +19,11 @@ tauri-build = { version = "2", features = [] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-ssh2 = "0.9"
+# openssl-on-win32 + vendored-openssl build libssh2 against OpenSSL instead of
+# WinCNG so modern key-exchange algorithms (curve25519-sha256, ecdh-sha2-nistp*)
+# are available on Windows; the WinCNG backend only offers modp DH groups,
+# which current OpenSSH servers no longer accept by default.
+ssh2 = { version = "0.9", features = ["vendored-openssl", "openssl-on-win32"] }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
