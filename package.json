@@ -1,7 +1,7 @@
 {
   "name": "gputerm",
   "private": true,
-  "version": "1.0.3-beta",
+  "version": "1.0.4-beta",
   "license": "MIT",
   "type": "module",
   "scripts": {
