@@ -27,6 +27,7 @@ Working on a remote GPU box usually means juggling an SSH client, an SFTP tool, 
 
 ### 🖥️ SSH Terminal
 - Full PTY terminal powered by [xterm.js](https://xtermjs.org) and Rust [`ssh2`](https://crates.io/crates/ssh2)
+- **Multiple concurrent sessions** — each keeps its own terminal, scrollback, and SFTP path; click a connected profile in the sidebar to switch
 - Password, private key (with passphrase), and SSH agent authentication
 - UTF-8 safe streaming — multibyte characters (한글, 日本語, emoji) survive chunked reads
 - MOTD and early output are buffered and replayed, never lost to connection races
@@ -42,7 +43,8 @@ Working on a remote GPU box usually means juggling an SSH client, an SFTP tool, 
 ### 📊 Live Telemetry
 - Bottom status bar polling CPU, RAM, disk, logged-in users, and NVIDIA GPUs every 1–10 s
 - Click any section for a **draggable, resizable detail popover**: per-core CPU usage, top processes, VRAM/power/temperature per GPU, full mount list
-- Telemetry runs on a dedicated SSH connection with automatic reconnect and exponential backoff
+- **Pop any detail view out into its own OS window** — it refreshes independently and closes with its session
+- Telemetry runs on a dedicated SSH connection (per session) with automatic reconnect and exponential backoff
 - Non-NVIDIA hosts gracefully fall back to system-only metrics
 
 ### 🔐 Security by default
@@ -99,8 +101,8 @@ npm run tauri:build
 ## Usage
 
 1. **Create a profile** — enter host, port, username, and a password or private key path in the sidebar. Press **New** to start a fresh profile, **Save** to keep it.
-2. **Connect** — on first contact GpuTerm shows the server's SHA-256 host key fingerprint and asks for confirmation before trusting it.
-3. **Work** — type in the terminal, drag files between the SFTP panels, and watch live metrics in the bottom bar. Click CPU / RAM / Disk / GPU / Users for detail popovers you can drag around and resize.
+2. **Connect** — on first contact GpuTerm shows the server's SHA-256 host key fingerprint and asks for confirmation before trusting it. Connect as many servers as you like; connected profiles show a green dot, and clicking one switches the whole view to that session.
+3. **Work** — type in the terminal, drag files between the SFTP panels, and watch live metrics in the bottom bar. Click CPU / RAM / Disk / GPU / Users for detail popovers you can drag around, resize, or pop out into separate windows with the ↗ button.
 
 <details>
 <summary>SFTP transfer details</summary>
@@ -208,7 +210,6 @@ src-tauri/src/ssh/      Rust backend
 
 ## Roadmap / Known limitations
 
-- Single active terminal session (session IDs are already plumbed for future tabs)
 - Keyboard-interactive SSH authentication is not implemented
 - Recursive directory upload/download and transfer resume are not implemented
 - `known_hosts.json` uses SHA-256 fingerprints, not the OpenSSH known_hosts format
