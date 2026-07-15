@@ -4,10 +4,19 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
   type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
+
+const MIN_POPOVER_WIDTH = 360;
+const MIN_POPOVER_HEIGHT = 240;
+const VIEWPORT_MARGIN = 8;
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), Math.max(min, max));
+}
 
 type ResourceDetailPopoverProps = {
   anchorRef: RefObject<HTMLElement | null>;
@@ -32,6 +41,89 @@ export function ResourceDetailPopover({
 }: ResourceDetailPopoverProps) {
   const [style, setStyle] = useState<CSSProperties>({});
   const popoverRef = useRef<HTMLDivElement | null>(null);
+  // Once the user drags or resizes the popover, automatic anchor-based
+  // placement stops so scroll/resize events do not snap it back.
+  const userAdjustedRef = useRef(false);
+
+  const startDrag = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (
+      (event.target as HTMLElement).closest(
+        ".resource-detail-actions, button, input, label, select",
+      )
+    ) {
+      return;
+    }
+    const popover = popoverRef.current;
+    if (!popover) {
+      return;
+    }
+    event.preventDefault();
+    const rect = popover.getBoundingClientRect();
+    const offsetX = event.clientX - rect.left;
+    const offsetY = event.clientY - rect.top;
+
+    const handleMove = (moveEvent: MouseEvent) => {
+      userAdjustedRef.current = true;
+      const size = popover.getBoundingClientRect();
+      setStyle((current) => ({
+        ...current,
+        left: clamp(
+          moveEvent.clientX - offsetX,
+          VIEWPORT_MARGIN,
+          window.innerWidth - size.width - VIEWPORT_MARGIN,
+        ),
+        top: clamp(
+          moveEvent.clientY - offsetY,
+          VIEWPORT_MARGIN,
+          window.innerHeight - size.height - VIEWPORT_MARGIN,
+        ),
+      }));
+    };
+    const handleUp = () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+    };
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+  };
+
+  const startResize = (event: ReactMouseEvent<HTMLDivElement>) => {
+    const popover = popoverRef.current;
+    if (!popover) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = popover.getBoundingClientRect();
+    const startX = event.clientX;
+    const startY = event.clientY;
+
+    const handleMove = (moveEvent: MouseEvent) => {
+      userAdjustedRef.current = true;
+      // Switch from maxHeight-based auto sizing to an explicit size so the
+      // user can grow the popover past its initial cap.
+      setStyle({
+        left: rect.left,
+        top: rect.top,
+        width: clamp(
+          rect.width + moveEvent.clientX - startX,
+          MIN_POPOVER_WIDTH,
+          window.innerWidth - rect.left - VIEWPORT_MARGIN,
+        ),
+        height: clamp(
+          rect.height + moveEvent.clientY - startY,
+          MIN_POPOVER_HEIGHT,
+          window.innerHeight - rect.top - VIEWPORT_MARGIN,
+        ),
+      });
+    };
+    const handleUp = () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+    };
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+  };
 
   useEffect(() => {
     const handlePointerDown = (event: MouseEvent) => {
@@ -58,6 +150,9 @@ export function ResourceDetailPopover({
 
   useLayoutEffect(() => {
     const placePopover = () => {
+      if (userAdjustedRef.current) {
+        return;
+      }
       const anchor = anchorRef.current;
       if (!anchor) {
         return;
@@ -95,12 +190,20 @@ export function ResourceDetailPopover({
       aria-label={ariaLabel}
       style={style}
     >
-      <div className="disk-detail-title resource-detail-title">
+      <div
+        className="disk-detail-title resource-detail-title"
+        onMouseDown={startDrag}
+      >
         {icon}
         <strong>{title}</strong>
         {headerActions && <div className="resource-detail-actions">{headerActions}</div>}
       </div>
       <div className="resource-detail-content">{children}</div>
+      <div
+        className="resource-detail-resize-handle"
+        aria-hidden="true"
+        onMouseDown={startResize}
+      />
     </div>,
     document.body,
   );

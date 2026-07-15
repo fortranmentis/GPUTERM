@@ -82,9 +82,9 @@ export function SftpBrowser() {
       .then((settings) => {
         if (settings.recentLocalPath) {
           setLocalPath(settings.recentLocalPath);
-          loadLocalDirectory(settings.recentLocalPath).catch((error) =>
-            setMessage({ kind: "error", text: String(error) }),
-          );
+          // The remembered path may have been deleted or live on an unplugged
+          // drive; failing this automatic load silently keeps startup clean.
+          loadLocalDirectory(settings.recentLocalPath).catch(() => undefined);
         }
       })
       .catch(() => undefined);

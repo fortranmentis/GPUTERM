@@ -82,6 +82,15 @@ pub struct DiskMetric {
     usage_percent: Option<f64>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteUserSession {
+    user: String,
+    tty: String,
+    login_time: String,
+    from: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct TelemetryErrors {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -92,6 +101,8 @@ pub struct TelemetryErrors {
     disk: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     gpu: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    users: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -103,6 +114,7 @@ pub struct RemoteTelemetry {
     memory: Option<MemoryMetric>,
     disks: Vec<DiskMetric>,
     gpu: Vec<GpuMetric>,
+    users: Vec<RemoteUserSession>,
     errors: TelemetryErrors,
 }
 
@@ -199,11 +211,13 @@ fn emit_connection_error_telemetry(app: &AppHandle, error: &str) {
             memory: None,
             disks: Vec::new(),
             gpu: Vec::new(),
+            users: Vec::new(),
             errors: TelemetryErrors {
                 cpu: Some(format!("Telemetry SSH connection failed: {}", error)),
                 memory: Some("Telemetry SSH connection failed".to_string()),
                 disk: Some("Telemetry SSH connection failed".to_string()),
                 gpu: Some("Telemetry SSH connection failed".to_string()),
+                users: Some("Telemetry SSH connection failed".to_string()),
             },
         },
     );
@@ -215,6 +229,7 @@ fn telemetry_all_failed(telemetry: &RemoteTelemetry) -> bool {
         && telemetry.memory.is_none()
         && telemetry.disks.is_empty()
         && telemetry.gpu.is_empty()
+        && telemetry.users.is_empty()
         && telemetry.errors.cpu.is_some()
         && telemetry.errors.memory.is_some()
         && telemetry.errors.disk.is_some()
@@ -277,6 +292,14 @@ fn collect_remote_telemetry(
         }
     };
 
+    let users = match run_remote_command(session, "LC_ALL=C who 2>/dev/null || true") {
+        Ok(output) => parse_who_output(&output),
+        Err(error) => {
+            errors.users = Some(error);
+            Vec::new()
+        }
+    };
+
     RemoteTelemetry {
         timestamp: timestamp(),
         hostname,
@@ -284,8 +307,35 @@ fn collect_remote_telemetry(
         memory,
         disks,
         gpu,
+        users,
         errors,
     }
+}
+
+/// Parses `LC_ALL=C who` output. The login time column set varies between
+/// GNU ("2026-07-15 09:12") and BSD ("Jul 15 09:12"), so it is kept as an
+/// opaque string; the trailing "(host)" field becomes `from` when present.
+pub fn parse_who_output(output: &str) -> Vec<RemoteUserSession> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let fields = line.split_whitespace().collect::<Vec<_>>();
+            if fields.len() < 3 {
+                return None;
+            }
+            let from = fields
+                .last()
+                .filter(|value| value.starts_with('(') && value.ends_with(')'))
+                .map(|value| value[1..value.len() - 1].to_string());
+            let time_end = if from.is_some() { fields.len() - 1 } else { fields.len() };
+            Some(RemoteUserSession {
+                user: fields[0].to_string(),
+                tty: fields[1].to_string(),
+                login_time: fields[2..time_end].join(" "),
+                from,
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn run_remote_command(session: &Session, command: &str) -> Result<String, String> {
@@ -661,11 +711,13 @@ mod tests {
             memory: None,
             disks: Vec::new(),
             gpu: Vec::new(),
+            users: Vec::new(),
             errors: TelemetryErrors {
                 cpu: Some("failed".to_string()),
                 memory: Some("failed".to_string()),
                 disk: Some("failed".to_string()),
                 gpu: Some("failed".to_string()),
+                users: Some("failed".to_string()),
             },
         };
         assert!(telemetry_all_failed(&telemetry));
@@ -673,5 +725,27 @@ mod tests {
         // A healthy hostname (or any section) means the transport is alive.
         telemetry.hostname = Some("node01".to_string());
         assert!(!telemetry_all_failed(&telemetry));
+    }
+
+    #[test]
+    fn parses_who_output_variants() {
+        let sessions = parse_who_output(
+            "alice    pts/0        2026-07-15 09:12 (10.0.0.5)\nbob      tty1         2026-07-14 22:03\ncarol    pts/2        Jul 15 09:30 (workstation.local)\n",
+        );
+        assert_eq!(sessions.len(), 3);
+        assert_eq!(sessions[0].user, "alice");
+        assert_eq!(sessions[0].tty, "pts/0");
+        assert_eq!(sessions[0].login_time, "2026-07-15 09:12");
+        assert_eq!(sessions[0].from.as_deref(), Some("10.0.0.5"));
+        assert_eq!(sessions[1].from, None);
+        assert_eq!(sessions[1].login_time, "2026-07-14 22:03");
+        assert_eq!(sessions[2].login_time, "Jul 15 09:30");
+        assert_eq!(sessions[2].from.as_deref(), Some("workstation.local"));
+    }
+
+    #[test]
+    fn parses_empty_who_output_as_no_sessions() {
+        assert!(parse_who_output("").is_empty());
+        assert!(parse_who_output("\n  \n").is_empty());
     }
 }

@@ -4,6 +4,7 @@ import { confirm } from "@tauri-apps/plugin-dialog";
 import {
   KeyRound,
   PlugZap,
+  Plus,
   Save,
   Server,
   Trash2,
@@ -268,6 +269,11 @@ export function SessionSidebar() {
       </div>
 
       <form className="session-form" onSubmit={connect}>
+        <small className="form-binding-hint">
+          {form.id
+            ? `Editing saved profile: ${form.name || form.host || form.id}`
+            : "New profile"}
+        </small>
         <label>
           <span>Name</span>
           <input
@@ -340,6 +346,15 @@ export function SessionSidebar() {
           </button>
         </div>
         <div className="button-row">
+          <button
+            className="secondary-button"
+            disabled={busy}
+            type="button"
+            onClick={() => setForm(blankForm)}
+          >
+            <Plus size={16} />
+            New
+          </button>
           <button
             className="secondary-button"
             disabled={busy}

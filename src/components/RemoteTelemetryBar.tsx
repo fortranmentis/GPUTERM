@@ -6,6 +6,7 @@ import {
   HardDrive,
   MemoryStick,
   Thermometer,
+  Users,
   Zap,
 } from "lucide-react";
 import {
@@ -21,6 +22,7 @@ import { CpuUsagePopover } from "./CpuUsagePopover";
 import { DiskUsagePopover } from "./DiskUsagePopover";
 import { GpuUsagePopover } from "./GpuUsagePopover";
 import { MemoryUsagePopover } from "./MemoryUsagePopover";
+import { UsersPopover } from "./UsersPopover";
 import { useSessionStore } from "../stores/sessionStore";
 import type {
   GpuMetric,
@@ -45,7 +47,7 @@ import {
   formatWatts,
 } from "../utils/format";
 
-type OpenResource = ResourceDetailType | "disk" | null;
+type OpenResource = ResourceDetailType | "disk" | "users" | null;
 
 export function RemoteTelemetryBar() {
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
@@ -64,6 +66,7 @@ export function RemoteTelemetryBar() {
   const gpuButtonRef = useRef<HTMLElement | null>(null);
   const gpuAnchorUuidRef = useRef<string | null>(null);
   const diskButtonRef = useRef<HTMLButtonElement | null>(null);
+  const usersButtonRef = useRef<HTMLButtonElement | null>(null);
   const [ignoreDraft, setIgnoreDraft] = useState(settings.diskIgnoreFsTypes.join(", "));
 
   useEffect(() => {
@@ -83,11 +86,15 @@ export function RemoteTelemetryBar() {
     () => createDiskSummary(telemetry?.disks ?? [], 2, settings.diskIgnoreFsTypes),
     [settings.diskIgnoreFsTypes, telemetry?.disks],
   );
+  const uniqueUsers = useMemo(
+    () => [...new Set((telemetry?.users ?? []).map((session) => session.user))],
+    [telemetry?.users],
+  );
 
   useEffect(() => {
     if (!connected) {
       setOpenResource(null);
-    } else if (!showSystem && ["cpu", "memory", "disk"].includes(openResource ?? "")) {
+    } else if (!showSystem && ["cpu", "memory", "disk", "users"].includes(openResource ?? "")) {
       setOpenResource(null);
     } else if (!showGpu && openResource === "gpu") {
       setOpenResource(null);
@@ -95,7 +102,13 @@ export function RemoteTelemetryBar() {
   }, [connected, openResource, showGpu, showSystem]);
 
   useEffect(() => {
-    if (!connected || !activeSessionId || !openResource || openResource === "disk") {
+    if (
+      !connected ||
+      !activeSessionId ||
+      !openResource ||
+      openResource === "disk" ||
+      openResource === "users"
+    ) {
       setResourceDetails(null);
       setDetailsLoading(false);
       setDetailsRequestError(null);
@@ -325,6 +338,36 @@ export function RemoteTelemetryBar() {
         </div>
       )}
 
+      {connected && telemetry && showSystem && (
+        <TelemetryButton
+          buttonRef={usersButtonRef}
+          title="Users"
+          icon={<Users size={16} />}
+          expanded={openResource === "users"}
+          onClick={() => openDetail("users")}
+        >
+          {telemetry.errors.users && telemetry.users.length === 0 ? (
+            <span>{telemetry.errors.users}</span>
+          ) : (
+            <>
+              <strong>
+                {uniqueUsers.length} {uniqueUsers.length === 1 ? "user" : "users"}
+              </strong>
+              <span>
+                {uniqueUsers.length > 0
+                  ? uniqueUsers.slice(0, 3).join(", ") +
+                    (uniqueUsers.length > 3 ? ` +${uniqueUsers.length - 3}` : "")
+                  : "No login sessions"}
+              </span>
+              <span>
+                {telemetry.users.length}{" "}
+                {telemetry.users.length === 1 ? "session" : "sessions"}
+              </span>
+            </>
+          )}
+        </TelemetryButton>
+      )}
+
       {openResource === "cpu" && (
         <CpuUsagePopover
           metric={resourceDetails?.cpu ?? null}
@@ -359,6 +402,14 @@ export function RemoteTelemetryBar() {
           disks={telemetry.disks}
           ignoredFsTypes={settings.diskIgnoreFsTypes}
           anchorRef={diskButtonRef}
+          onClose={() => setOpenResource(null)}
+        />
+      )}
+      {openResource === "users" && telemetry && (
+        <UsersPopover
+          users={telemetry.users}
+          error={telemetry.errors.users}
+          anchorRef={usersButtonRef}
           onClose={() => setOpenResource(null)}
         />
       )}

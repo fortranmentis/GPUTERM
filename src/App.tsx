@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { AlertCircle, CheckCircle2, Info, X } from "lucide-react";
@@ -15,6 +15,20 @@ type TerminalClosedPayload = {
   message?: string | null;
 };
 
+const SFTP_WIDTH_STORAGE_KEY = "gputerm.sftpWidth";
+const MIN_SFTP_WIDTH = 280;
+const DEFAULT_SFTP_WIDTH = 400;
+
+function clampSftpWidth(value: number) {
+  const max = Math.max(MIN_SFTP_WIDTH, Math.round(window.innerWidth * 0.6));
+  return Math.min(Math.max(Math.round(value), MIN_SFTP_WIDTH), max);
+}
+
+function initialSftpWidth() {
+  const stored = Number(localStorage.getItem(SFTP_WIDTH_STORAGE_KEY));
+  return clampSftpWidth(Number.isFinite(stored) && stored > 0 ? stored : DEFAULT_SFTP_WIDTH);
+}
+
 function App() {
   const message = useSessionStore((state) => state.message);
   const setSessions = useSessionStore((state) => state.setSessions);
@@ -22,6 +36,36 @@ function App() {
   const setConnected = useSessionStore((state) => state.setConnected);
   const setRemoteTelemetry = useSessionStore((state) => state.setRemoteTelemetry);
   const setTelemetrySettings = useSessionStore((state) => state.setTelemetrySettings);
+  const [sftpWidth, setSftpWidth] = useState(initialSftpWidth);
+  const workspaceGridRef = useRef<HTMLDivElement | null>(null);
+
+  const startSplitterDrag = (event: ReactMouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const grid = workspaceGridRef.current;
+    if (!grid) {
+      return;
+    }
+    const gridRight = grid.getBoundingClientRect().right;
+    const previousUserSelect = document.body.style.userSelect;
+    const previousCursor = document.body.style.cursor;
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = "col-resize";
+
+    let latestWidth = sftpWidth;
+    const handleMove = (moveEvent: MouseEvent) => {
+      latestWidth = clampSftpWidth(gridRight - moveEvent.clientX - 3);
+      setSftpWidth(latestWidth);
+    };
+    const handleUp = () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+      document.body.style.userSelect = previousUserSelect;
+      document.body.style.cursor = previousCursor;
+      localStorage.setItem(SFTP_WIDTH_STORAGE_KEY, String(latestWidth));
+    };
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+  };
 
   useEffect(() => {
     invoke<SessionProfile[]>("load_sessions")
@@ -120,10 +164,23 @@ function App() {
             </button>
           </div>
         )}
-        <div className="workspace-grid">
+        <div
+          className="workspace-grid"
+          ref={workspaceGridRef}
+          style={{
+            gridTemplateColumns: `minmax(0, 1fr) 6px min(${sftpWidth}px, 60%)`,
+          }}
+        >
           <section className="terminal-region">
             <TerminalPane />
           </section>
+          <div
+            className="workspace-splitter"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize SFTP panel"
+            onMouseDown={startSplitterDrag}
+          />
           <section className="sftp-region">
             <SftpBrowser />
           </section>

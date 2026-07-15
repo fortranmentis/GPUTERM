@@ -85,6 +85,7 @@ function telemetry(disks: DiskMetric[]): RemoteTelemetry {
     memory: null,
     disks,
     gpu: [],
+    users: [],
     errors: {},
   };
 }
@@ -257,6 +258,33 @@ describe("RemoteTelemetryBar disk summary", () => {
 
     expect(await screen.findByText("Metrics unavailable")).toBeInTheDocument();
     expect(screen.getByText(/ps permission denied/i)).toBeInTheDocument();
+  });
+
+  it("shows logged-in users and opens the users popover without a details request", async () => {
+    useSessionStore.setState({
+      remoteTelemetry: {
+        ...telemetry([]),
+        users: [
+          { user: "alice", tty: "pts/0", loginTime: "2026-07-15 09:12", from: "10.0.0.5" },
+          { user: "alice", tty: "pts/1", loginTime: "2026-07-15 09:40", from: "10.0.0.5" },
+          { user: "bob", tty: "tty1", loginTime: "2026-07-14 22:03", from: null },
+        ],
+      },
+    });
+
+    render(<RemoteTelemetryBar />);
+
+    expect(screen.getByText("2 users")).toBeInTheDocument();
+    expect(screen.getByText("3 sessions")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /users/i }));
+
+    const dialog = screen.getByRole("dialog", { name: /logged-in users/i });
+    expect(within(dialog).getByText("pts/0")).toBeInTheDocument();
+    expect(within(dialog).getByText("tty1")).toBeInTheDocument();
+    expect(
+      mockInvoke.mock.calls.some(([command]) => command === "get_resource_details"),
+    ).toBe(false);
   });
 
   it("polls resource details on the configured telemetry interval", async () => {

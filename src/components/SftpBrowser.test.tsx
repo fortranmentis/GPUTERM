@@ -101,6 +101,33 @@ describe("SftpBrowser local path browse", () => {
     });
   });
 
+  it("fails the initial recent-path load silently", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "load_app_settings") {
+        return Promise.resolve({ recentLocalPath: "D:\\gone" });
+      }
+      if (command === "list_local_dir") {
+        return Promise.reject("Local path is unavailable or does not exist");
+      }
+      if (command === "sftp_list_dir") {
+        return Promise.resolve({ path: "/srv", entries: [] });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<SftpBrowser />);
+
+    await waitFor(() =>
+      expect(screen.getByLabelText(/local path/i)).toHaveValue("D:\\gone"),
+    );
+    await waitFor(() =>
+      expect(
+        mockInvoke.mock.calls.some(([command]) => command === "list_local_dir"),
+      ).toBe(true),
+    );
+    expect(useSessionStore.getState().message).toBeNull();
+  });
+
   it("calls dialog when Browse is clicked", async () => {
     mockOpen.mockResolvedValue(null);
     render(<SftpBrowser />);

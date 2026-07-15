@@ -158,6 +158,40 @@ describe("GpuUsagePopover", () => {
     expect(screen.queryByText("Driver")).not.toBeInTheDocument();
   });
 
+  it("moves with title-bar drag and keeps the position on window resize", () => {
+    render(<Harness metrics={[gpu0]} initialGpuUuid={gpu0.uuid} />);
+    const dialog = screen.getByRole("dialog", { name: /gpu details/i });
+    const title = dialog.querySelector(".resource-detail-title") as HTMLElement;
+
+    fireEvent.mouseDown(title, { clientX: 200, clientY: 200 });
+    fireEvent.mouseMove(window, { clientX: 260, clientY: 250 });
+    fireEvent.mouseUp(window);
+
+    const movedLeft = dialog.style.left;
+    const movedTop = dialog.style.top;
+    expect(movedLeft).not.toBe("");
+
+    fireEvent(window, new Event("resize"));
+    expect(dialog.style.left).toBe(movedLeft);
+    expect(dialog.style.top).toBe(movedTop);
+  });
+
+  it("resizes with the corner handle and drops the max-height cap", () => {
+    render(<Harness metrics={[gpu0]} initialGpuUuid={gpu0.uuid} />);
+    const dialog = screen.getByRole("dialog", { name: /gpu details/i });
+    const handle = dialog.querySelector(
+      ".resource-detail-resize-handle",
+    ) as HTMLElement;
+
+    fireEvent.mouseDown(handle, { clientX: 500, clientY: 500 });
+    fireEvent.mouseMove(window, { clientX: 620, clientY: 580 });
+    fireEvent.mouseUp(window);
+
+    expect(dialog.style.width).not.toBe("");
+    expect(dialog.style.height).not.toBe("");
+    expect(dialog.style.maxHeight).toBe("");
+  });
+
   it("renders processes without GPU identity or with duplicate pids without key collisions", () => {
     const anonymousProcess = {
       gpuIndex: null,

@@ -6,10 +6,19 @@ import { Terminal } from "@xterm/xterm";
 import { Terminal as TerminalIcon, X } from "lucide-react";
 import { useSessionStore } from "../stores/sessionStore";
 import { useDisconnectSession } from "../hooks/useDisconnectSession";
+import {
+  appendPendingOutput,
+  clearPendingOutput,
+  takePendingOutput,
+} from "../utils/terminalBuffer";
 
 type TerminalOutputPayload = {
   sessionId: string;
   data: string;
+};
+
+type TerminalClosedPayload = {
+  sessionId: string;
 };
 
 export function TerminalPane() {
@@ -25,6 +34,7 @@ export function TerminalPane() {
   const lastSessionRef = useRef<string | null>(activeSessionId);
   const wasConnectedRef = useRef(connected);
   const fitTimerRef = useRef<number | null>(null);
+  const pendingOutputRef = useRef<Map<string, string>>(new Map());
 
   const activeProfile =
     sessions.find((session) => session.id === activeSessionId) ?? null;
@@ -36,12 +46,19 @@ export function TerminalPane() {
     wasConnectedRef.current = connected;
     activeSessionRef.current = activeSessionId;
     connectedRef.current = connected;
-    if (terminalRef.current && (sessionChanged || reconnected)) {
-      terminalRef.current.reset();
+    const terminal = terminalRef.current;
+    if (terminal && (sessionChanged || reconnected)) {
+      terminal.reset();
     }
-    if (terminalRef.current && connected) {
+    if (terminal && connected && activeSessionId) {
+      // Replay output that arrived before this session was attached (e.g. the
+      // MOTD emitted while the connect invoke was still resolving).
+      const pending = takePendingOutput(pendingOutputRef.current, activeSessionId);
+      if (pending) {
+        terminal.write(pending);
+      }
       scheduleFit(60);
-      terminalRef.current.focus();
+      terminal.focus();
     }
   }, [activeSessionId, connected]);
 
@@ -119,23 +136,39 @@ export function TerminalPane() {
 
   useEffect(() => {
     let disposed = false;
-    let unlisten: (() => void) | null = null;
+    const unlisteners: Array<() => void> = [];
+    const register = (promise: Promise<() => void>) => {
+      promise.then((unlisten) => {
+        if (disposed) {
+          unlisten();
+        } else {
+          unlisteners.push(unlisten);
+        }
+      });
+    };
 
-    listen<TerminalOutputPayload>("terminal-output", (event) => {
-      if (event.payload.sessionId === activeSessionRef.current) {
-        terminalRef.current?.write(event.payload.data);
-      }
-    }).then((nextUnlisten) => {
-      if (disposed) {
-        nextUnlisten();
-      } else {
-        unlisten = nextUnlisten;
-      }
-    });
+    register(
+      listen<TerminalOutputPayload>("terminal-output", (event) => {
+        const { sessionId, data } = event.payload;
+        if (sessionId === activeSessionRef.current && connectedRef.current) {
+          terminalRef.current?.write(data);
+        } else {
+          appendPendingOutput(pendingOutputRef.current, sessionId, data);
+        }
+      }),
+    );
+
+    register(
+      listen<TerminalClosedPayload>("terminal-closed", (event) => {
+        // Drop buffered tail output (e.g. "logout") so it does not replay on
+        // the next connect to the same profile.
+        clearPendingOutput(pendingOutputRef.current, event.payload.sessionId);
+      }),
+    );
 
     return () => {
       disposed = true;
-      unlisten?.();
+      unlisteners.forEach((unlisten) => unlisten());
     };
   }, []);
 

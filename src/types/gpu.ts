@@ -45,6 +45,13 @@ export type DiskMetric = {
   usagePercent: number | null;
 };
 
+export type RemoteUserSession = {
+  user: string;
+  tty: string;
+  loginTime: string;
+  from: string | null;
+};
+
 export type RemoteTelemetry = {
   timestamp: string;
   hostname: string | null;
@@ -52,11 +59,13 @@ export type RemoteTelemetry = {
   memory: MemoryMetric | null;
   disks: DiskMetric[];
   gpu: GpuMetric[];
+  users: RemoteUserSession[];
   errors: {
     cpu?: string;
     memory?: string;
     disk?: string;
     gpu?: string;
+    users?: string;
   };
 };
 
