@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
   Activity,
   Cpu,
@@ -23,7 +24,11 @@ import { DiskUsagePopover } from "./DiskUsagePopover";
 import { GpuUsagePopover } from "./GpuUsagePopover";
 import { MemoryUsagePopover } from "./MemoryUsagePopover";
 import { UsersPopover } from "./UsersPopover";
-import { useSessionStore } from "../stores/sessionStore";
+import {
+  selectActiveTelemetry,
+  selectIsActiveConnected,
+  useSessionStore,
+} from "../stores/sessionStore";
 import type {
   GpuMetric,
   TelemetryDisplayMode,
@@ -49,10 +54,18 @@ import {
 
 type OpenResource = ResourceDetailType | "disk" | "users" | null;
 
+const DETAIL_TITLES: Record<Exclude<OpenResource, null>, string> = {
+  cpu: "CPU details",
+  memory: "Memory details",
+  gpu: "GPU details",
+  disk: "Disks",
+  users: "Logged-in users",
+};
+
 export function RemoteTelemetryBar() {
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
-  const connected = useSessionStore((state) => state.connected);
-  const telemetry = useSessionStore((state) => state.remoteTelemetry);
+  const connected = useSessionStore(selectIsActiveConnected);
+  const telemetry = useSessionStore(selectActiveTelemetry);
   const settings = useSessionStore((state) => state.telemetrySettings);
   const setTelemetrySettings = useSessionStore((state) => state.setTelemetrySettings);
   const setMessage = useSessionStore((state) => state.setMessage);
@@ -180,6 +193,35 @@ export function RemoteTelemetryBar() {
 
   const openDetail = (resource: OpenResource) => {
     setOpenResource((current) => (current === resource ? null : resource));
+  };
+
+  const popOut = async (resource: Exclude<OpenResource, null>) => {
+    if (!activeSessionId) {
+      return;
+    }
+    const label = `detail-${resource}-${activeSessionId}`;
+    try {
+      const existing = await WebviewWindow.getByLabel(label);
+      if (existing) {
+        await existing.setFocus();
+        setOpenResource(null);
+        return;
+      }
+      const detailWindow = new WebviewWindow(label, {
+        url: `/?window=detail&session=${encodeURIComponent(activeSessionId)}&resource=${resource}`,
+        title: `${DETAIL_TITLES[resource]} — ${telemetry?.hostname ?? "GpuTerm"}`,
+        width: 780,
+        height: 600,
+        minWidth: 420,
+        minHeight: 320,
+      });
+      void detailWindow.once("tauri://error", (event) => {
+        setMessage({ kind: "error", text: String(event.payload) });
+      });
+      setOpenResource(null);
+    } catch (error) {
+      setMessage({ kind: "error", text: String(error) });
+    }
   };
 
   const openGpuDetail = (
@@ -375,6 +417,7 @@ export function RemoteTelemetryBar() {
           loading={detailsLoading}
           anchorRef={cpuButtonRef}
           onClose={() => setOpenResource(null)}
+          onPopOut={() => void popOut("cpu")}
         />
       )}
       {openResource === "memory" && (
@@ -384,6 +427,7 @@ export function RemoteTelemetryBar() {
           loading={detailsLoading}
           anchorRef={memoryButtonRef}
           onClose={() => setOpenResource(null)}
+          onPopOut={() => void popOut("memory")}
         />
       )}
       {openResource === "gpu" && (
@@ -395,6 +439,7 @@ export function RemoteTelemetryBar() {
           loading={detailsLoading}
           anchorRef={gpuButtonRef}
           onClose={() => setOpenResource(null)}
+          onPopOut={() => void popOut("gpu")}
         />
       )}
       {openResource === "disk" && telemetry && (
@@ -403,6 +448,7 @@ export function RemoteTelemetryBar() {
           ignoredFsTypes={settings.diskIgnoreFsTypes}
           anchorRef={diskButtonRef}
           onClose={() => setOpenResource(null)}
+          onPopOut={() => void popOut("disk")}
         />
       )}
       {openResource === "users" && telemetry && (
@@ -411,6 +457,7 @@ export function RemoteTelemetryBar() {
           error={telemetry.errors.users}
           anchorRef={usersButtonRef}
           onClose={() => setOpenResource(null)}
+          onPopOut={() => void popOut("users")}
         />
       )}
     </footer>

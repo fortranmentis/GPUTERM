@@ -108,6 +108,7 @@ pub struct TelemetryErrors {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteTelemetry {
+    session_id: String,
     timestamp: String,
     hostname: Option<String>,
     cpu: Option<CpuMetric>,
@@ -167,7 +168,7 @@ pub fn start(
             let session = match open_ssh_session(&target) {
                 Ok(session) => session,
                 Err(error) => {
-                    emit_connection_error_telemetry(&app, &error);
+                    emit_connection_error_telemetry(&app, &target.session_id, &error);
                     sleep_with_stop_duration(backoff, &stop);
                     backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
                     continue;
@@ -183,7 +184,8 @@ pub fn start(
                     .lock()
                     .map(|settings| settings.clone())
                     .unwrap_or_default();
-                let telemetry = collect_remote_telemetry(&session, &mut previous_cpu);
+                let telemetry =
+                    collect_remote_telemetry(&target.session_id, &session, &mut previous_cpu);
                 consecutive_total_failures = if telemetry_all_failed(&telemetry) {
                     consecutive_total_failures + 1
                 } else {
@@ -201,10 +203,11 @@ pub fn start(
     });
 }
 
-fn emit_connection_error_telemetry(app: &AppHandle, error: &str) {
+fn emit_connection_error_telemetry(app: &AppHandle, session_id: &str, error: &str) {
     emit_telemetry(
         app,
         RemoteTelemetry {
+            session_id: session_id.to_string(),
             timestamp: timestamp(),
             hostname: None,
             cpu: None,
@@ -240,6 +243,7 @@ fn emit_telemetry(app: &AppHandle, telemetry: RemoteTelemetry) {
 }
 
 fn collect_remote_telemetry(
+    session_id: &str,
     session: &Session,
     previous_cpu: &mut Option<CpuStatSample>,
 ) -> RemoteTelemetry {
@@ -301,6 +305,7 @@ fn collect_remote_telemetry(
     };
 
     RemoteTelemetry {
+        session_id: session_id.to_string(),
         timestamp: timestamp(),
         hostname,
         cpu,
@@ -705,6 +710,7 @@ mod tests {
     #[test]
     fn detects_total_telemetry_failure() {
         let mut telemetry = RemoteTelemetry {
+            session_id: "session-test".to_string(),
             timestamp: String::new(),
             hostname: None,
             cpu: None,

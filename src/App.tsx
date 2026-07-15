@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { AlertCircle, CheckCircle2, Info, X } from "lucide-react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getAllWebviewWindows } from "@tauri-apps/api/webviewWindow";
+import { AppMessageOverlay } from "./components/AppMessage";
 import { RemoteTelemetryBar } from "./components/RemoteTelemetryBar";
 import { SessionSidebar } from "./components/SessionSidebar";
 import { SftpBrowser } from "./components/SftpBrowser";
@@ -30,11 +32,12 @@ function initialSftpWidth() {
 }
 
 function App() {
-  const message = useSessionStore((state) => state.message);
   const setSessions = useSessionStore((state) => state.setSessions);
   const setMessage = useSessionStore((state) => state.setMessage);
-  const setConnected = useSessionStore((state) => state.setConnected);
-  const setRemoteTelemetry = useSessionStore((state) => state.setRemoteTelemetry);
+  const removeConnectedSession = useSessionStore(
+    (state) => state.removeConnectedSession,
+  );
+  const setSessionTelemetry = useSessionStore((state) => state.setSessionTelemetry);
   const setTelemetrySettings = useSessionStore((state) => state.setTelemetrySettings);
   const [sftpWidth, setSftpWidth] = useState(initialSftpWidth);
   const workspaceGridRef = useRef<HTMLDivElement | null>(null);
@@ -79,11 +82,27 @@ function App() {
   }, [setMessage, setSessions, setTelemetrySettings]);
 
   useEffect(() => {
+    // Closing the main window must take the detached detail windows with it;
+    // otherwise the process keeps running until they are closed by hand.
+    const unlistenPromise = getCurrentWindow().onCloseRequested(async () => {
+      const windows = await getAllWebviewWindows();
+      await Promise.all(
+        windows
+          .filter((webviewWindow) => webviewWindow.label.startsWith("detail-"))
+          .map((webviewWindow) => webviewWindow.close().catch(() => undefined)),
+      );
+    });
+    return () => {
+      unlistenPromise.then((unlisten) => unlisten()).catch(() => undefined);
+    };
+  }, []);
+
+  useEffect(() => {
     let disposed = false;
     const unlisteners: Array<() => void> = [];
 
     listen<RemoteTelemetry>("remote-telemetry", (event) => {
-      setRemoteTelemetry(event.payload);
+      setSessionTelemetry(event.payload.sessionId, event.payload);
     }).then((unlisten) => {
       if (disposed) {
         unlisten();
@@ -93,13 +112,15 @@ function App() {
     });
 
     listen<TerminalClosedPayload>("terminal-closed", (event) => {
-      const activeSessionId = useSessionStore.getState().activeSessionId;
-      if (event.payload.sessionId === activeSessionId) {
-        setConnected(false);
-        setRemoteTelemetry(null);
-        if (event.payload.message) {
-          setMessage({ kind: "info", text: event.payload.message });
-        }
+      const state = useSessionStore.getState();
+      removeConnectedSession(event.payload.sessionId);
+      if (event.payload.message) {
+        const isActive = event.payload.sessionId === state.activeSessionId;
+        const profileName = state.sessions.find(
+          (session) => session.id === event.payload.sessionId,
+        )?.name;
+        const prefix = !isActive && profileName ? `${profileName}: ` : "";
+        setMessage({ kind: "info", text: `${prefix}${event.payload.message}` });
       }
     }).then((unlisten) => {
       if (disposed) {
@@ -134,36 +155,13 @@ function App() {
       disposed = true;
       unlisteners.forEach((unlisten) => unlisten());
     };
-  }, [setConnected, setMessage, setRemoteTelemetry]);
-
-  const messageIcon =
-    message?.kind === "error" ? (
-      <AlertCircle size={16} />
-    ) : message?.kind === "success" ? (
-      <CheckCircle2 size={16} />
-    ) : (
-      <Info size={16} />
-    );
+  }, [removeConnectedSession, setMessage, setSessionTelemetry]);
 
   return (
     <div className="app-shell">
       <SessionSidebar />
       <main className="workspace">
-        {message && (
-          <div className={`app-message ${message.kind}`}>
-            {messageIcon}
-            <span>{message.text}</span>
-            <button
-              className="icon-button ghost"
-              type="button"
-              aria-label="Dismiss message"
-              title="Dismiss"
-              onClick={() => setMessage(null)}
-            >
-              <X size={16} />
-            </button>
-          </div>
-        )}
+        <AppMessageOverlay />
         <div
           className="workspace-grid"
           ref={workspaceGridRef}

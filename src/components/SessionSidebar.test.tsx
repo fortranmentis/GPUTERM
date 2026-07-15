@@ -36,7 +36,7 @@ describe("SessionSidebar profile form", () => {
     useSessionStore.setState({
       sessions: [savedProfile],
       activeSessionId: null,
-      connected: false,
+      connectedSessionIds: [],
       message: null,
     });
   });

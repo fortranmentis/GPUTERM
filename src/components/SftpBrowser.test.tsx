@@ -70,7 +70,7 @@ describe("SftpBrowser local path browse", () => {
     useTransferStore.setState({ tasks: [], activeDrag: null });
     useSessionStore.setState({
       activeSessionId: "session-1",
-      connected: true,
+      connectedSessionIds: ["session-1"],
       message: null,
     });
     mockInvoke.mockImplementation((command, args) => {

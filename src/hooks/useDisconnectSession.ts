@@ -2,25 +2,32 @@ import { invoke } from "@tauri-apps/api/core";
 import { useSessionStore } from "../stores/sessionStore";
 
 /**
- * Returns an async handler that disconnects the active terminal session and
- * resets the related session-store state. No-ops when nothing is connected.
+ * Returns an async handler that disconnects a terminal session (the active
+ * one by default) and updates the session store. When the active session is
+ * disconnected, the view falls back to the most recently connected session.
  */
 export function useDisconnectSession() {
-  const activeSessionId = useSessionStore((state) => state.activeSessionId);
-  const setConnected = useSessionStore((state) => state.setConnected);
+  const removeConnectedSession = useSessionStore(
+    (state) => state.removeConnectedSession,
+  );
   const setActiveSession = useSessionStore((state) => state.setActiveSession);
-  const setRemoteTelemetry = useSessionStore((state) => state.setRemoteTelemetry);
   const setMessage = useSessionStore((state) => state.setMessage);
 
-  return async () => {
-    if (!activeSessionId) {
+  return async (sessionId?: string) => {
+    const state = useSessionStore.getState();
+    const id = sessionId ?? state.activeSessionId;
+    if (!id || !state.connectedSessionIds.includes(id)) {
       return;
     }
     try {
-      await invoke("disconnect_terminal", { sessionId: activeSessionId });
-      setConnected(false);
-      setActiveSession(null);
-      setRemoteTelemetry(null);
+      await invoke("disconnect_terminal", { sessionId: id });
+      removeConnectedSession(id);
+      if (state.activeSessionId === id) {
+        const remaining = state.connectedSessionIds.filter(
+          (connectedId) => connectedId !== id,
+        );
+        setActiveSession(remaining[remaining.length - 1] ?? null);
+      }
       setMessage({ kind: "info", text: "Disconnected" });
     } catch (error) {
       setMessage({ kind: "error", text: String(error) });

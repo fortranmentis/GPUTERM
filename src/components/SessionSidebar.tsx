@@ -10,7 +10,7 @@ import {
   Trash2,
   Unplug,
 } from "lucide-react";
-import { useSessionStore } from "../stores/sessionStore";
+import { selectIsActiveConnected, useSessionStore } from "../stores/sessionStore";
 import { useDisconnectSession } from "../hooks/useDisconnectSession";
 import type {
   SessionConnectRequest,
@@ -78,12 +78,12 @@ async function withHostKeyPrompt<T>(action: () => Promise<T>): Promise<T> {
 export function SessionSidebar() {
   const sessions = useSessionStore((state) => state.sessions);
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
-  const connected = useSessionStore((state) => state.connected);
+  const connectedSessionIds = useSessionStore((state) => state.connectedSessionIds);
+  const isActiveConnected = useSessionStore(selectIsActiveConnected);
   const setSessions = useSessionStore((state) => state.setSessions);
   const setActiveSession = useSessionStore((state) => state.setActiveSession);
-  const setConnected = useSessionStore((state) => state.setConnected);
+  const addConnectedSession = useSessionStore((state) => state.addConnectedSession);
   const setMessage = useSessionStore((state) => state.setMessage);
-  const setRemoteTelemetry = useSessionStore((state) => state.setRemoteTelemetry);
   const disconnectSession = useDisconnectSession();
   const [form, setForm] = useState<SessionForm>(blankForm);
   const [busy, setBusy] = useState(false);
@@ -143,8 +143,7 @@ export function SessionSidebar() {
         }),
       );
       setActiveSession(info.sessionId);
-      setConnected(true);
-      setRemoteTelemetry(null);
+      addConnectedSession(info.sessionId);
       updateForm({
         id: info.profile.id,
         name: info.profile.name,
@@ -215,11 +214,8 @@ export function SessionSidebar() {
     }
     setBusy(true);
     try {
-      if (form.id === activeSessionId) {
-        await invoke("disconnect_terminal", { sessionId: form.id });
-        setConnected(false);
-        setActiveSession(null);
-        setRemoteTelemetry(null);
+      if (connectedSessionIds.includes(form.id)) {
+        await disconnectSession(form.id);
       }
       const nextSessions = await invoke<SessionProfile[]>("delete_session", {
         id: form.id,
@@ -256,6 +252,10 @@ export function SessionSidebar() {
       password: "",
       privateKeyPath: session.privateKeyPath ?? "",
     });
+    // Clicking a live session switches the terminal/SFTP/telemetry view to it.
+    if (connectedSessionIds.includes(session.id)) {
+      setActiveSession(session.id);
+    }
   };
 
   return (
@@ -264,7 +264,7 @@ export function SessionSidebar() {
         <div className="brand-mark">GT</div>
         <div>
           <h1>GpuTerm</h1>
-          <p>{connected && activeProfile ? activeProfile.host : "SSH/SFTP"}</p>
+          <p>{isActiveConnected && activeProfile ? activeProfile.host : "SSH/SFTP"}</p>
         </div>
       </div>
 
@@ -383,10 +383,15 @@ export function SessionSidebar() {
             key={session.id}
             className={`session-item ${
               session.id === form.id ? "selected" : ""
-            } ${session.id === activeSessionId ? "active" : ""}`}
+            } ${session.id === activeSessionId ? "active" : ""} ${
+              connectedSessionIds.includes(session.id) ? "connected" : ""
+            }`}
             type="button"
             onClick={() => selectSession(session)}
           >
+            {connectedSessionIds.includes(session.id) && (
+              <span className="status-dot" aria-hidden="true" />
+            )}
             <Server size={16} />
             <span>
               <strong>{session.name}</strong>
@@ -402,7 +407,7 @@ export function SessionSidebar() {
       <button
         className="disconnect-button"
         type="button"
-        disabled={!connected || busy}
+        disabled={!isActiveConnected || busy}
         onClick={disconnect}
       >
         <Unplug size={16} />

@@ -8,6 +8,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
+import { ExternalLink } from "lucide-react";
 import { createPortal } from "react-dom";
 
 const MIN_POPOVER_WIDTH = 360;
@@ -27,6 +28,7 @@ type ResourceDetailPopoverProps = {
   children: ReactNode;
   className?: string;
   onClose: () => void;
+  onPopOut?: () => void;
 };
 
 export function ResourceDetailPopover({
@@ -38,6 +40,7 @@ export function ResourceDetailPopover({
   children,
   className = "",
   onClose,
+  onPopOut,
 }: ResourceDetailPopoverProps) {
   const [style, setStyle] = useState<CSSProperties>({});
   const popoverRef = useRef<HTMLDivElement | null>(null);
@@ -196,7 +199,20 @@ export function ResourceDetailPopover({
       >
         {icon}
         <strong>{title}</strong>
-        {headerActions && <div className="resource-detail-actions">{headerActions}</div>}
+        <div className="resource-detail-actions">
+          {headerActions}
+          {onPopOut && (
+            <button
+              className="icon-button ghost"
+              type="button"
+              aria-label="Open in separate window"
+              title="Open in separate window"
+              onClick={onPopOut}
+            >
+              <ExternalLink size={14} />
+            </button>
+          )}
+        </div>
       </div>
       <div className="resource-detail-content">{children}</div>
       <div

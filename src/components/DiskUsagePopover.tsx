@@ -15,14 +15,16 @@ type DiskUsagePopoverProps = {
   ignoredFsTypes: string[];
   anchorRef: RefObject<HTMLElement | null>;
   onClose: () => void;
+  onPopOut?: () => void;
 };
 
-export function DiskUsagePopover({
+export function DiskDetailContent({
   disks,
   ignoredFsTypes,
-  anchorRef,
-  onClose,
-}: DiskUsagePopoverProps) {
+}: {
+  disks: DiskMetric[];
+  ignoredFsTypes: string[];
+}) {
   const [showHidden, setShowHidden] = useState(false);
   const visibleDisks = useMemo(
     () =>
@@ -33,23 +35,15 @@ export function DiskUsagePopover({
   );
 
   return (
-    <ResourceDetailPopover
-      anchorRef={anchorRef}
-      ariaLabel="Disk details"
-      title="Disks"
-      icon={<HardDrive size={16} />}
-      headerActions={
-        <label className="toggle-row">
-          <input
-            type="checkbox"
-            checked={showHidden}
-            onChange={(event) => setShowHidden(event.target.checked)}
-          />
-          <span>Show hidden filesystems</span>
-        </label>
-      }
-      onClose={onClose}
-    >
+    <>
+      <label className="toggle-row disk-hidden-toggle">
+        <input
+          type="checkbox"
+          checked={showHidden}
+          onChange={(event) => setShowHidden(event.target.checked)}
+        />
+        <span>Show hidden filesystems</span>
+      </label>
       {visibleDisks.length === 0 ? (
         <div className="empty-list">Disk metrics unavailable</div>
       ) : (
@@ -83,6 +77,27 @@ export function DiskUsagePopover({
           ))}
         </div>
       )}
+    </>
+  );
+}
+
+export function DiskUsagePopover({
+  disks,
+  ignoredFsTypes,
+  anchorRef,
+  onClose,
+  onPopOut,
+}: DiskUsagePopoverProps) {
+  return (
+    <ResourceDetailPopover
+      anchorRef={anchorRef}
+      ariaLabel="Disk details"
+      title="Disks"
+      icon={<HardDrive size={16} />}
+      onClose={onClose}
+      onPopOut={onPopOut}
+    >
+      <DiskDetailContent disks={disks} ignoredFsTypes={ignoredFsTypes} />
     </ResourceDetailPopover>
   );
 }

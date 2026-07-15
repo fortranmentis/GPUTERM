@@ -77,8 +77,9 @@ function disk(mountPoint: string, usagePercent: number | null): DiskMetric {
   };
 }
 
-function telemetry(disks: DiskMetric[]): RemoteTelemetry {
+function telemetry(disks: DiskMetric[], sessionId = "session-1"): RemoteTelemetry {
   return {
+    sessionId,
     timestamp: "2026-06-16T00:00:00.000Z",
     hostname: "lab",
     cpu: null,
@@ -88,6 +89,12 @@ function telemetry(disks: DiskMetric[]): RemoteTelemetry {
     users: [],
     errors: {},
   };
+}
+
+function setTelemetry(payload: RemoteTelemetry) {
+  useSessionStore.setState({
+    telemetryBySession: { [payload.sessionId]: payload },
+  });
 }
 
 function gpuSummary(metric: GpuDetailMetric): GpuMetric {
@@ -118,8 +125,8 @@ describe("RemoteTelemetryBar disk summary", () => {
     });
     useSessionStore.setState({
       activeSessionId: "session-1",
-      connected: true,
-      remoteTelemetry: telemetry([]),
+      connectedSessionIds: ["session-1"],
+      telemetryBySession: { "session-1": telemetry([]) },
       telemetrySettings: {
         telemetryIntervalSecs: 2,
         displayMode: "gpu-system",
@@ -130,14 +137,14 @@ describe("RemoteTelemetryBar disk summary", () => {
   });
 
   it("renders at most two mount points and hidden count", () => {
-    useSessionStore.setState({
-      remoteTelemetry: telemetry([
+    setTelemetry(
+      telemetry([
         disk("/mnt/storage", 39),
         disk("/", 46),
         disk("/data", 43),
         disk("/media/backup", 70),
       ]),
-    });
+    );
 
     render(<RemoteTelemetryBar />);
 
@@ -150,9 +157,7 @@ describe("RemoteTelemetryBar disk summary", () => {
   });
 
   it("renders ? when usage percent is null", () => {
-    useSessionStore.setState({
-      remoteTelemetry: telemetry([disk("/", null)]),
-    });
+    setTelemetry(telemetry([disk("/", null)]));
 
     render(<RemoteTelemetryBar />);
 
@@ -160,14 +165,14 @@ describe("RemoteTelemetryBar disk summary", () => {
   });
 
   it("opens disk detail popover and shows the full non-hidden mount list", () => {
-    useSessionStore.setState({
-      remoteTelemetry: telemetry([
+    setTelemetry(
+      telemetry([
         disk("/", 46),
         disk("/data", 43),
         disk("/mnt/storage", 39),
         { ...disk("/run", 1), fsType: "tmpfs" },
       ]),
-    });
+    );
 
     render(<RemoteTelemetryBar />);
 
@@ -179,9 +184,7 @@ describe("RemoteTelemetryBar disk summary", () => {
   });
 
   it("closes disk detail popover with Escape or outside click", () => {
-    useSessionStore.setState({
-      remoteTelemetry: telemetry([disk("/", 46)]),
-    });
+    setTelemetry(telemetry([disk("/", 46)]));
 
     render(<RemoteTelemetryBar />);
 
@@ -197,9 +200,7 @@ describe("RemoteTelemetryBar disk summary", () => {
   });
 
   it("marks warning and critical disks in the detail popover", () => {
-    useSessionStore.setState({
-      remoteTelemetry: telemetry([disk("/warn", 82), disk("/critical", 93)]),
-    });
+    setTelemetry(telemetry([disk("/warn", 82), disk("/critical", 93)]));
 
     render(<RemoteTelemetryBar />);
 
@@ -261,15 +262,13 @@ describe("RemoteTelemetryBar disk summary", () => {
   });
 
   it("shows logged-in users and opens the users popover without a details request", async () => {
-    useSessionStore.setState({
-      remoteTelemetry: {
-        ...telemetry([]),
-        users: [
-          { user: "alice", tty: "pts/0", loginTime: "2026-07-15 09:12", from: "10.0.0.5" },
-          { user: "alice", tty: "pts/1", loginTime: "2026-07-15 09:40", from: "10.0.0.5" },
-          { user: "bob", tty: "tty1", loginTime: "2026-07-14 22:03", from: null },
-        ],
-      },
+    setTelemetry({
+      ...telemetry([]),
+      users: [
+        { user: "alice", tty: "pts/0", loginTime: "2026-07-15 09:12", from: "10.0.0.5" },
+        { user: "alice", tty: "pts/1", loginTime: "2026-07-15 09:40", from: "10.0.0.5" },
+        { user: "bob", tty: "tty1", loginTime: "2026-07-14 22:03", from: null },
+      ],
     });
 
     render(<RemoteTelemetryBar />);
@@ -359,9 +358,11 @@ describe("RemoteTelemetryBar disk summary", () => {
     });
     useSessionStore.setState({
       activeSessionId: "session-1",
-      remoteTelemetry: {
-        ...telemetry([]),
-        gpu: [gpuSummary(sessionOneGpu0), gpuSummary(sessionOneGpu1)],
+      telemetryBySession: {
+        "session-1": {
+          ...telemetry([]),
+          gpu: [gpuSummary(sessionOneGpu0), gpuSummary(sessionOneGpu1)],
+        },
       },
     });
 
@@ -384,9 +385,12 @@ describe("RemoteTelemetryBar disk summary", () => {
     act(() => {
       useSessionStore.setState({
         activeSessionId: "session-2",
-        remoteTelemetry: {
-          ...telemetry([]),
-          gpu: [gpuSummary(sessionTwoGpu)],
+        connectedSessionIds: ["session-1", "session-2"],
+        telemetryBySession: {
+          "session-2": {
+            ...telemetry([], "session-2"),
+            gpu: [gpuSummary(sessionTwoGpu)],
+          },
         },
       });
     });

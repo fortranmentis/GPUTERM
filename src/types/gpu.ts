@@ -53,6 +53,7 @@ export type RemoteUserSession = {
 };
 
 export type RemoteTelemetry = {
+  sessionId: string;
   timestamp: string;
   hostname: string | null;
   cpu: CpuMetric | null;

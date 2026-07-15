@@ -18,6 +18,7 @@ export type TransferTask = {
   progressPercent: number | null;
   status: TransferStatus;
   error?: string;
+  sessionId?: string;
 };
 
 export type LocalTransferDragFile = {

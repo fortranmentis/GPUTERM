@@ -345,6 +345,7 @@ button:disabled {
 
 .session-item {
   display: grid;
+  position: relative;
   grid-template-columns: 18px minmax(0, 1fr) 16px;
   align-items: center;
   gap: 10px;
@@ -356,6 +357,17 @@ button:disabled {
   background: transparent;
   color: var(--text);
   text-align: left;
+}
+
+.session-item .status-dot {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #34d399;
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.7);
 }
 
 .session-item:hover,
@@ -489,9 +501,15 @@ button:disabled {
 }
 
 .xterm-host {
-  width: 100%;
-  height: 100%;
+  position: absolute;
+  inset: 0;
   padding: 8px;
+}
+
+.xterm-host-hidden {
+  /* Keep hidden terminals laid out so xterm's fit() still sees real
+     dimensions; display:none would collapse them to 0x0. */
+  visibility: hidden;
 }
 
 .terminal-empty {
@@ -1521,6 +1539,84 @@ button.telemetry-section:hover {
 
 .app-message.error {
   color: #fecaca;
+}
+
+.app-toast {
+  left: 50%;
+  right: auto;
+  z-index: 30;
+  width: max-content;
+  max-width: min(560px, 80%);
+  transform: translateX(-50%);
+}
+
+.app-modal-backdrop {
+  display: grid;
+  position: fixed;
+  z-index: 50;
+  inset: 0;
+  place-items: center;
+  background: rgba(4, 7, 11, 0.6);
+}
+
+.app-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(480px, calc(100vw - 48px));
+  gap: 12px;
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #0c1118;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+}
+
+.app-modal-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #fca5a5;
+  font-size: 14px;
+}
+
+.app-modal-text {
+  margin: 0;
+  color: #e2e8f0;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: break-word;
+}
+
+.app-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.detail-window {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: #0c1118;
+  color: var(--text);
+}
+
+.detail-window-header {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line);
+  color: #cbd5e1;
+}
+
+.detail-window-content {
+  padding: 12px 14px;
+}
+
+.disk-hidden-toggle {
+  padding: 4px 12px 8px;
 }
 
 @media (max-width: 1180px) {

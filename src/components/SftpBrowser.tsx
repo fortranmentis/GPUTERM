@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type DragEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { confirm as confirmDialog, open } from "@tauri-apps/plugin-dialog";
@@ -6,7 +6,7 @@ import { Download, FolderPlus, Trash2, Upload } from "lucide-react";
 import { LocalFilePanel } from "./LocalFilePanel";
 import { RemoteFilePanel } from "./RemoteFilePanel";
 import { TransferQueue } from "./TransferQueue";
-import { useSessionStore } from "../stores/sessionStore";
+import { selectIsActiveConnected, useSessionStore } from "../stores/sessionStore";
 import { useTransferStore } from "../stores/transferStore";
 import type {
   AppSettings,
@@ -38,7 +38,7 @@ type SftpTransferRequest = {
 
 export function SftpBrowser() {
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
-  const connected = useSessionStore((state) => state.connected);
+  const connected = useSessionStore(selectIsActiveConnected);
   const setMessage = useSessionStore((state) => state.setMessage);
   const addTask = useTransferStore((state) => state.addTask);
   const updateTask = useTransferStore((state) => state.updateTask);
@@ -56,6 +56,7 @@ export function SftpBrowser() {
   const [loading, setLoading] = useState(false);
   const [remoteDropActive, setRemoteDropActive] = useState(false);
   const [localDropActive, setLocalDropActive] = useState(false);
+  const pathBySessionRef = useRef<Map<string, string>>(new Map());
 
   const selectedEntry = useMemo(
     () => entries.find((entry) => selectedRemotePaths.includes(entry.path)) ?? null,
@@ -92,8 +93,13 @@ export function SftpBrowser() {
 
   useEffect(() => {
     if (connected && activeSessionId) {
-      loadDirectory(path).catch((error) =>
-        setMessage({ kind: "error", text: String(error) }),
+      // Each session remembers its own remote path; fall back to the SFTP
+      // starting directory when the remembered path no longer resolves.
+      const remembered = pathBySessionRef.current.get(activeSessionId) ?? ".";
+      loadDirectory(remembered).catch(() =>
+        loadDirectory(".").catch((error) =>
+          setMessage({ kind: "error", text: String(error) }),
+        ),
       );
     } else {
       setEntries([]);
@@ -105,10 +111,10 @@ export function SftpBrowser() {
     let disposed = false;
     let unlisten: (() => void) | null = null;
 
+    // No session filter: transfer ids are globally unique and background
+    // sessions' transfers must keep updating while another session is viewed.
     listen<SftpProgressPayload>("sftp-progress", (event) => {
-      if (event.payload.sessionId === activeSessionId) {
-        updateFromProgress(event.payload);
-      }
+      updateFromProgress(event.payload);
     }).then((nextUnlisten) => {
       if (disposed) {
         nextUnlisten();
@@ -121,22 +127,28 @@ export function SftpBrowser() {
       disposed = true;
       unlisten?.();
     };
-  }, [activeSessionId, updateFromProgress]);
+  }, [updateFromProgress]);
 
   const loadDirectory = async (nextPath: string) => {
-    if (!activeSessionId) {
+    const sessionId = activeSessionId;
+    if (!sessionId) {
       return;
     }
     setLoading(true);
     try {
       const response = await invoke<SftpListResponse>("sftp_list_dir", {
-        sessionId: activeSessionId,
+        sessionId,
         path: nextPath,
       });
-      setPath(response.path);
-      setPathDraft(response.path);
-      setEntries(response.entries);
-      setSelectedRemotePaths([]);
+      // Record against the invoked session so a fast session switch cannot
+      // attribute this listing to the wrong session.
+      pathBySessionRef.current.set(sessionId, response.path);
+      if (useSessionStore.getState().activeSessionId === sessionId) {
+        setPath(response.path);
+        setPathDraft(response.path);
+        setEntries(response.entries);
+        setSelectedRemotePaths([]);
+      }
     } finally {
       setLoading(false);
     }
@@ -266,6 +278,9 @@ export function SftpBrowser() {
       });
     }
 
+    // Pin the session at enqueue time: transfers keep targeting it even if
+    // the user switches sessions while they run.
+    const sessionId = activeSessionId;
     await Promise.all(
       uploadable.map(async (file) => {
         const remotePath = joinRemotePath(targetDirectory, file.name);
@@ -275,6 +290,7 @@ export function SftpBrowser() {
           file.path,
           remotePath,
           file.size,
+          sessionId,
         );
         addTask(task);
         let shouldTransfer = false;
@@ -283,7 +299,7 @@ export function SftpBrowser() {
             "sftp_path_exists",
             {
               request: {
-                sessionId: activeSessionId,
+                sessionId,
                 remotePath,
               },
             },
@@ -304,11 +320,15 @@ export function SftpBrowser() {
           return;
         }
         runTransfer("sftp_upload_file", task, {
-          sessionId: activeSessionId,
+          sessionId,
           remotePath,
           localPath: file.path,
           transferId: task.id,
-        }).then(() => loadDirectory(path).catch(() => undefined));
+        }).then(() => {
+          if (useSessionStore.getState().activeSessionId === sessionId) {
+            loadDirectory(path).catch(() => undefined);
+          }
+        });
       }),
     );
   };
@@ -326,6 +346,7 @@ export function SftpBrowser() {
       });
     }
 
+    const sessionId = activeSessionId;
     await Promise.all(
       downloadable.map(async (file) => {
         const targetLocalPath = joinLocalPath(localPath.trim(), file.name);
@@ -335,6 +356,7 @@ export function SftpBrowser() {
           file.path,
           targetLocalPath,
           file.size,
+          sessionId,
         );
         addTask(task);
         let shouldTransfer = false;
@@ -359,7 +381,7 @@ export function SftpBrowser() {
           return;
         }
         runTransfer("sftp_download_file", task, {
-          sessionId: activeSessionId,
+          sessionId,
           remotePath: file.path,
           localPath: targetLocalPath,
           transferId: task.id,
@@ -646,6 +668,7 @@ function createTransferTask(
   sourcePath: string,
   targetPath: string,
   totalBytes: number | null,
+  sessionId?: string,
 ): TransferTask {
   return {
     id: createTransferId(),
@@ -657,6 +680,7 @@ function createTransferTask(
     transferredBytes: 0,
     progressPercent: totalBytes === 0 ? 100 : null,
     status: "pending",
+    sessionId,
   };
 }
 
