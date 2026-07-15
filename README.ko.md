@@ -69,6 +69,7 @@
 - Visual Studio Build Tools 2022 (*Desktop development with C++* 워크로드)
 - WebView2 Runtime (Windows 10/11에는 기본 포함)
 - Git for Windows
+- [Strawberry Perl](https://strawberryperl.com) (`winget install StrawberryPerl.StrawberryPerl`) — SSH 라이브러리가 사용하는 내장 OpenSSL 컴파일에 필요
 
 **macOS**
 ```bash

@@ -69,6 +69,7 @@ Grab the installer for your OS from the [latest release](https://github.com/fort
 - Visual Studio Build Tools 2022 with the *Desktop development with C++* workload
 - WebView2 Runtime (preinstalled on Windows 10/11)
 - Git for Windows
+- [Strawberry Perl](https://strawberryperl.com) (`winget install StrawberryPerl.StrawberryPerl`) — required to compile the vendored OpenSSL that backs the SSH library
 
 **macOS**
 ```bash
