@@ -1,402 +1,221 @@
+<div align="center">
+
 # GpuTerm
 
-[English](./README.md) | [한국어](./README.ko.md)
+**The all-in-one SSH/SFTP desktop client for GPU servers.**
 
-GpuTerm is a Tauri + React + TypeScript + Rust desktop MVP for managing SSH/SFTP sessions to GPU servers. It is shaped like an all-in-one SSH client, with a remote telemetry status bar that polls CPU, memory, disk, and NVIDIA GPU health through SSH.
+Terminal, file transfers, and real-time CPU · RAM · Disk · NVIDIA GPU telemetry — in a single native window.
 
-Current prerelease: [`v1.0.3-beta`](https://github.com/fortranmentis/GPUTERM/releases/tag/v1.0.3-beta)
+[![Release](https://img.shields.io/github/v/release/fortranmentis/GPUTERM?include_prereleases&label=release&color=2ea44f)](https://github.com/fortranmentis/GPUTERM/releases)
+[![License: MIT](https://img.shields.io/github/license/fortranmentis/GPUTERM?color=blue)](./LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-8b5cf6)](#installation)
+[![Built with Tauri](https://img.shields.io/badge/Tauri-2-FFC131?logo=tauri&logoColor=white)](https://tauri.app)
+[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white)](https://react.dev)
+[![Rust](https://img.shields.io/badge/Rust-stable-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org)
+
+[English](./README.md) · [한국어](./README.ko.md)
+
+</div>
+
+---
+
+Working on a remote GPU box usually means juggling an SSH client, an SFTP tool, and a second terminal running `watch nvidia-smi`. **GpuTerm replaces all three.** Connect once and get an xterm.js terminal, a drag-and-drop SFTP browser, and a live telemetry bar that polls CPU, memory, disk, logged-in users, and every NVIDIA GPU on the host — over its own SSH channel, so monitoring never blocks your shell.
+
+> **Status:** beta. Download the latest prerelease from the [Releases](https://github.com/fortranmentis/GPUTERM/releases) page or build from source below.
 
 ## Features
 
-- Local SSH session profiles with host, port, username, and private key path.
-- Passwords are accepted for connection attempts but are not written to local JSON.
-- xterm.js terminal connected to a Rust `ssh2` PTY shell.
-- Terminal resize propagation from xterm to the remote PTY.
-- Buffered UTF-8 terminal output so multibyte characters remain intact across SSH read chunks.
-- SFTP directory browsing, upload, download, delete, and mkdir commands.
-- SFTP drag-and-drop upload/download with transfer queue progress.
-- Chunked SFTP transfers with progress events, per-file cancellation, and safe temporary downloads.
-- Remote telemetry monitor that polls Linux CPU, memory, disk, and NVIDIA GPU metrics on a separate SSH session.
-- Configurable telemetry interval, display mode, and ignored disk filesystem types.
-- Explicit trust-on-first-use host key prompt with SHA-256 fingerprint and mismatch blocking.
-- Tauri content security policy for production and development windows.
+### 🖥️ SSH Terminal
+- Full PTY terminal powered by [xterm.js](https://xtermjs.org) and Rust [`ssh2`](https://crates.io/crates/ssh2)
+- Password, private key (with passphrase), and SSH agent authentication
+- UTF-8 safe streaming — multibyte characters (한글, 日本語, emoji) survive chunked reads
+- MOTD and early output are buffered and replayed, never lost to connection races
+- Automatic remote PTY resize and SSH keepalive
 
-## Project Structure
+### 📁 SFTP Browser
+- Side-by-side remote/local panels with drag-and-drop upload & download
+- Streaming 1 MiB chunked transfers with a progress queue and **per-file cancellation**
+- Downloads are written to a temporary file and atomically renamed — no partial files ever
+- Overwrite confirmation, delete, mkdir, and a native OS folder picker
+- Resizable split between terminal and SFTP panes (persisted across launches)
 
-```text
-src/
-  components/
-    RemoteTelemetryBar.tsx
-    SessionSidebar.tsx
-    SftpBrowser.tsx
-    TerminalPane.tsx
-  hooks/
-    useDisconnectSession.ts
-  stores/
-    sessionStore.ts
-  types/
-    gpu.ts
-    session.ts
-  utils/
-    format.ts
-src-tauri/
-  src/
-    ssh/
-      credentials.rs
-      gpu_monitor.rs
-      mod.rs
-      parse_util.rs
-      resource_details.rs
-      session.rs
-      sftp.rs
-      system_monitor.rs
-      terminal.rs
-    lib.rs
-    main.rs
-```
+### 📊 Live Telemetry
+- Bottom status bar polling CPU, RAM, disk, logged-in users, and NVIDIA GPUs every 1–10 s
+- Click any section for a **draggable, resizable detail popover**: per-core CPU usage, top processes, VRAM/power/temperature per GPU, full mount list
+- Telemetry runs on a dedicated SSH connection with automatic reconnect and exponential backoff
+- Non-NVIDIA hosts gracefully fall back to system-only metrics
+
+### 🔐 Security by default
+- Passwords live in memory only — never written to disk
+- Trust-on-first-use host key prompt with SHA-256 fingerprint; mismatches block the connection
+- Restrictive Tauri Content Security Policy in production and development
 
 ## Installation
 
-Prerequisites:
+### Prebuilt binaries
 
-- Node.js 20 or newer
-- npm 10 or newer
-- Rust stable toolchain with `cargo` and `rustc`
-- Tauri desktop prerequisites for your OS
+Grab the installer for your OS from the [latest release](https://github.com/fortranmentis/GPUTERM/releases) (`.msi`/`.exe`, `.dmg`, `.deb`/`.AppImage`).
 
-Windows prerequisites:
+### Build from source
 
-- Microsoft Visual Studio Build Tools 2022
-- Desktop development with C++ workload
-- WebView2 Runtime
+**Prerequisites:** [Node.js](https://nodejs.org) ≥ 20, npm ≥ 10, [Rust](https://rustup.rs) stable, and the [Tauri prerequisites](https://tauri.app/start/prerequisites/) for your OS.
+
+<details>
+<summary>Per-OS prerequisite details</summary>
+
+**Windows**
+- Visual Studio Build Tools 2022 with the *Desktop development with C++* workload
+- WebView2 Runtime (preinstalled on Windows 10/11)
 - Git for Windows
 
-macOS prerequisites:
-
-- Xcode Command Line Tools
-
+**macOS**
 ```bash
 xcode-select --install
 ```
 
-Linux prerequisites vary by distribution. For Debian/Ubuntu, install the WebKitGTK, build, and SSL packages required by Tauri:
-
+**Linux (Debian/Ubuntu)**
 ```bash
 sudo apt update
-sudo apt install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+sudo apt install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+  libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
 ```
 
-Clone the repository:
+</details>
 
 ```bash
 git clone https://github.com/fortranmentis/GPUTERM.git
 cd GPUTERM
-```
-
-Install JavaScript dependencies:
-
-```bash
 npm install
-```
 
-Check that the Rust toolchain is available:
-
-```bash
-cargo --version
-rustc --version
-```
-
-## Development Run
-
-Start the full Tauri desktop app:
-
-```bash
+# Run the desktop app in development mode
 npm run tauri:dev
-```
 
-This starts the Vite frontend and opens the native Tauri desktop window. Use this mode for SSH terminal, SFTP, local folder browsing, and telemetry testing because those features depend on Tauri commands and events.
-
-Run only the browser-based Vite frontend:
-
-```bash
-npm run dev
-```
-
-The Vite-only mode is useful for layout work, but native Tauri APIs such as the folder picker and Rust SSH commands are not available in a normal browser tab.
-
-Run the test suite:
-
-```bash
-npm run test
-cargo test --manifest-path src-tauri/Cargo.toml
-```
-
-Run production checks:
-
-```bash
-npm run build
-cargo check --manifest-path src-tauri/Cargo.toml
-```
-
-## Build
-
-Create a packaged desktop build:
-
-```bash
+# Package a distributable build (output: src-tauri/target/release/bundle)
 npm run tauri:build
 ```
 
-The packaged app is emitted by Tauri under:
-
-```text
-src-tauri/target/release/bundle
-```
-
-Typical outputs are `.msi`/`.exe` on Windows, `.dmg`/`.app` on macOS, and `.deb`/`.AppImage` depending on the Linux bundle configuration.
+> `npm run dev` starts the Vite frontend alone — useful for layout work, but SSH/SFTP/telemetry require the full Tauri app.
 
 ## Usage
 
-Start the app with:
+1. **Create a profile** — enter host, port, username, and a password or private key path in the sidebar. Press **New** to start a fresh profile, **Save** to keep it.
+2. **Connect** — on first contact GpuTerm shows the server's SHA-256 host key fingerprint and asks for confirmation before trusting it.
+3. **Work** — type in the terminal, drag files between the SFTP panels, and watch live metrics in the bottom bar. Click CPU / RAM / Disk / GPU / Users for detail popovers you can drag around and resize.
 
-```bash
-npm run tauri:dev
+<details>
+<summary>SFTP transfer details</summary>
+
+- Drop multiple files at once; each becomes an independent queue item with progress, status, and error reporting.
+- Running transfers can be canceled individually from the queue.
+- If the target file exists, GpuTerm asks before overwriting.
+- The last local directory is remembered across launches.
+- Directory drag-and-drop is detected but not yet transferred (see [Roadmap](#roadmap--known-limitations)).
+
+</details>
+
+<details>
+<summary>Telemetry configuration</summary>
+
+- **Interval:** 1, 2 (default), 5, or 10 seconds — detail popovers poll on the same cadence.
+- **Mode:** GPU + System, GPU only, or System only.
+- **Ignore FS:** comma-separated filesystem types hidden from the disk summary (default: `tmpfs`, `devtmpfs`, `squashfs`, `proc`, `sysfs`, `cgroup`, `cgroup2`, `overlay`). The disk popover can temporarily reveal them.
+- Mount points are prioritized `/` → `/home` → `/data` → `/mnt*` → `/media*` → others; disks ≥ 80% are flagged warning, ≥ 90% critical.
+
+</details>
+
+<details>
+<summary>Remote commands executed for telemetry</summary>
+
+All metrics come from standard tools over SSH — nothing is installed on the server.
+
+| Section | Commands |
+| --- | --- |
+| CPU | `/proc/stat`, `/proc/loadavg`, `/proc/cpuinfo`, `nproc`, `lscpu` |
+| Memory | `/proc/meminfo` |
+| Disk | `df -P -T -B1` |
+| Users | `who` |
+| GPU | `nvidia-smi --query-gpu=…`, `nvidia-smi --query-compute-apps=…` |
+| Top processes | `ps -eo … --sort=-%cpu` / `--sort=-rss` |
+
+Commands run with a 3-second timeout on a dedicated SSH connection. If `nvidia-smi` is absent, the GPU section reports unavailable while everything else keeps working.
+
+</details>
+
+## Architecture
+
+```
+┌───────────────────────────── Tauri window ─────────────────────────────┐
+│  React 19 + TypeScript + Zustand + xterm.js                            │
+│    invoke() ──────────────► Tauri commands (Rust)                      │
+│    listen() ◄────────────── terminal-output · remote-telemetry ·       │
+│                             sftp-progress · terminal-closed            │
+├────────────────────────────────────────────────────────────────────────┤
+│  Rust backend (ssh2 / libssh2)                                         │
+│    • Terminal      – PTY shell, dedicated connection per session       │
+│    • Telemetry     – own connection, auto-reconnect with backoff       │
+│    • SFTP ops      – pooled per-session "operations" connection        │
+│    • Bulk transfer – dedicated connection per file, cancellable        │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-Create an SSH session:
+Long-running work is isolated: blocking SSH I/O runs on `spawn_blocking` threads so the UI never freezes, and each concern (shell / telemetry / transfers) fails independently.
 
-1. Open the session form in the left sidebar.
-2. Enter `host`, `port`, `username`, and either a password or private key path.
-3. Save the session.
-4. Click the saved session to connect.
+**Data locations** (`%APPDATA%\GpuTerm` on Windows, `~/Library/Application Support/GpuTerm` on macOS, `~/.config/GpuTerm` on Linux):
 
-Session notes:
+| File | Contents |
+| --- | --- |
+| `sessions.json` | Session profiles — host, port, username, key *path* only |
+| `known_hosts.json` | Approved SHA-256 host key fingerprints |
+| `app_settings.json` | UI preferences such as the last local SFTP directory |
 
-- Passwords are used only for the active connection and are not saved.
-- Private key file contents are not stored; only the path is saved.
-- On first contact, GpuTerm displays the server's SHA-256 host key fingerprint and asks whether to trust it.
-- Approved fingerprints are saved to `known_hosts.json`; later mismatches block the connection.
+Passwords and private key contents are **never** written to any of these files.
 
-Use the SSH terminal:
+## Development
 
-1. Connect to a saved session.
-2. Type into the terminal pane.
-3. Resize the window as needed; the remote PTY size is updated automatically.
+```bash
+npm run test                                   # frontend tests (Vitest)
+cargo test --manifest-path src-tauri/Cargo.toml # backend tests
+npm run build                                  # TypeScript + Vite production build
+```
 
-Use the SFTP browser:
+<details>
+<summary>Project layout</summary>
 
-1. Connect to a session.
-2. Use the remote path controls to list and navigate server directories.
-3. Use `Browse...` beside `Local path` to choose a local directory with the OS folder picker.
-4. Select a remote file and download it into the selected local directory.
-5. Select a local file and upload it into the current remote directory.
-6. Drag local files onto the remote panel to upload them into the current remote directory.
-7. Drag remote files onto the local panel to download them into the selected local directory.
-8. Use delete and new-folder actions from the SFTP panel as needed.
+```
+src/                    React frontend
+  components/           TerminalPane, SftpBrowser, RemoteTelemetryBar, popovers…
+  stores/               Zustand stores (session, transfers)
+  utils/                Shared formatters, terminal buffer, disk priority
+src-tauri/src/ssh/      Rust backend
+  terminal.rs           PTY shell + UTF-8 safe reader
+  system_monitor.rs     Telemetry loop + parsers
+  resource_details.rs   On-demand CPU/RAM/GPU detail collection
+  sftp.rs               Transfers, cancellation, SFTP commands
+  session.rs            Connections, host keys, profiles, connection pool
+```
 
-The last selected local directory is restored on the next app launch.
-
-Transfer notes:
-
-- Multiple files can be dropped at once.
-- File transfers are streamed in 1 MiB chunks instead of loading the whole file into memory.
-- The transfer queue shows filename, direction, source path, target path, progress, status, and per-file errors.
-- Running transfers can be canceled independently from the transfer queue.
-- Downloads are written to a temporary file and renamed only after success, so failed or canceled transfers do not leave a partial target file.
-- If a target file already exists, GpuTerm asks whether to overwrite it before starting that file transfer.
-- Directory drag-and-drop is detected but not transferred in the MVP.
-
-Use remote telemetry:
-
-1. Connect to a Linux server through SSH.
-2. The bottom bar starts polling CPU, RAM, disk, and GPU status.
-3. Change the telemetry interval to 1, 2, 5, or 10 seconds.
-4. Switch the display mode between GPU only, system only, and GPU + system.
-5. Click the disk summary to open the full disk detail popover.
-6. Click CPU, RAM, or a GPU summary to open live resource details and top process usage.
-
-For NVIDIA GPU servers, GpuTerm runs `nvidia-smi` every telemetry interval. If `nvidia-smi` is missing or the server has no NVIDIA GPU, the terminal remains connected and the GPU section shows an unavailable state.
+</details>
 
 ## Troubleshooting
 
-`npm install` fails:
+| Symptom | Check |
+| --- | --- |
+| `tauri:dev` fails on Windows | VS Build Tools 2022 (C++ workload) + WebView2 Runtime installed, then restart the terminal |
+| `cargo` not found | Install via [rustup](https://rustup.rs), reopen the terminal (`%USERPROFILE%\.cargo\bin` on PATH) |
+| SSH auth fails | Verify host/port/user/credentials; confirm the server allows the auth method |
+| Host key mismatch | Verify the server fingerprint out-of-band, then remove the stale entry from `known_hosts.json` |
+| GPU shows unavailable | Run `nvidia-smi` on the host — NVIDIA drivers are required; other metrics still work |
 
-- Confirm Node.js 20+ and npm 10+ are installed.
-- Delete `node_modules` only when dependency installation is corrupted, then run `npm install` again.
+## Roadmap / Known limitations
 
-`cargo` or `rustc` is not found:
+- Single active terminal session (session IDs are already plumbed for future tabs)
+- Keyboard-interactive SSH authentication is not implemented
+- Recursive directory upload/download and transfer resume are not implemented
+- `known_hosts.json` uses SHA-256 fingerprints, not the OpenSSH known_hosts format
+- Telemetry is Linux-first (`/proc`, `lscpu`, POSIX `df`); GPU monitoring requires NVIDIA `nvidia-smi`
 
-- Install Rust with rustup.
-- Restart the terminal so the Cargo bin directory is added to `PATH`.
-- On Windows, the path is usually `%USERPROFILE%\.cargo\bin`.
-
-`npm run tauri:dev` fails on Windows:
-
-- Install Visual Studio Build Tools 2022 with the Desktop development with C++ workload.
-- Make sure WebView2 Runtime is installed.
-- Restart the terminal after installing build tools.
-
-SSH authentication fails:
-
-- Check host, port, username, password, and private key path.
-- Ensure the remote server allows password or public key authentication.
-- On first contact, compare the displayed SHA-256 fingerprint with a trusted server-side source before accepting it.
-- If the host key changed, remove the stale entry from `known_hosts.json` only after verifying the server fingerprint.
-
-SFTP local browsing fails:
-
-- Choose a directory that exists and is readable by the current OS user.
-- On Windows, paths such as `C:\Users\user\Downloads` are supported.
-- On macOS/Linux, paths such as `/Users/user/Downloads` or `/home/user/Downloads` are supported.
-
-GPU metrics are unavailable:
-
-- Confirm the remote server has NVIDIA drivers installed.
-- Run `nvidia-smi` manually on the remote host.
-- Non-NVIDIA servers can still show CPU, memory, and disk telemetry.
-
-## Architecture Notes
-
-The frontend calls Tauri commands through `@tauri-apps/api/core` and receives streaming updates through Tauri events.
-
-- `connect_terminal` opens an SSH connection, creates a PTY, starts a shell, and emits `terminal-output`.
-- `terminal_write` sends xterm input to the SSH channel.
-- `terminal_resize` updates remote PTY dimensions.
-- Terminal output keeps incomplete UTF-8 byte sequences between reads so split multibyte characters are reconstructed correctly.
-- `system_monitor::start` opens a separate SSH connection so telemetry polling cannot break or block the terminal.
-- Telemetry emits `remote-telemetry`, which contains CPU, memory, disk, GPU, and per-section errors in one payload.
-- SFTP commands open separate SSH/SFTP sessions using the active in-memory credentials and emit `sftp-progress` during transfers.
-- `cancel_transfer` signals the matching chunked transfer without stopping other queued files or the terminal session.
-- The SFTP local panel uses Tauri's native folder picker for the local path and stores the last selected directory in app settings.
-
-Session profiles are stored in the user config directory:
-
-- Windows: `%APPDATA%/GpuTerm/sessions.json`
-- macOS: `~/Library/Application Support/GpuTerm/sessions.json`
-- Linux: `$XDG_CONFIG_HOME/GpuTerm/sessions.json` or `~/.config/GpuTerm/sessions.json`
-
-Host key fingerprints are stored in `known_hosts.json` in the same directory. The first connection pauses for explicit approval of the SHA-256 fingerprint. Approved fingerprints are saved, and later mismatches are blocked with a clear error.
-
-The most recent SFTP local directory is stored as `recentLocalPath` in `app_settings.json` in the same config directory. Passwords and private key contents are never written to this settings file.
-
-## SFTP Local Browser
-
-The SFTP panel has a `Browse...` button next to the local path field. It opens the operating system folder selection dialog through the Tauri dialog plugin. Choosing a folder updates the local path, validates that the directory exists and is accessible, reloads the local file list, and persists it as the default path for the next app launch. Cancelling the dialog leaves the current path unchanged.
-
-Downloads are saved into the selected local directory. Uploads use the selected local file from the local file list and send it to the current remote directory. Paths are passed through platform-native strings so Windows, macOS, and Linux separators are preserved.
-
-The same upload/download paths are used by drag-and-drop. Dropping local files on the remote SFTP panel uploads them to the current remote directory. Dropping remote files on the local panel downloads them to the selected local directory. Each dropped file becomes a transfer queue item and reports progress independently.
-
-Transfers use 1 MiB chunks and can be canceled per file. Downloads first write to a temporary sibling file and replace the requested destination only after the complete stream succeeds.
-
-## Remote Telemetry
-
-GpuTerm polls telemetry every 2 seconds by default. The UI can switch the interval to 1, 2, 5, or 10 seconds and can show GPU only, system only, or GPU + system.
-
-CPU, RAM, GPU, and Disk summaries are clickable. CPU/RAM/GPU detail popovers are collected separately from the status-bar telemetry and poll every 3 seconds only while the corresponding popover is open. Each detail request opens a separate SSH connection and command channel, so detail collection failures do not interrupt the terminal or the normal telemetry loop. Press `Esc` or click outside a popover to close it.
-
-CPU collection uses:
-
-```bash
-cat /proc/stat
-cat /proc/loadavg
-cat /proc/cpuinfo
-nproc --all
-nproc
-lscpu
-```
-
-CPU usage is calculated from the previous and current aggregate `/proc/stat` samples. The first sample can show `n/a` until a second sample is available.
-
-Memory collection uses:
-
-```bash
-cat /proc/meminfo
-```
-
-Memory is tracked internally in MiB and displayed in GiB. Used memory is calculated as `MemTotal - MemAvailable`.
-
-## Resource Detail Commands
-
-CPU details include model, usage, load average, core counts, average clock, uptime, optional logical-core usage, and the top CPU-consuming processes. The detail collector uses:
-
-```bash
-cat /proc/stat
-cat /proc/loadavg
-cat /proc/cpuinfo
-cat /proc/uptime
-nproc --all
-nproc
-lscpu
-ps -eo pid=,user=,%cpu=,%mem=,etime=,comm= --sort=-%cpu | head -n 15
-```
-
-RAM details include total, used, available, free, buffers, cache, swap, and the top RSS-consuming processes. The detail collector uses:
-
-```bash
-cat /proc/meminfo
-ps -eo pid=,user=,rss=,vsz=,%mem=,comm= --sort=-rss | head -n 15
-```
-
-GPU details include utilization, VRAM, temperature, power, fan speed, clocks, PCI bus ID, persistence mode, MIG mode, and active compute processes. The detail collector uses:
-
-```bash
-nvidia-smi --query-gpu=index,name,uuid,driver_version,power.draw,power.limit,temperature.gpu,utilization.gpu,utilization.memory,memory.total,memory.used,memory.free,fan.speed,clocks.current.graphics,clocks.current.memory,pci.bus_id,persistence_mode,mig.mode.current --format=csv,noheader,nounits
-nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv,noheader,nounits
-ps -p <PID_LIST> -o pid=,user=,args=
-```
-
-Process owners and command lines are resolved with the permissions of the connected SSH user. Other users' command lines may be hidden by Linux `/proc` or process visibility settings. Missing optional NVIDIA fields, including fan or MIG information, are shown as unavailable instead of failing the entire GPU panel.
-
-Disk collection uses:
-
-```bash
-df -P -T -B1
-```
-
-The default hidden filesystem types are `tmpfs`, `devtmpfs`, `squashfs`, `proc`, `sysfs`, `cgroup`, `cgroup2`, and `overlay`. Mount points are prioritized as `/`, `/home`, `/data`, `/mnt*`, `/media*`, then everything else.
-
-The bottom bar shows a compact disk summary with at most two mount points:
-
-```text
-Disk: / 46% · /data 43% · +2
-```
-
-Clicking the disk section opens the full disk detail popover with mount point, filesystem, filesystem type, used, available, total, and usage percentage. Disk sizes are formatted automatically as GiB or TiB. The usage column includes a progress bar; disks at 80% or higher are marked as warning, and disks at 90% or higher are marked as critical. The popover can temporarily show filesystems hidden by the default ignore list.
-
-## GPU Monitoring Command
-
-GpuTerm runs this command every 2 seconds after a successful SSH connection:
-
-```bash
-nvidia-smi --query-gpu=index,name,uuid,driver_version,power.draw,power.limit,temperature.gpu,utilization.gpu,utilization.memory,memory.total,memory.used,memory.free --format=csv,noheader,nounits
-```
-
-The Rust backend parses CSV rows into the frontend `GpuMetric` type and includes the result in `RemoteTelemetry.gpu`. If `nvidia-smi` is missing, returns no GPUs, times out, or exits non-zero, the GPU section displays `GPU metrics unavailable`. GPU polling errors are isolated from the terminal session and from CPU, memory, and disk collection.
-
-## Security Notes
-
-- Passwords are never saved to `sessions.json`.
-- Passwords are held only in memory for active connections.
-- Private key file contents are never read into app settings.
-- `CredentialStore` is split into an interface and in-memory implementation so Windows Credential Manager, macOS Keychain, or Linux Secret Service can be added later.
-- Unknown host keys require explicit user approval of the SHA-256 fingerprint; host key mismatches are reported and block the connection.
-- The Tauri window uses a restrictive content security policy, with only the local IPC and development server endpoints enabled where required.
+Issues and pull requests are welcome — please run the test suites above before submitting.
 
 ## License
 
-GpuTerm is licensed under the MIT License. See [LICENSE](./LICENSE) for details.
-
-This project uses third-party open-source dependencies, including Tauri, React, xterm.js, ssh2, and related Rust/JavaScript packages. Their licenses remain with their respective authors.
-
-## Known Limitations
-
-- Only one active terminal session is fully wired in the MVP, though the command and state shape use session IDs for future tabs.
-- Keyboard-interactive SSH authentication is not implemented yet.
-- SFTP local browsing is directory based; recursive upload/download and directory drag-and-drop are not implemented yet.
-- Interrupted SFTP transfers cannot be resumed; they must be restarted.
-- SFTP commands currently open fresh SSH sessions for reliability; pooled SFTP channels can be added later.
-- The known_hosts MVP stores SHA-256 fingerprints in JSON, not OpenSSH known_hosts format.
-- System telemetry is Linux-first and depends on `/proc`, `nproc`, `lscpu`, and GNU/POSIX-style `df`.
-- GPU monitoring assumes NVIDIA GPUs and `nvidia-smi`; non-NVIDIA hosts still show CPU, memory, and disk telemetry.
-- Resource detail panels are Linux-first; GPU details additionally require NVIDIA drivers and `nvidia-smi`.
-- Process user/command information can be incomplete when the connected SSH account lacks permission to inspect another process.
+[MIT](./LICENSE) © GpuTerm contributors. Built with [Tauri](https://tauri.app), [React](https://react.dev), [xterm.js](https://xtermjs.org), and [ssh2](https://crates.io/crates/ssh2); third-party licenses remain with their authors.
