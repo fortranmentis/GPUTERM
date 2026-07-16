@@ -10,13 +10,20 @@ use crate::ssh::macos_monitor::{
 };
 use crate::ssh::session::{target_for_active_session, with_ops_session, AppState};
 use crate::ssh::system_monitor::{
-    collect_gpu_metrics, detect_remote_os, run_remote_command, RemoteOs,
+    calculate_cpu_usage, collect_gpu_metrics, detect_remote_os, run_remote_command,
+    run_remote_command_for, RemoteOs, WINDOWS_COMMAND_TIMEOUT_MS,
 };
 use crate::ssh::gpu_monitor::GPU_PROBE_COMMAND;
+use crate::ssh::windows_monitor::{
+    parse_windows_cpu_info, parse_windows_cpu_times, parse_windows_gpu_counters,
+    parse_windows_gpu_probe, parse_windows_memory_output, parse_windows_process_identity,
+    parse_windows_process_samples, windows_process_identity_command, WINDOWS_CPU_DETAIL_COMMAND,
+    WINDOWS_GPU_COUNTERS_COMMAND, WINDOWS_GPU_PROBE_COMMAND, WINDOWS_MEMORY_DETAIL_COMMAND,
+};
 use serde::Serialize;
 use ssh2::Session;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tauri::State;
 
 const DETAIL_TIMEOUT_MS: u32 = 3_000;
@@ -152,10 +159,17 @@ pub async fn get_resource_details(
     let resource_type = ResourceType::parse(&resource_type)?;
     let target = target_for_active_session(&state, &session_id)?;
     let ops = Arc::clone(&state.ops_sessions);
+    let os_cache = Arc::clone(&state.remote_os_cache);
     tauri::async_runtime::spawn_blocking(move || {
         let mut details = ResourceDetails::default();
         let result = with_ops_session(&ops, &target, DETAIL_TIMEOUT_MS, |session| {
-            collect_details(session, resource_type)
+            let os = resolve_remote_os(&os_cache, &target.session_id, session);
+            if os == RemoteOs::Windows {
+                // PowerShell start-up plus the 500 ms counter sampling exceed
+                // the Unix detail timeout.
+                session.set_timeout(WINDOWS_COMMAND_TIMEOUT_MS);
+            }
+            collect_details(session, resource_type, os)
         });
         match result {
             Ok(ResourceDetailValue::Cpu(metric)) => details.cpu = Some(metric),
@@ -185,37 +199,74 @@ enum ResourceDetailValue {
     Gpu(Vec<GpuDetailMetric>),
 }
 
-fn collect_details(session: &Session, resource_type: ResourceType) -> Result<ResourceDetailValue, String> {
-    match resource_type {
-        ResourceType::Cpu | ResourceType::Memory => {
-            // Stateless per popover tick, like the GPU tool re-probe below.
-            let os = detect_remote_os(session).unwrap_or(RemoteOs::Linux);
-            match (resource_type, os) {
-                (ResourceType::Cpu, RemoteOs::Linux) => {
-                    run_remote_command(session, CPU_DETAIL_COMMAND)
-                        .and_then(|output| parse_cpu_detail_output(&output))
-                        .map(ResourceDetailValue::Cpu)
-                }
-                (ResourceType::Cpu, RemoteOs::MacOs) => {
-                    run_remote_command(session, MACOS_CPU_DETAIL_COMMAND)
-                        .and_then(|output| parse_macos_cpu_detail_output(&output))
-                        .map(ResourceDetailValue::Cpu)
-                }
-                (_, RemoteOs::Linux) => run_remote_command(session, MEMORY_DETAIL_COMMAND)
-                    .and_then(|output| parse_memory_detail_output(&output))
-                    .map(ResourceDetailValue::Memory),
-                (_, RemoteOs::MacOs) => {
-                    run_remote_command(session, MACOS_MEMORY_DETAIL_COMMAND)
-                        .and_then(|output| parse_macos_memory_detail_output(&output))
-                        .map(ResourceDetailValue::Memory)
-                }
-            }
+/// Returns the cached remote OS for the session, detecting and caching it on
+/// first use. Detection failure (dead transport) falls back to Linux like the
+/// poller, without poisoning the cache.
+fn resolve_remote_os(
+    cache: &Mutex<HashMap<String, RemoteOs>>,
+    session_id: &str,
+    session: &Session,
+) -> RemoteOs {
+    if let Ok(map) = cache.lock() {
+        if let Some(os) = map.get(session_id) {
+            return *os;
         }
-        ResourceType::Gpu => collect_gpu_details(session).map(ResourceDetailValue::Gpu),
+    }
+    match detect_remote_os(session) {
+        Some(os) => {
+            if let Ok(mut map) = cache.lock() {
+                map.insert(session_id.to_string(), os);
+            }
+            os
+        }
+        None => RemoteOs::Linux,
     }
 }
 
-fn collect_gpu_details(session: &Session) -> Result<Vec<GpuDetailMetric>, String> {
+fn collect_details(
+    session: &Session,
+    resource_type: ResourceType,
+    os: RemoteOs,
+) -> Result<ResourceDetailValue, String> {
+    match (resource_type, os) {
+        (ResourceType::Cpu, RemoteOs::Linux) => {
+            run_remote_command(session, CPU_DETAIL_COMMAND)
+                .and_then(|output| parse_cpu_detail_output(&output))
+                .map(ResourceDetailValue::Cpu)
+        }
+        (ResourceType::Cpu, RemoteOs::MacOs) => {
+            run_remote_command(session, MACOS_CPU_DETAIL_COMMAND)
+                .and_then(|output| parse_macos_cpu_detail_output(&output))
+                .map(ResourceDetailValue::Cpu)
+        }
+        (ResourceType::Cpu, RemoteOs::Windows) => {
+            run_remote_command_for(session, os, WINDOWS_CPU_DETAIL_COMMAND)
+                .and_then(|output| parse_windows_cpu_detail_output(&output))
+                .map(ResourceDetailValue::Cpu)
+        }
+        (ResourceType::Memory, RemoteOs::Linux) => {
+            run_remote_command(session, MEMORY_DETAIL_COMMAND)
+                .and_then(|output| parse_memory_detail_output(&output))
+                .map(ResourceDetailValue::Memory)
+        }
+        (ResourceType::Memory, RemoteOs::MacOs) => {
+            run_remote_command(session, MACOS_MEMORY_DETAIL_COMMAND)
+                .and_then(|output| parse_macos_memory_detail_output(&output))
+                .map(ResourceDetailValue::Memory)
+        }
+        (ResourceType::Memory, RemoteOs::Windows) => {
+            run_remote_command_for(session, os, WINDOWS_MEMORY_DETAIL_COMMAND)
+                .and_then(|output| parse_windows_memory_detail_output(&output))
+                .map(ResourceDetailValue::Memory)
+        }
+        (ResourceType::Gpu, _) => collect_gpu_details(session, os).map(ResourceDetailValue::Gpu),
+    }
+}
+
+fn collect_gpu_details(session: &Session, os: RemoteOs) -> Result<Vec<GpuDetailMetric>, String> {
+    if os == RemoteOs::Windows {
+        return collect_windows_gpu_details(session);
+    }
     // NVIDIA keeps its rich per-process detail path; AMD/Intel reuse the
     // telemetry collectors and map into the same shape with nulls for the
     // fields their tools do not expose.
@@ -224,7 +275,7 @@ fn collect_gpu_details(session: &Session) -> Result<Vec<GpuDetailMetric>, String
         .unwrap_or(true);
     if !has_nvidia {
         let mut probe = None;
-        let metrics = collect_gpu_metrics(session, &mut probe)?;
+        let metrics = collect_gpu_metrics(session, os, &mut probe)?;
         return Ok(metrics.into_iter().map(gpu_metric_to_detail).collect());
     }
     let gpu_output = run_remote_command(session, GPU_DETAIL_QUERY)?;
@@ -243,7 +294,63 @@ fn collect_gpu_details(session: &Session) -> Result<Vec<GpuDetailMetric>, String
         );
         run_remote_command(session, &command).unwrap_or_default()
     };
-    parse_gpu_detail_output(&gpu_output, process_rows, &ps_output)
+    let identity = parse_ps_identity_output(&ps_output);
+    parse_gpu_detail_output(&gpu_output, process_rows, &identity)
+}
+
+/// Windows GPU details: the nvidia-smi queries are argument-identical to the
+/// Linux path, so only the command transport and the PID→identity join
+/// (Win32_Process instead of `ps -p`) differ. Hosts without nvidia-smi fall
+/// back to the counter-based telemetry collectors, like AMD/Intel on Linux.
+fn collect_windows_gpu_details(session: &Session) -> Result<Vec<GpuDetailMetric>, String> {
+    let probe = run_remote_command_for(session, RemoteOs::Windows, WINDOWS_GPU_PROBE_COMMAND)
+        .map(|output| parse_windows_gpu_probe(&output))
+        .unwrap_or_default();
+    if !probe.nvidia {
+        let mut probe = Some(probe);
+        let metrics = collect_gpu_metrics(session, RemoteOs::Windows, &mut probe)?;
+        return Ok(metrics.into_iter().map(gpu_metric_to_detail).collect());
+    }
+    let gpu_output = run_remote_command_for(session, RemoteOs::Windows, GPU_DETAIL_QUERY)?;
+    let process_output =
+        run_remote_command_for(session, RemoteOs::Windows, GPU_PROCESS_QUERY).unwrap_or_default();
+    let process_rows = parse_gpu_process_output(&process_output)?;
+    let pids = process_rows
+        .iter()
+        .map(|process| process.pid)
+        .collect::<Vec<_>>();
+    let identity = if pids.is_empty() {
+        HashMap::new()
+    } else {
+        run_remote_command_for(
+            session,
+            RemoteOs::Windows,
+            &windows_process_identity_command(&pids),
+        )
+        .map(|output| parse_windows_process_identity(&output))
+        .unwrap_or_default()
+    };
+    let mut details = parse_gpu_detail_output(&gpu_output, process_rows, &identity)?;
+
+    // Hybrid hosts: append the adapters nvidia-smi does not cover (e.g. the
+    // integrated GPU) from the counters, best-effort — the nvidia cards are
+    // already in hand, so a counter failure must not fail the popover.
+    let has_other_adapters = probe
+        .windows_adapters
+        .iter()
+        .any(|adapter| adapter.vendor != "nvidia");
+    if has_other_adapters {
+        let next_index = details.iter().map(|gpu| gpu.index + 1).max().unwrap_or(0);
+        if let Ok(extra) =
+            run_remote_command_for(session, RemoteOs::Windows, WINDOWS_GPU_COUNTERS_COMMAND)
+                .and_then(|output| {
+                    parse_windows_gpu_counters(&output, &probe.windows_adapters, true, next_index)
+                })
+        {
+            details.extend(extra.into_iter().map(gpu_metric_to_detail));
+        }
+    }
+    Ok(details)
 }
 
 fn parse_macos_cpu_detail_output(output: &str) -> Result<CpuDetailMetric, String> {
@@ -320,6 +427,154 @@ fn parse_macos_memory_detail_output(output: &str) -> Result<MemoryDetailMetric, 
             .get("PROCESSES")
             .map(|value| parse_memory_processes(value))
             .unwrap_or_default(),
+    })
+}
+
+fn parse_windows_cpu_detail_output(output: &str) -> Result<CpuDetailMetric, String> {
+    let sections = split_sections(output);
+    let info = parse_windows_cpu_info(sections.get("CPUINFO").map(String::as_str).unwrap_or(""));
+    let first =
+        parse_windows_cpu_times(sections.get("CPUTIMES_1").map(String::as_str).unwrap_or(""));
+    let second =
+        parse_windows_cpu_times(sections.get("CPUTIMES_2").map(String::as_str).unwrap_or(""));
+    if info.model_name.is_none() && info.logical_cores.is_none() && second.is_empty() {
+        return Err("Windows CPU details unavailable (WMI queries produced no output)".to_string());
+    }
+
+    let total_pair = (first.get("_Total"), second.get("_Total"));
+    let usage_percent = match total_pair {
+        (Some(previous), Some(current)) => calculate_cpu_usage(*previous, *current),
+        _ => None,
+    };
+    // Per-core instances are named "0", "1", ...; "_Total" is excluded.
+    let mut core_names: Vec<&String> = second
+        .keys()
+        .filter(|name| !name.is_empty() && name.chars().all(|c| c.is_ascii_digit()))
+        .collect();
+    core_names.sort_by_key(|name| name.parse::<u32>().unwrap_or(u32::MAX));
+    let logical_core_usage_percent = core_names
+        .iter()
+        .map(|name| match (first.get(*name), second.get(*name)) {
+            (Some(previous), Some(current)) => calculate_cpu_usage(*previous, *current),
+            _ => None,
+        })
+        .collect();
+
+    // Get-Process only exposes cumulative CPU seconds, so per-process usage is
+    // the delta over the sampled window (un-normalized across cores, like ps).
+    let elapsed_seconds = match total_pair {
+        (Some(previous), Some(current)) if current.total > previous.total => {
+            Some((current.total - previous.total) as f64 / 1e7)
+        }
+        _ => None,
+    };
+    let total_memory_bytes = sections
+        .get("TOTALMEM")
+        .and_then(|value| parse_first_u64(value))
+        .map(|kib| kib * 1024);
+    let processes_before =
+        parse_windows_process_samples(sections.get("PROC_1").map(String::as_str).unwrap_or(""));
+    let processes_after =
+        parse_windows_process_samples(sections.get("PROC_2").map(String::as_str).unwrap_or(""));
+    let mut top_processes: Vec<ProcessMetric> = processes_after
+        .iter()
+        .map(|(pid, sample)| {
+            let cpu_percent = match (
+                elapsed_seconds,
+                processes_before.get(pid).and_then(|s| s.cpu_seconds),
+                sample.cpu_seconds,
+            ) {
+                (Some(elapsed), Some(before), Some(after)) if elapsed > 0.0 => {
+                    Some((after - before).max(0.0) / elapsed * 100.0)
+                }
+                _ => None,
+            };
+            let memory_percent = match (sample.working_set_bytes, total_memory_bytes) {
+                (Some(working_set), Some(total)) if total > 0 => {
+                    Some(working_set as f64 / total as f64 * 100.0)
+                }
+                _ => None,
+            };
+            ProcessMetric {
+                pid: *pid,
+                // The process owner needs elevation on Windows
+                // (Get-Process -IncludeUserName); the popover renders n/a.
+                user: None,
+                command: sample.name.clone(),
+                cpu_percent,
+                memory_percent,
+                rss_bytes: sample.working_set_bytes,
+                vsz_bytes: sample.virtual_bytes,
+                elapsed_time: None,
+            }
+        })
+        .collect();
+    top_processes.sort_by(|a, b| {
+        b.cpu_percent
+            .partial_cmp(&a.cpu_percent)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    top_processes.truncate(15);
+
+    Ok(CpuDetailMetric {
+        model_name: info.model_name,
+        usage_percent,
+        // Load averages do not exist on Windows.
+        load_avg1: None,
+        load_avg5: None,
+        load_avg15: None,
+        total_cores: info.logical_cores,
+        online_cores: info.logical_cores,
+        avg_clock_ghz: info.avg_clock_ghz,
+        uptime_seconds: sections
+            .get("UPTIME")
+            .and_then(|value| parse_first_u64(value))
+            .map(|value| value as f64),
+        logical_core_usage_percent,
+        top_processes,
+    })
+}
+
+fn parse_windows_memory_detail_output(output: &str) -> Result<MemoryDetailMetric, String> {
+    let sections = split_sections(output);
+    // The MEMORY/PAGEFILE sections are shared with the telemetry collector.
+    let base = parse_windows_memory_output(&sections)?;
+    let total_bytes = base.total_mi_b.map(|mib| mib * 1024 * 1024);
+
+    let mut top_processes: Vec<ProcessMetric> =
+        parse_windows_process_samples(sections.get("PROCESSES").map(String::as_str).unwrap_or(""))
+            .iter()
+            .map(|(pid, sample)| ProcessMetric {
+                pid: *pid,
+                user: None,
+                command: sample.name.clone(),
+                cpu_percent: None,
+                memory_percent: match (sample.working_set_bytes, total_bytes) {
+                    (Some(working_set), Some(total)) if total > 0 => {
+                        Some(working_set as f64 / total as f64 * 100.0)
+                    }
+                    _ => None,
+                },
+                rss_bytes: sample.working_set_bytes,
+                vsz_bytes: sample.virtual_bytes,
+                elapsed_time: None,
+            })
+            .collect();
+    top_processes.sort_by_key(|process| std::cmp::Reverse(process.rss_bytes));
+    top_processes.truncate(15);
+
+    Ok(MemoryDetailMetric {
+        total_mi_b: base.total_mi_b,
+        used_mi_b: base.used_mi_b,
+        available_mi_b: base.available_mi_b,
+        free_mi_b: base.free_mi_b,
+        buffers_mi_b: None,
+        cached_mi_b: None,
+        swap_total_mi_b: base.swap_total_mi_b,
+        swap_used_mi_b: base.swap_used_mi_b,
+        swap_free_mi_b: base.swap_free_mi_b,
+        usage_percent: base.usage_percent,
+        top_processes,
     })
 }
 
@@ -509,7 +764,7 @@ fn parse_gpu_process_output(output: &str) -> Result<Vec<GpuProcessRow>, String> 
 fn parse_gpu_detail_output(
     output: &str,
     process_rows: Vec<GpuProcessRow>,
-    ps_output: &str,
+    identity: &HashMap<u32, (Option<String>, Option<String>)>,
 ) -> Result<Vec<GpuDetailMetric>, String> {
     let mut metrics = Vec::new();
     for line in output.lines().map(str::trim).filter(|line| !line.is_empty()) {
@@ -543,7 +798,6 @@ fn parse_gpu_detail_output(
         return Err("nvidia-smi returned no GPU detail rows".to_string());
     }
 
-    let ps = parse_ps_identity_output(ps_output);
     let index_by_uuid = metrics
         .iter()
         .map(|metric| (metric.uuid.clone(), metric.index))
@@ -555,7 +809,7 @@ fn parse_gpu_detail_output(
         let Some(index) = index_by_uuid.get(&uuid).copied() else {
             continue;
         };
-        let identity = ps.get(&process.pid);
+        let identity = identity.get(&process.pid);
         let metric = GpuProcessMetric {
             gpu_index: Some(index),
             gpu_uuid: Some(uuid.clone()),
@@ -648,7 +902,7 @@ mod tests {
     #[test]
     fn parses_gpu_detail_output_with_optional_fields() {
         let output = "0, NVIDIA H100, GPU-abc, 550.54, 510, 600, 69, 82, 55, 98304, 43008, 55296, N/A, 1800, 1593, 00000000:17:00.0, Enabled, Not Supported\n";
-        let metrics = parse_gpu_detail_output(output, Vec::new(), "").unwrap();
+        let metrics = parse_gpu_detail_output(output, Vec::new(), &HashMap::new()).unwrap();
         assert_eq!(metrics.len(), 1);
         assert_eq!(metrics[0].index, 0);
         assert_eq!(metrics[0].fan_speed_percent, None);
@@ -659,9 +913,74 @@ mod tests {
     fn joins_gpu_processes_with_linux_process_identity() {
         let gpu_output = "0, NVIDIA H100, GPU-abc, 550.54, 510, 600, 69, 82, 55, 98304, 43008, 55296, 40, 1800, 1593, 00000000:17:00.0, Enabled, Disabled\n";
         let processes = parse_gpu_process_output("GPU-abc, 4242, python, 4096\n").unwrap();
-        let metrics = parse_gpu_detail_output(gpu_output, processes, "4242 alice python train.py --epochs 10\n").unwrap();
+        let identity = parse_ps_identity_output("4242 alice python train.py --epochs 10\n");
+        let metrics = parse_gpu_detail_output(gpu_output, processes, &identity).unwrap();
         assert_eq!(metrics[0].processes.len(), 1);
         assert_eq!(metrics[0].processes[0].user.as_deref(), Some("alice"));
         assert_eq!(metrics[0].processes[0].command.as_deref(), Some("python train.py --epochs 10"));
+    }
+
+    #[test]
+    fn joins_gpu_processes_with_windows_process_identity() {
+        let gpu_output = "0, NVIDIA RTX 4090, GPU-win, 560.94, 300, 450, 60, 90, 40, 24564, 12000, 12564, 55, 2520, 10501, 00000000:01:00.0, N/A, N/A\n";
+        let processes = parse_gpu_process_output("GPU-win, 4242, C:\\Python\\python.exe, 8192\n").unwrap();
+        let identity = parse_windows_process_identity(
+            "{\"ProcessId\":4242,\"Name\":\"python.exe\",\"CommandLine\":\"python train.py\"}",
+        );
+        let metrics = parse_gpu_detail_output(gpu_output, processes, &identity).unwrap();
+        assert_eq!(metrics[0].processes.len(), 1);
+        // Win32_Process exposes no owner without elevation.
+        assert_eq!(metrics[0].processes[0].user, None);
+        assert_eq!(metrics[0].processes[0].command.as_deref(), Some("python train.py"));
+        assert_eq!(metrics[0].processes[0].used_memory_mi_b, Some(8192));
+    }
+
+    #[test]
+    fn parses_windows_cpu_detail_output_with_cores_and_processes() {
+        let output = concat!(
+            "__CPUINFO__\n{\"Name\":\"Intel(R) Core(TM) i7-13700K\",\"NumberOfLogicalProcessors\":24,\"CurrentClockSpeed\":3400}\n",
+            "__UPTIME__\n86400\n",
+            "__TOTALMEM__\n1048576\n",
+            "__CPUTIMES_1__\n[{\"Name\":\"_Total\",\"PercentProcessorTime\":1000,\"Timestamp_Sys100NS\":10000000},{\"Name\":\"0\",\"PercentProcessorTime\":1000,\"Timestamp_Sys100NS\":10000000},{\"Name\":\"1\",\"PercentProcessorTime\":1000,\"Timestamp_Sys100NS\":10000000}]\n",
+            "__PROC_1__\n[{\"Id\":4242,\"Name\":\"python\",\"CpuSeconds\":10.0,\"WorkingSet64\":536870912},{\"Id\":7,\"Name\":\"idleapp\",\"CpuSeconds\":5.0,\"WorkingSet64\":1048576}]\n",
+            "__CPUTIMES_2__\n[{\"Name\":\"_Total\",\"PercentProcessorTime\":3000000,\"Timestamp_Sys100NS\":20000000},{\"Name\":\"0\",\"PercentProcessorTime\":2000000,\"Timestamp_Sys100NS\":20000000},{\"Name\":\"1\",\"PercentProcessorTime\":8000000,\"Timestamp_Sys100NS\":20000000}]\n",
+            "__PROC_2__\n[{\"Id\":4242,\"Name\":\"python\",\"CpuSeconds\":11.0,\"WorkingSet64\":536870912},{\"Id\":7,\"Name\":\"idleapp\",\"CpuSeconds\":5.0,\"WorkingSet64\":1048576}]\n",
+        );
+        let detail = parse_windows_cpu_detail_output(output).unwrap();
+        assert_eq!(detail.model_name.as_deref(), Some("Intel(R) Core(TM) i7-13700K"));
+        assert_eq!(detail.total_cores, Some(24));
+        assert_eq!(detail.uptime_seconds, Some(86400.0));
+        assert_eq!(detail.load_avg1, None);
+        // Δidle ≈ 3e6−1e3, Δtotal = 1e7 → ~70% busy.
+        assert!((detail.usage_percent.unwrap() - 70.01).abs() < 0.1);
+        assert_eq!(detail.logical_core_usage_percent.len(), 2);
+        assert!((detail.logical_core_usage_percent[0].unwrap() - 80.01).abs() < 0.1);
+        assert!((detail.logical_core_usage_percent[1].unwrap() - 20.01).abs() < 0.1);
+        // Δcpu 1 s over a 1 s window → 100%, sorted first.
+        assert_eq!(detail.top_processes[0].pid, 4242);
+        assert!((detail.top_processes[0].cpu_percent.unwrap() - 100.0).abs() < 0.5);
+        assert_eq!(detail.top_processes[0].user, None);
+        // WorkingSet 512 MiB of 1 GiB total → 50%.
+        assert!((detail.top_processes[0].memory_percent.unwrap() - 50.0).abs() < 0.1);
+        assert_eq!(detail.top_processes[1].cpu_percent, Some(0.0));
+    }
+
+    #[test]
+    fn parses_windows_memory_detail_output_sorted_by_working_set() {
+        let output = concat!(
+            "__MEMORY__\n{\"TotalVisibleMemorySize\":1048576,\"FreePhysicalMemory\":524288}\n",
+            "__PAGEFILE__\n{\"AllocatedBaseSize\":4096,\"CurrentUsage\":100}\n",
+            "__PROCESSES__\n[{\"Id\":1,\"Name\":\"small\",\"WorkingSet64\":1048576,\"VirtualMemorySize64\":2097152},{\"Id\":2,\"Name\":\"big\",\"WorkingSet64\":536870912,\"VirtualMemorySize64\":1073741824}]\n",
+        );
+        let detail = parse_windows_memory_detail_output(output).unwrap();
+        assert_eq!(detail.total_mi_b, Some(1024));
+        assert_eq!(detail.swap_total_mi_b, Some(4096));
+        assert_eq!(detail.buffers_mi_b, None);
+        assert_eq!(detail.top_processes.len(), 2);
+        assert_eq!(detail.top_processes[0].command.as_deref(), Some("big"));
+        assert_eq!(detail.top_processes[0].rss_bytes, Some(536870912));
+        assert_eq!(detail.top_processes[0].vsz_bytes, Some(1073741824));
+        // 512 MiB of 1 GiB → 50%.
+        assert!((detail.top_processes[0].memory_percent.unwrap() - 50.0).abs() < 0.1);
     }
 }

@@ -73,6 +73,10 @@ pub struct GpuProbe {
     /// macOS host: the integrated Apple GPU is read from ioreg, no tool needed.
     pub apple: bool,
     pub xpu_devices: Vec<XpuDevice>,
+    /// Windows host: physical Win32_VideoController adapters in enumeration
+    /// order. Those without a vendor CLI are read from the WDDM performance
+    /// counters.
+    pub windows_adapters: Vec<WindowsGpuAdapter>,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +84,22 @@ pub struct XpuDevice {
     pub id: u32,
     pub name: String,
     pub uuid: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WindowsGpuAdapter {
+    pub name: String,
+    /// One of the existing vendor tags ("nvidia" / "amd" / "intel").
+    pub vendor: String,
+    pub driver_version: String,
+    /// Adapter LUIDs from the DirectX registry (stale reboots leave extra
+    /// entries, hence a list). Perf counter instance names embed the live
+    /// LUID, giving an exact adapter match on hybrid iGPU+dGPU hosts where
+    /// the `phys_N` ordering heuristic would misattribute.
+    pub luids: Vec<u64>,
+    /// DedicatedVideoMemory from the DirectX registry; the perf counters
+    /// expose only usage, and Win32_VideoController.AdapterRAM caps at 4 GiB.
+    pub memory_total_bytes: Option<u64>,
 }
 
 impl GpuProbe {
@@ -90,6 +110,7 @@ impl GpuProbe {
             || self.xpu_smi
             || self.intel_gpu_top
             || self.apple
+            || !self.windows_adapters.is_empty()
     }
 }
 

@@ -8,3 +8,4 @@ pub mod session;
 pub mod sftp;
 pub mod system_monitor;
 pub mod terminal;
+pub mod windows_monitor;

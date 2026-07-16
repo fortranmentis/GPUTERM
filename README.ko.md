@@ -21,7 +21,7 @@
 
 ---
 
-원격 GPU 서버에서 작업하다 보면 SSH 클라이언트, SFTP 도구, 그리고 `watch nvidia-smi`를 띄워둔 터미널까지 세 개의 창을 오가게 됩니다. **GpuTerm은 이 셋을 하나로 합쳤습니다.** 한 번 접속하면 xterm.js 터미널, 드래그 앤 드롭 SFTP 브라우저, 그리고 CPU·메모리·디스크·로그인 사용자·GPU(NVIDIA·AMD·Intel·Apple Silicon, Linux/macOS 모두)를 폴링하는 실시간 텔레메트리 바가 함께 열립니다. 모니터링은 별도 SSH 채널로 동작하므로 셸 작업을 방해하지 않습니다.
+원격 GPU 서버에서 작업하다 보면 SSH 클라이언트, SFTP 도구, 그리고 `watch nvidia-smi`를 띄워둔 터미널까지 세 개의 창을 오가게 됩니다. **GpuTerm은 이 셋을 하나로 합쳤습니다.** 한 번 접속하면 xterm.js 터미널, 드래그 앤 드롭 SFTP 브라우저, 그리고 CPU·메모리·디스크·로그인 사용자·GPU(NVIDIA·AMD·Intel·Apple Silicon, Linux/macOS/Windows 모두)를 폴링하는 실시간 텔레메트리 바가 함께 열립니다. 모니터링은 별도 SSH 채널로 동작하므로 셸 작업을 방해하지 않습니다.
 
 > **상태:** 베타. 최신 프리릴리스는 [Releases](https://github.com/fortranmentis/GPUTERM/releases)에서 내려받거나 아래 안내에 따라 소스에서 빌드하세요.
 
@@ -134,16 +134,16 @@ npm run tauri:build
 
 모든 지표는 표준 도구를 SSH로 실행해 수집합니다 — 서버에 아무것도 설치하지 않습니다.
 
-| 섹션 | Linux | macOS |
-| --- | --- | --- |
-| CPU | `/proc/stat`, `/proc/loadavg`, `/proc/cpuinfo`, `nproc`, `lscpu` | `sysctl`(모델·코어·P/E 구성·loadavg), `top -l 2` |
-| 메모리 | `/proc/meminfo` | `sysctl hw.memsize`, `vm_stat`, `vm.swapusage` |
-| 디스크 | `df -P -T -B1` | `df -P -k` + `mount` |
-| 사용자 | `who` | `who` |
-| GPU | `nvidia-smi`(NVIDIA), `rocm-smi --json`(AMD/ROCm), `xpu-smi` / `intel_gpu_top`(Intel) — 자동 감지 | `ioreg -c IOAccelerator` (Apple GPU 사용률, root 불필요) |
-| 상위 프로세스 | `ps -eo … --sort=-%cpu` / `--sort=-rss` | `ps -Ao … -r` / `-m` |
+| 섹션 | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| CPU | `/proc/stat`, `/proc/loadavg`, `/proc/cpuinfo`, `nproc`, `lscpu` | `sysctl`(모델·코어·P/E 구성·loadavg), `top -l 2` | `Win32_Processor`, `Win32_PerfRawData_PerfOS_Processor` (CIM) |
+| 메모리 | `/proc/meminfo` | `sysctl hw.memsize`, `vm_stat`, `vm.swapusage` | `Win32_OperatingSystem`, `Win32_PageFileUsage` (CIM) |
+| 디스크 | `df -P -T -B1` | `df -P -k` + `mount` | `Win32_LogicalDisk` (고정 드라이브) |
+| 사용자 | `who` | `who` | `quser` |
+| GPU | `nvidia-smi`(NVIDIA), `rocm-smi --json`(AMD/ROCm), `xpu-smi` / `intel_gpu_top`(Intel) — 자동 감지 | `ioreg -c IOAccelerator` (Apple GPU 사용률, root 불필요) | `nvidia-smi`(NVIDIA, 전체 지표); AMD/Intel은 WDDM GPU 성능 카운터(사용률 + VRAM) |
+| 상위 프로세스 | `ps -eo … --sort=-%cpu` / `--sort=-rss` | `ps -Ao … -r` / `-m` | `Get-Process` (2회 샘플 CPU 델타) |
 
-명령은 전용 SSH 연결에서 3초 타임아웃으로 실행됩니다. GpuTerm이 원격 OS와 GPU 도구를 호스트별로 감지해 각 카드에 벤더 태그를 표시합니다. `intel_gpu_top`은 root 또는 `CAP_PERFMON`이 필요하고, Apple GPU의 전력·온도는 root `powermetrics`가 필요해 n/a로 표시됩니다. GPU 소스가 하나도 없으면 GPU 섹션만 '사용 불가'로 표시되고 나머지는 계속 동작합니다.
+명령은 전용 SSH 연결에서 3초 타임아웃으로 실행됩니다(Windows는 PowerShell 기동 시간을 감안해 10초). Windows 명령은 폴링마다 하나의 PowerShell 5.1 스크립트로 묶어 `-EncodedCommand`로 전송하므로 OpenSSH 기본 셸이 cmd.exe든 PowerShell이든 동작하며, 서버에 아무것도 설치하지 않고 관리자 권한도 필요 없습니다. GpuTerm이 원격 OS와 GPU 도구를 호스트별로 감지해 각 카드에 벤더 태그를 표시합니다. `intel_gpu_top`은 root 또는 `CAP_PERFMON`이 필요하고, Apple GPU의 전력·온도는 root `powermetrics`가 필요해 n/a로 표시됩니다. GPU 소스가 하나도 없으면 GPU 섹션만 '사용 불가'로 표시되고 나머지는 계속 동작합니다.
 
 </details>
 
@@ -217,8 +217,9 @@ src-tauri/src/ssh/      Rust 백엔드
 - keyboard-interactive SSH 인증 미지원
 - 디렉토리 재귀 업로드/다운로드 및 전송 이어받기 미지원
 - `known_hosts.json`은 OpenSSH known_hosts 형식이 아닌 SHA-256 지문 JSON 사용
-- 텔레메트리는 Linux와 macOS(Apple Silicon 포함) 원격을 지원; Apple GPU 전력·온도와 코어별 CPU 사용률은 root `powermetrics`가 필요해 미표시
-- GPU 모니터링은 `nvidia-smi`·`rocm-smi`·`xpu-smi`·`intel_gpu_top`·macOS `ioreg` 사용 (AMD는 현재 `rocm-smi` 기준)
+- 텔레메트리는 Linux·macOS(Apple Silicon 포함)·Windows 원격을 지원; Apple GPU 전력·온도와 코어별 CPU 사용률은 root `powermetrics`가 필요해 미표시
+- GPU 모니터링은 `nvidia-smi`·`rocm-smi`·`xpu-smi`·`intel_gpu_top`·macOS `ioreg`·Windows WDDM 성능 카운터 사용 (Linux의 AMD는 현재 `rocm-smi` 기준)
+- Windows 원격: Windows PowerShell 5.1 이상 필요(기본 탑재); load average는 존재하지 않아 n/a로 표시; AMD/Intel GPU는 사용률·전용 VRAM만 제공(전력·온도 불가, Windows 10 1709+ 및 WDDM 2.x 드라이버 필요); 프로세스 소유자와 GPU 프로세스 커맨드라인은 관리자 권한이 필요해 n/a 또는 프로세스 이름으로 대체; Home 에디션에는 `quser`가 없어 사용자 섹션이 비어 있음; 내장+외장 하이브리드 호스트는 두 GPU 모두 표시(카운터는 DirectX 레지스트리의 어댑터 LUID로 정확히 매핑, 해당 키가 없으면 위치 기반 휴리스틱으로 폴백)
 
 이슈와 풀 리퀘스트를 환영합니다 — 제출 전에 위의 테스트를 실행해 주세요.
 

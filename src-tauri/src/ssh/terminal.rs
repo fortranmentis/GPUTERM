@@ -342,6 +342,9 @@ fn start_system_monitor(app: AppHandle, state: &AppState, target: crate::ssh::se
 
 fn stop_existing_session(state: &AppState, session_id: &str) {
     crate::ssh::session::drop_ops_session(&state.ops_sessions, session_id);
+    if let Ok(mut cache) = state.remote_os_cache.lock() {
+        cache.remove(session_id);
+    }
 
     if let Ok(mut stops) = state.telemetry_stops.lock() {
         if let Some(stop) = stops.remove(session_id) {

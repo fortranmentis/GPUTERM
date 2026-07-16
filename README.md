@@ -21,7 +21,7 @@ Terminal, file transfers, and real-time CPU · RAM · Disk · GPU telemetry (NVI
 
 ---
 
-Working on a remote GPU box usually means juggling an SSH client, an SFTP tool, and a second terminal running `watch nvidia-smi`. **GpuTerm replaces all three.** Connect once and get an xterm.js terminal, a drag-and-drop SFTP browser, and a live telemetry bar that polls CPU, memory, disk, logged-in users, and every GPU on the host — NVIDIA, AMD, Intel, or Apple Silicon, on Linux and macOS remotes alike — over its own SSH channel, so monitoring never blocks your shell.
+Working on a remote GPU box usually means juggling an SSH client, an SFTP tool, and a second terminal running `watch nvidia-smi`. **GpuTerm replaces all three.** Connect once and get an xterm.js terminal, a drag-and-drop SFTP browser, and a live telemetry bar that polls CPU, memory, disk, logged-in users, and every GPU on the host — NVIDIA, AMD, Intel, or Apple Silicon, on Linux, macOS, and Windows remotes alike — over its own SSH channel, so monitoring never blocks your shell.
 
 > **Status:** beta. Download the latest prerelease from the [Releases](https://github.com/fortranmentis/GPUTERM/releases) page or build from source below.
 
@@ -134,16 +134,16 @@ npm run tauri:build
 
 All metrics come from standard tools over SSH — nothing is installed on the server.
 
-| Section | Linux | macOS |
-| --- | --- | --- |
-| CPU | `/proc/stat`, `/proc/loadavg`, `/proc/cpuinfo`, `nproc`, `lscpu` | `sysctl` (brand, cores, P/E split, loadavg), `top -l 2` |
-| Memory | `/proc/meminfo` | `sysctl hw.memsize`, `vm_stat`, `vm.swapusage` |
-| Disk | `df -P -T -B1` | `df -P -k` + `mount` |
-| Users | `who` | `who` |
-| GPU | `nvidia-smi` (NVIDIA), `rocm-smi --json` (AMD/ROCm), `xpu-smi` / `intel_gpu_top` (Intel) — auto-detected | `ioreg -c IOAccelerator` (Apple GPU utilization, no root needed) |
-| Top processes | `ps -eo … --sort=-%cpu` / `--sort=-rss` | `ps -Ao … -r` / `-m` |
+| Section | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| CPU | `/proc/stat`, `/proc/loadavg`, `/proc/cpuinfo`, `nproc`, `lscpu` | `sysctl` (brand, cores, P/E split, loadavg), `top -l 2` | `Win32_Processor`, `Win32_PerfRawData_PerfOS_Processor` (CIM) |
+| Memory | `/proc/meminfo` | `sysctl hw.memsize`, `vm_stat`, `vm.swapusage` | `Win32_OperatingSystem`, `Win32_PageFileUsage` (CIM) |
+| Disk | `df -P -T -B1` | `df -P -k` + `mount` | `Win32_LogicalDisk` (fixed drives) |
+| Users | `who` | `who` | `quser` |
+| GPU | `nvidia-smi` (NVIDIA), `rocm-smi --json` (AMD/ROCm), `xpu-smi` / `intel_gpu_top` (Intel) — auto-detected | `ioreg -c IOAccelerator` (Apple GPU utilization, no root needed) | `nvidia-smi` (NVIDIA, full metrics); WDDM GPU performance counters for AMD/Intel (utilization + VRAM) |
+| Top processes | `ps -eo … --sort=-%cpu` / `--sort=-rss` | `ps -Ao … -r` / `-m` | `Get-Process` (two-sample CPU delta) |
 
-Commands run with a 3-second timeout on a dedicated SSH connection. GpuTerm detects the remote OS and available GPU tools per host and shows a vendor tag on every card; `intel_gpu_top` needs root or `CAP_PERFMON`, and Apple GPU power/temperature would need root `powermetrics`, so they show as n/a. If no GPU source is present, the GPU section reports unavailable while everything else keeps working.
+Commands run with a 3-second timeout on a dedicated SSH connection (10 s on Windows to absorb PowerShell start-up). Windows commands are batched into a single PowerShell 5.1 invocation per poll and sent as `-EncodedCommand`, so they work with either cmd.exe or PowerShell as the OpenSSH default shell — nothing is installed and no admin rights are required. GpuTerm detects the remote OS and available GPU tools per host and shows a vendor tag on every card; `intel_gpu_top` needs root or `CAP_PERFMON`, and Apple GPU power/temperature would need root `powermetrics`, so they show as n/a. If no GPU source is present, the GPU section reports unavailable while everything else keeps working.
 
 </details>
 
@@ -217,8 +217,9 @@ src-tauri/src/ssh/      Rust backend
 - Keyboard-interactive SSH authentication is not implemented
 - Recursive directory upload/download and transfer resume are not implemented
 - `known_hosts.json` uses SHA-256 fingerprints, not the OpenSSH known_hosts format
-- Telemetry supports Linux and macOS remotes (Apple Silicon included); Apple GPU power/temperature and per-core CPU usage need root `powermetrics` and are not shown
-- GPU monitoring uses `nvidia-smi`, `rocm-smi`, `xpu-smi`, `intel_gpu_top`, or macOS `ioreg` (AMD support currently targets `rocm-smi`)
+- Telemetry supports Linux, macOS (Apple Silicon included), and Windows remotes; Apple GPU power/temperature and per-core CPU usage need root `powermetrics` and are not shown
+- GPU monitoring uses `nvidia-smi`, `rocm-smi`, `xpu-smi`, `intel_gpu_top`, macOS `ioreg`, or Windows WDDM performance counters (AMD support on Linux currently targets `rocm-smi`)
+- Windows remotes: requires Windows PowerShell 5.1+ (preinstalled); load averages don't exist and show as n/a; AMD/Intel GPUs report utilization and dedicated VRAM only (no power/temperature, needs Windows 10 1709+ with a WDDM 2.x driver); process owners and GPU process command lines need elevation and fall back to n/a / process names; `quser` is missing on Home editions, so the Users section stays empty there; hybrid iGPU+dGPU hosts show both cards (counters are attributed by adapter LUID from the DirectX registry, falling back to a positional heuristic if that key is unavailable)
 
 Issues and pull requests are welcome — please run the test suites above before submitting.
 

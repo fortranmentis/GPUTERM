@@ -1,5 +1,5 @@
 use crate::ssh::credentials::{CredentialStore, MemoryCredentialStore};
-use crate::ssh::system_monitor::SystemMonitorSettings;
+use crate::ssh::system_monitor::{RemoteOs, SystemMonitorSettings};
 use crate::ssh::terminal::TerminalHandle;
 use serde::{Deserialize, Serialize};
 use ssh2::{Channel, HashType, HostKeyType, Session};
@@ -31,6 +31,9 @@ pub struct AppState {
     pub credentials: MemoryCredentialStore,
     pub ops_sessions: OpsSessions,
     pub transfer_cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Remote OS per session, detected once by the detail path so popover
+    /// ticks skip the probe round-trips; cleared alongside the ops session.
+    pub remote_os_cache: Arc<Mutex<HashMap<String, RemoteOs>>>,
 }
 
 #[derive(Clone)]

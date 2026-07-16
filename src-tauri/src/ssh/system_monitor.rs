@@ -9,6 +9,8 @@ use crate::ssh::parse_util::{
     parse_lscpu_value, parse_meminfo_values, required_section, split_sections,
 };
 use crate::ssh::session::{open_ssh_session, AppState, SshTarget};
+use crate::ssh::windows_monitor;
+use base64::Engine as _;
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use ssh2::Session;
@@ -21,6 +23,10 @@ use tauri::{AppHandle, Emitter, State};
 
 const COMMAND_TIMEOUT_SECS: u64 = 3;
 const COMMAND_TIMEOUT_MS: u32 = 3_000;
+/// Windows PowerShell 5.1 cold-starts in 0.5–2 s and the batched telemetry
+/// script samples counters for 500 ms, so Windows remotes get a longer
+/// libssh2 session timeout than the Unix paths.
+pub(crate) const WINDOWS_COMMAND_TIMEOUT_MS: u32 = 10_000;
 const DEFAULT_INTERVAL_SECS: u64 = 2;
 const DEFAULT_IGNORED_FS_TYPES: &[&str] = &[
     "tmpfs", "devtmpfs", "squashfs", "proc", "sysfs", "cgroup", "cgroup2", "overlay", "devfs",
@@ -91,10 +97,10 @@ pub struct DiskMetric {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteUserSession {
-    user: String,
-    tty: String,
-    login_time: String,
-    from: Option<String>,
+    pub(crate) user: String,
+    pub(crate) tty: String,
+    pub(crate) login_time: String,
+    pub(crate) from: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -125,25 +131,49 @@ pub struct RemoteTelemetry {
     errors: TelemetryErrors,
 }
 
+/// One CPU time sample in a monotonically increasing unit. Linux fills it from
+/// /proc/stat jiffies; Windows from raw perf counters (idle 100 ns ticks vs.
+/// the 100 ns wall clock). Usage is the two-poll delta either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CpuStatSample {
-    idle: u64,
-    total: u64,
+    pub(crate) idle: u64,
+    pub(crate) total: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RemoteOs {
     Linux,
     MacOs,
+    Windows,
 }
 
+/// Two-stage probe run without the POSIX wrapper, since the remote shell
+/// dialect is unknown until the OS is known.
 pub(crate) fn detect_remote_os(session: &Session) -> Option<RemoteOs> {
-    let output = run_remote_command(session, "uname -s 2>/dev/null || true").ok()?;
-    Some(if output.trim() == "Darwin" {
+    // Stage 1: uname answers for Linux, macOS, and MSYS/Cygwin environments.
+    let (output, status) = run_raw_remote_command(session, "uname -s").ok()?;
+    let name = output.trim();
+    if status == 0 && !name.is_empty() {
+        return Some(classify_uname(name));
+    }
+    // Stage 2: a Windows host whose default shell (cmd.exe or PowerShell) has
+    // no uname. `cmd.exe /c ver` needs no quoting in either shell, and the
+    // "Microsoft Windows" brand token survives localization.
+    let (output, status) = run_raw_remote_command(session, "cmd.exe /c ver").ok()?;
+    (status == 0 && output.contains("Windows")).then_some(RemoteOs::Windows)
+}
+
+/// MSYS/Cygwin ports report `MINGW64_NT-…`/`CYGWIN_NT-…`; the physical host is
+/// Windows and PowerShell yields correct disks/users/GPU data where the POSIX
+/// emulation layer would not.
+fn classify_uname(name: &str) -> RemoteOs {
+    if name == "Darwin" {
         RemoteOs::MacOs
+    } else if name.starts_with("MINGW") || name.starts_with("MSYS") || name.starts_with("CYGWIN") {
+        RemoteOs::Windows
     } else {
         RemoteOs::Linux
-    })
+    }
 }
 
 #[tauri::command]
@@ -220,6 +250,9 @@ pub fn start(
                             ..GpuProbe::default()
                         });
                     }
+                    if host_os == Some(RemoteOs::Windows) {
+                        session.set_timeout(WINDOWS_COMMAND_TIMEOUT_MS);
+                    }
                 }
                 let telemetry = collect_remote_telemetry(
                     &target.session_id,
@@ -291,6 +324,9 @@ fn collect_remote_telemetry(
     previous_cpu: &mut Option<CpuStatSample>,
     gpu_probe: &mut Option<GpuProbe>,
 ) -> RemoteTelemetry {
+    if os == RemoteOs::Windows {
+        return collect_windows_telemetry(session_id, session, previous_cpu, gpu_probe);
+    }
     let mut errors = TelemetryErrors::default();
 
     let hostname = run_remote_command(session, "hostname 2>/dev/null || uname -n 2>/dev/null || true")
@@ -303,6 +339,7 @@ fn collect_remote_telemetry(
             .and_then(|output| parse_cpu_command_output(&output, previous_cpu)),
         RemoteOs::MacOs => run_remote_command(session, macos_monitor::MACOS_CPU_COMMAND)
             .and_then(|output| macos_monitor::parse_macos_cpu_output(&output)),
+        RemoteOs::Windows => unreachable!("Windows telemetry is collected above"),
     };
     let cpu = match cpu_result {
         Ok(metric) => Some(metric),
@@ -317,6 +354,7 @@ fn collect_remote_telemetry(
             .and_then(|output| parse_meminfo(&output)),
         RemoteOs::MacOs => run_remote_command(session, macos_monitor::MACOS_MEMORY_COMMAND)
             .and_then(|output| macos_monitor::parse_macos_memory_output(&output)),
+        RemoteOs::Windows => unreachable!("Windows telemetry is collected above"),
     };
     let memory = match memory_result {
         Ok(metric) => Some(metric),
@@ -331,6 +369,7 @@ fn collect_remote_telemetry(
             .and_then(|output| parse_df_output(&output)),
         RemoteOs::MacOs => run_remote_command(session, macos_monitor::MACOS_DISK_COMMAND)
             .and_then(|output| macos_monitor::parse_macos_disk_output(&output)),
+        RemoteOs::Windows => unreachable!("Windows telemetry is collected above"),
     };
     let disks = match disks_result {
         // The frontend filters by the user's disk_ignore_fs_types setting so the
@@ -342,7 +381,7 @@ fn collect_remote_telemetry(
         }
     };
 
-    let gpu = match collect_gpu_metrics(session, gpu_probe) {
+    let gpu = match collect_gpu_metrics(session, os, gpu_probe) {
         Ok(metrics) => metrics,
         Err(error) => {
             errors.gpu = Some(error);
@@ -375,26 +414,38 @@ fn collect_remote_telemetry(
 /// collects metrics from every detected vendor and concatenates them.
 pub(crate) fn collect_gpu_metrics(
     session: &Session,
+    os: RemoteOs,
     probe: &mut Option<GpuProbe>,
 ) -> Result<Vec<GpuMetric>, String> {
     if probe.is_none() {
-        let mut detected = run_remote_command(session, GPU_PROBE_COMMAND)
-            .map(|output| parse_gpu_probe(&output))
-            .unwrap_or_default();
-        if detected.xpu_smi {
-            detected.xpu_devices = run_remote_command(session, XPU_DISCOVERY_COMMAND)
-                .map(|output| parse_xpu_discovery(&output))
+        let detected = if os == RemoteOs::Windows {
+            run_remote_command_for(session, os, windows_monitor::WINDOWS_GPU_PROBE_COMMAND)
+                .map(|output| windows_monitor::parse_windows_gpu_probe(&output))
+                .unwrap_or_default()
+        } else {
+            let mut detected = run_remote_command(session, GPU_PROBE_COMMAND)
+                .map(|output| parse_gpu_probe(&output))
                 .unwrap_or_default();
-        }
+            if detected.xpu_smi {
+                detected.xpu_devices = run_remote_command(session, XPU_DISCOVERY_COMMAND)
+                    .map(|output| parse_xpu_discovery(&output))
+                    .unwrap_or_default();
+            }
+            detected
+        };
         *probe = Some(detected);
     }
     let probe = probe.as_ref().expect("probe is populated above");
 
     if !probe.any() {
         return Err(
-            "No GPU monitoring source found (nvidia-smi / rocm-smi / xpu-smi / intel_gpu_top / macOS ioreg)"
+            "No GPU monitoring source found (nvidia-smi / rocm-smi / xpu-smi / intel_gpu_top / macOS ioreg / Windows GPU counters)"
                 .to_string(),
         );
+    }
+
+    if os == RemoteOs::Windows {
+        return collect_windows_gpu_metrics(session, probe);
     }
 
     let mut metrics = Vec::new();
@@ -458,6 +509,131 @@ pub(crate) fn collect_gpu_metrics(
     Ok(metrics)
 }
 
+/// Windows GPU collection: nvidia-smi works identically to Linux (full
+/// fields); adapters it does not cover fall back to the WDDM performance
+/// counters, which expose utilization and dedicated VRAM only.
+fn collect_windows_gpu_metrics(
+    session: &Session,
+    probe: &GpuProbe,
+) -> Result<Vec<GpuMetric>, String> {
+    let mut metrics = Vec::new();
+    let mut errors = Vec::new();
+
+    if probe.nvidia {
+        match run_remote_command_for(session, RemoteOs::Windows, NVIDIA_SMI_QUERY)
+            .and_then(|output| parse_nvidia_smi_csv(&output))
+        {
+            Ok(mut found) => metrics.append(&mut found),
+            Err(error) => errors.push(error),
+        }
+    }
+
+    let needs_counters = probe
+        .windows_adapters
+        .iter()
+        .any(|adapter| !(probe.nvidia && adapter.vendor == "nvidia"));
+    if needs_counters {
+        let next_index = metrics.iter().map(|metric| metric.index + 1).max().unwrap_or(0);
+        match run_remote_command_for(
+            session,
+            RemoteOs::Windows,
+            windows_monitor::WINDOWS_GPU_COUNTERS_COMMAND,
+        )
+        .and_then(|output| {
+            windows_monitor::parse_windows_gpu_counters(
+                &output,
+                &probe.windows_adapters,
+                probe.nvidia,
+                next_index,
+            )
+        }) {
+            Ok(mut found) => metrics.append(&mut found),
+            Err(error) => errors.push(error),
+        }
+    }
+
+    if metrics.is_empty() && !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    Ok(metrics)
+}
+
+/// Windows telemetry: one batched PowerShell invocation covers hostname, CPU,
+/// memory, disks, and users (PowerShell start-up is too slow for one command
+/// per section); GPUs keep their own commands like the Unix path.
+fn collect_windows_telemetry(
+    session_id: &str,
+    session: &Session,
+    previous_cpu: &mut Option<CpuStatSample>,
+    gpu_probe: &mut Option<GpuProbe>,
+) -> RemoteTelemetry {
+    let mut errors = TelemetryErrors::default();
+    let mut hostname = None;
+    let mut cpu = None;
+    let mut memory = None;
+    let mut disks = Vec::new();
+    let mut users = Vec::new();
+
+    match run_remote_command_for(
+        session,
+        RemoteOs::Windows,
+        windows_monitor::WINDOWS_TELEMETRY_COMMAND,
+    ) {
+        Ok(output) => {
+            let sections = split_sections(&output);
+            hostname = sections
+                .get("HOSTNAME")
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            match windows_monitor::parse_windows_cpu_output(&sections, previous_cpu) {
+                Ok(metric) => cpu = Some(metric),
+                Err(error) => errors.cpu = Some(error),
+            }
+            match windows_monitor::parse_windows_memory_output(&sections) {
+                Ok(metric) => memory = Some(metric),
+                Err(error) => errors.memory = Some(error),
+            }
+            match windows_monitor::parse_windows_disk_output(&sections) {
+                Ok(found) => disks = sort_disks(found),
+                Err(error) => errors.disk = Some(error),
+            }
+            users = sections
+                .get("USERS")
+                .map(|value| windows_monitor::parse_quser_output(value))
+                .unwrap_or_default();
+        }
+        Err(error) => {
+            // The one batched command failing fails every section, so a dead
+            // transport looks like total failure to the reconnect heuristic
+            // exactly as it does on the Unix paths.
+            errors.cpu = Some(error.clone());
+            errors.memory = Some(error.clone());
+            errors.disk = Some(error.clone());
+            errors.users = Some(error);
+        }
+    }
+
+    let gpu = match collect_gpu_metrics(session, RemoteOs::Windows, gpu_probe) {
+        Ok(metrics) => metrics,
+        Err(error) => {
+            errors.gpu = Some(error);
+            Vec::new()
+        }
+    };
+
+    RemoteTelemetry {
+        session_id: session_id.to_string(),
+        timestamp: timestamp(),
+        hostname,
+        cpu,
+        memory,
+        disks,
+        gpu,
+        users,
+        errors,
+    }
+}
+
 /// Parses `LC_ALL=C who` output. The login time column set varies between
 /// GNU ("2026-07-15 09:12") and BSD ("Jul 15 09:12"), so it is kept as an
 /// opaque string; the trailing "(host)" field becomes `from` when present.
@@ -493,22 +669,7 @@ pub(crate) fn run_remote_command(session: &Session, command: &str) -> Result<Str
         secs = COMMAND_TIMEOUT_SECS,
         quoted = quoted
     );
-    let mut channel = session
-        .channel_session()
-        .map_err(|error| format!("failed to open telemetry command channel: {}", error))?;
-    channel
-        .exec(&wrapped)
-        .map_err(|error| format!("failed to execute telemetry command: {}", error))?;
-
-    let mut stdout = String::new();
-    channel
-        .read_to_string(&mut stdout)
-        .map_err(|error| format!("failed to read telemetry command output: {}", error))?;
-
-    let mut stderr = String::new();
-    let _ = channel.stderr().read_to_string(&mut stderr);
-    let _ = channel.wait_close();
-    let exit_status = channel.exit_status().unwrap_or(-1);
+    let (stdout, stderr, exit_status) = exec_remote(session, &wrapped)?;
 
     if exit_status == 124 {
         return Err(format!(
@@ -518,15 +679,89 @@ pub(crate) fn run_remote_command(session: &Session, command: &str) -> Result<Str
     }
 
     if exit_status != 0 {
-        let detail = if stderr.trim().is_empty() {
-            format!("telemetry command exited with status {}", exit_status)
-        } else {
-            stderr.trim().to_string()
-        };
-        return Err(detail);
+        return Err(non_zero_exit_error(&stderr, exit_status));
     }
 
     Ok(stdout)
+}
+
+/// Dispatches by remote OS: the POSIX wrapper for Linux/macOS, PowerShell for
+/// Windows.
+pub(crate) fn run_remote_command_for(
+    session: &Session,
+    os: RemoteOs,
+    command: &str,
+) -> Result<String, String> {
+    match os {
+        RemoteOs::Linux | RemoteOs::MacOs => run_remote_command(session, command),
+        RemoteOs::Windows => run_windows_remote_command(session, command),
+    }
+}
+
+/// Runs a PowerShell script on a Windows remote. `-EncodedCommand` (base64 of
+/// UTF-16LE) keeps the wire command inert in both cmd.exe and PowerShell, so
+/// it survives whichever default shell the OpenSSH server is configured with.
+/// Windows has no `timeout`/`exit 124` equivalent; the libssh2 session
+/// timeout bounds the call like the macOS no-`timeout` fallback branch.
+fn run_windows_remote_command(session: &Session, script: &str) -> Result<String, String> {
+    let wrapped = format!(
+        "powershell.exe -NoProfile -NonInteractive -EncodedCommand {}",
+        encode_powershell_script(script)
+    );
+    let (stdout, stderr, exit_status) = exec_remote(session, &wrapped)?;
+    if exit_status != 0 {
+        return Err(non_zero_exit_error(&stderr, exit_status));
+    }
+    Ok(stdout)
+}
+
+fn encode_powershell_script(script: &str) -> String {
+    let utf16: Vec<u8> = script
+        .encode_utf16()
+        .flat_map(|unit| unit.to_le_bytes())
+        .collect();
+    base64::engine::general_purpose::STANDARD.encode(utf16)
+}
+
+/// Raw exec used only for OS detection, where the remote shell dialect is
+/// still unknown; a non-zero exit is data, not an error.
+fn run_raw_remote_command(session: &Session, command: &str) -> Result<(String, i32), String> {
+    exec_remote(session, command).map(|(stdout, _, exit_status)| (stdout, exit_status))
+}
+
+/// Execs a wire-ready command and returns (stdout, stderr, exit status).
+/// Output is decoded lossily: Windows hosts in particular may emit non-UTF-8
+/// bytes for localized names, which must not fail the whole poll.
+fn exec_remote(session: &Session, wire_command: &str) -> Result<(String, String, i32), String> {
+    let mut channel = session
+        .channel_session()
+        .map_err(|error| format!("failed to open telemetry command channel: {}", error))?;
+    channel
+        .exec(wire_command)
+        .map_err(|error| format!("failed to execute telemetry command: {}", error))?;
+
+    let mut stdout = Vec::new();
+    channel
+        .read_to_end(&mut stdout)
+        .map_err(|error| format!("failed to read telemetry command output: {}", error))?;
+
+    let mut stderr = Vec::new();
+    let _ = channel.stderr().read_to_end(&mut stderr);
+    let _ = channel.wait_close();
+    let exit_status = channel.exit_status().unwrap_or(-1);
+    Ok((
+        String::from_utf8_lossy(&stdout).into_owned(),
+        String::from_utf8_lossy(&stderr).into_owned(),
+        exit_status,
+    ))
+}
+
+fn non_zero_exit_error(stderr: &str, exit_status: i32) -> String {
+    if stderr.trim().is_empty() {
+        format!("telemetry command exited with status {}", exit_status)
+    } else {
+        stderr.trim().to_string()
+    }
 }
 
 fn shell_quote(value: &str) -> String {
@@ -719,8 +954,16 @@ fn disk_priority(mount_point: &str) -> u8 {
         path if path == "/data" || path.starts_with("/data/") => 20,
         path if path == "/mnt" || path.starts_with("/mnt/") => 30,
         path if path == "/media" || path.starts_with("/media/") => 40,
+        // Windows drive letters sort ahead of "other"; the alphabetical
+        // tiebreak in sort_disks puts C:\ first among them.
+        path if is_windows_drive(path) => 50,
         _ => 100,
     }
+}
+
+fn is_windows_drive(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
 fn sanitize_settings(mut settings: SystemMonitorSettings) -> SystemMonitorSettings {
@@ -824,6 +1067,37 @@ mod tests {
         assert_eq!(sorted[0].mount_point, "/");
         assert_eq!(sorted[1].mount_point, "/data");
         assert_eq!(sorted[2].mount_point, "/run");
+    }
+
+    #[test]
+    fn classifies_uname_output_per_os() {
+        assert_eq!(classify_uname("Darwin"), RemoteOs::MacOs);
+        assert_eq!(classify_uname("Linux"), RemoteOs::Linux);
+        assert_eq!(classify_uname("FreeBSD"), RemoteOs::Linux);
+        // Git-for-Windows / MSYS / Cygwin run on a physical Windows host.
+        assert_eq!(classify_uname("MINGW64_NT-10.0-19045"), RemoteOs::Windows);
+        assert_eq!(classify_uname("MSYS_NT-10.0-22631"), RemoteOs::Windows);
+        assert_eq!(classify_uname("CYGWIN_NT-10.0-19045"), RemoteOs::Windows);
+    }
+
+    #[test]
+    fn windows_drives_sort_after_unix_data_mounts() {
+        let disks = parse_df_output(
+            "Filesystem Type 1-blocks Used Available Use% Mounted on\nD:\\ ntfs 100 20 80 20% D:\\\nC:\\ ntfs 100 30 70 30% C:\\\n",
+        )
+        .unwrap();
+        let sorted = sort_disks(disks);
+        assert_eq!(sorted[0].mount_point, "C:\\");
+        assert_eq!(sorted[1].mount_point, "D:\\");
+        assert_eq!(disk_priority("C:\\"), 50);
+        assert!(disk_priority("C:\\") < disk_priority("/run"));
+        assert!(disk_priority("/") < disk_priority("C:\\"));
+    }
+
+    #[test]
+    fn encodes_powershell_script_as_utf16le_base64() {
+        // "ab" → UTF-16LE 61 00 62 00 → base64 "YQBiAA==".
+        assert_eq!(encode_powershell_script("ab"), "YQBiAA==");
     }
 
     #[test]

@@ -1129,6 +1129,7 @@ dependencies = [
 name = "gputerm"
 version = "1.0.7-beta"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "serde",
  "serde_json",
