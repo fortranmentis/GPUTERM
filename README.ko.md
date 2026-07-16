@@ -15,6 +15,8 @@
 
 [English](./README.md) · [한국어](./README.ko.md)
 
+<img src="docs/screenshots/main.png" alt="GpuTerm 메인 창: 점프 호스트를 지원하는 세션 사이드바, SSH 터미널, SFTP 브라우저, 텔레메트리 바" width="850" />
+
 </div>
 
 ---

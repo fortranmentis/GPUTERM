@@ -15,6 +15,8 @@ Terminal, file transfers, and real-time CPU · RAM · Disk · NVIDIA GPU telemet
 
 [English](./README.md) · [한국어](./README.ko.md)
 
+<img src="docs/screenshots/main.png" alt="GpuTerm main window: session sidebar with jump-host support, SSH terminal, SFTP browser, and the telemetry bar" width="850" />
+
 </div>
 
 ---
