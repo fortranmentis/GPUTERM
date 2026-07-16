@@ -14,6 +14,8 @@ const defaultTelemetrySettings: TelemetrySettings = {
     "cgroup",
     "cgroup2",
     "overlay",
+    "devfs",
+    "autofs",
   ],
 };
 

@@ -3,6 +3,7 @@ use crate::ssh::gpu_monitor::{
     parse_xpu_discovery, parse_xpu_stats, xpu_stats_command, GpuMetric, GpuProbe,
     GPU_PROBE_COMMAND, INTEL_GPU_TOP_COMMAND, NVIDIA_SMI_QUERY, XPU_DISCOVERY_COMMAND,
 };
+use crate::ssh::macos_monitor;
 use crate::ssh::parse_util::{
     kib_to_mib, parse_average_clock, parse_cpu_model, parse_first_u64, parse_loadavg,
     parse_lscpu_value, parse_meminfo_values, required_section, split_sections,
@@ -22,7 +23,8 @@ const COMMAND_TIMEOUT_SECS: u64 = 3;
 const COMMAND_TIMEOUT_MS: u32 = 3_000;
 const DEFAULT_INTERVAL_SECS: u64 = 2;
 const DEFAULT_IGNORED_FS_TYPES: &[&str] = &[
-    "tmpfs", "devtmpfs", "squashfs", "proc", "sysfs", "cgroup", "cgroup2", "overlay",
+    "tmpfs", "devtmpfs", "squashfs", "proc", "sysfs", "cgroup", "cgroup2", "overlay", "devfs",
+    "autofs",
 ];
 
 const CPU_COMMAND: &str = "printf '__PROC_STAT__\\n'; cat /proc/stat 2>/dev/null; printf '\\n__LOADAVG__\\n'; cat /proc/loadavg 2>/dev/null; printf '\\n__CPUINFO__\\n'; cat /proc/cpuinfo 2>/dev/null; printf '\\n__NPROC_ALL__\\n'; nproc --all 2>/dev/null || true; printf '\\n__NPROC_ONLINE__\\n'; nproc 2>/dev/null || true; printf '\\n__LSCPU__\\n'; lscpu 2>/dev/null || true";
@@ -51,39 +53,39 @@ impl Default for SystemMonitorSettings {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CpuMetric {
-    model_name: Option<String>,
-    usage_percent: Option<f64>,
-    load_avg1: Option<f64>,
-    load_avg5: Option<f64>,
-    load_avg15: Option<f64>,
-    total_cores: Option<u64>,
-    online_cores: Option<u64>,
-    avg_clock_ghz: Option<f64>,
+    pub(crate) model_name: Option<String>,
+    pub(crate) usage_percent: Option<f64>,
+    pub(crate) load_avg1: Option<f64>,
+    pub(crate) load_avg5: Option<f64>,
+    pub(crate) load_avg15: Option<f64>,
+    pub(crate) total_cores: Option<u64>,
+    pub(crate) online_cores: Option<u64>,
+    pub(crate) avg_clock_ghz: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryMetric {
-    total_mi_b: Option<u64>,
-    used_mi_b: Option<u64>,
-    available_mi_b: Option<u64>,
-    free_mi_b: Option<u64>,
-    usage_percent: Option<f64>,
-    swap_total_mi_b: Option<u64>,
-    swap_used_mi_b: Option<u64>,
-    swap_free_mi_b: Option<u64>,
+    pub(crate) total_mi_b: Option<u64>,
+    pub(crate) used_mi_b: Option<u64>,
+    pub(crate) available_mi_b: Option<u64>,
+    pub(crate) free_mi_b: Option<u64>,
+    pub(crate) usage_percent: Option<f64>,
+    pub(crate) swap_total_mi_b: Option<u64>,
+    pub(crate) swap_used_mi_b: Option<u64>,
+    pub(crate) swap_free_mi_b: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiskMetric {
-    filesystem: String,
-    fs_type: Option<String>,
-    mount_point: String,
-    total_bytes: Option<u64>,
-    used_bytes: Option<u64>,
-    available_bytes: Option<u64>,
-    usage_percent: Option<f64>,
+    pub(crate) filesystem: String,
+    pub(crate) fs_type: Option<String>,
+    pub(crate) mount_point: String,
+    pub(crate) total_bytes: Option<u64>,
+    pub(crate) used_bytes: Option<u64>,
+    pub(crate) available_bytes: Option<u64>,
+    pub(crate) usage_percent: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -127,6 +129,21 @@ pub struct RemoteTelemetry {
 pub struct CpuStatSample {
     idle: u64,
     total: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemoteOs {
+    Linux,
+    MacOs,
+}
+
+pub(crate) fn detect_remote_os(session: &Session) -> Option<RemoteOs> {
+    let output = run_remote_command(session, "uname -s 2>/dev/null || true").ok()?;
+    Some(if output.trim() == "Darwin" {
+        RemoteOs::MacOs
+    } else {
+        RemoteOs::Linux
+    })
 }
 
 #[tauri::command]
@@ -186,15 +203,28 @@ pub fn start(
 
             let mut previous_cpu = None;
             let mut gpu_probe = None;
+            let mut host_os: Option<RemoteOs> = None;
             let mut consecutive_total_failures = 0_u32;
             while !stop.load(Ordering::SeqCst) {
                 let settings_snapshot = settings
                     .lock()
                     .map(|settings| settings.clone())
                     .unwrap_or_default();
+                if host_os.is_none() {
+                    // Not cached on failure so a dead transport keeps looking
+                    // like total failure to the reconnect heuristic.
+                    host_os = detect_remote_os(session);
+                    if host_os == Some(RemoteOs::MacOs) && gpu_probe.is_none() {
+                        gpu_probe = Some(GpuProbe {
+                            apple: true,
+                            ..GpuProbe::default()
+                        });
+                    }
+                }
                 let telemetry = collect_remote_telemetry(
                     &target.session_id,
                     session,
+                    host_os.unwrap_or(RemoteOs::Linux),
                     &mut previous_cpu,
                     &mut gpu_probe,
                 );
@@ -257,6 +287,7 @@ fn emit_telemetry(app: &AppHandle, telemetry: RemoteTelemetry) {
 fn collect_remote_telemetry(
     session_id: &str,
     session: &Session,
+    os: RemoteOs,
     previous_cpu: &mut Option<CpuStatSample>,
     gpu_probe: &mut Option<GpuProbe>,
 ) -> RemoteTelemetry {
@@ -267,9 +298,13 @@ fn collect_remote_telemetry(
         .map(|hostname| hostname.trim().to_string())
         .filter(|hostname| !hostname.is_empty());
 
-    let cpu = match run_remote_command(session, CPU_COMMAND)
-        .and_then(|output| parse_cpu_command_output(&output, previous_cpu))
-    {
+    let cpu_result = match os {
+        RemoteOs::Linux => run_remote_command(session, CPU_COMMAND)
+            .and_then(|output| parse_cpu_command_output(&output, previous_cpu)),
+        RemoteOs::MacOs => run_remote_command(session, macos_monitor::MACOS_CPU_COMMAND)
+            .and_then(|output| macos_monitor::parse_macos_cpu_output(&output)),
+    };
+    let cpu = match cpu_result {
         Ok(metric) => Some(metric),
         Err(error) => {
             errors.cpu = Some(error);
@@ -277,9 +312,13 @@ fn collect_remote_telemetry(
         }
     };
 
-    let memory = match run_remote_command(session, "cat /proc/meminfo 2>/dev/null")
-        .and_then(|output| parse_meminfo(&output))
-    {
+    let memory_result = match os {
+        RemoteOs::Linux => run_remote_command(session, "cat /proc/meminfo 2>/dev/null")
+            .and_then(|output| parse_meminfo(&output)),
+        RemoteOs::MacOs => run_remote_command(session, macos_monitor::MACOS_MEMORY_COMMAND)
+            .and_then(|output| macos_monitor::parse_macos_memory_output(&output)),
+    };
+    let memory = match memory_result {
         Ok(metric) => Some(metric),
         Err(error) => {
             errors.memory = Some(error);
@@ -287,9 +326,13 @@ fn collect_remote_telemetry(
         }
     };
 
-    let disks = match run_remote_command(session, "df -P -T -B1 2>/dev/null")
-        .and_then(|output| parse_df_output(&output))
-    {
+    let disks_result = match os {
+        RemoteOs::Linux => run_remote_command(session, "df -P -T -B1 2>/dev/null")
+            .and_then(|output| parse_df_output(&output)),
+        RemoteOs::MacOs => run_remote_command(session, macos_monitor::MACOS_DISK_COMMAND)
+            .and_then(|output| macos_monitor::parse_macos_disk_output(&output)),
+    };
+    let disks = match disks_result {
         // The frontend filters by the user's disk_ignore_fs_types setting so the
         // "show hidden filesystems" toggle can reveal them; the backend only sorts.
         Ok(disks) => sort_disks(disks),
@@ -349,13 +392,22 @@ pub(crate) fn collect_gpu_metrics(
 
     if !probe.any() {
         return Err(
-            "No GPU management tool found (nvidia-smi / rocm-smi / xpu-smi / intel_gpu_top)"
+            "No GPU monitoring source found (nvidia-smi / rocm-smi / xpu-smi / intel_gpu_top / macOS ioreg)"
                 .to_string(),
         );
     }
 
     let mut metrics = Vec::new();
     let mut errors = Vec::new();
+
+    if probe.apple {
+        match run_remote_command(session, macos_monitor::MACOS_GPU_COMMAND)
+            .and_then(|output| macos_monitor::parse_macos_gpu_output(&output))
+        {
+            Ok(mut found) => metrics.append(&mut found),
+            Err(error) => errors.push(error),
+        }
+    }
 
     if probe.nvidia {
         match run_remote_command(session, NVIDIA_SMI_QUERY)
@@ -433,10 +485,13 @@ pub fn parse_who_output(output: &str) -> Vec<RemoteUserSession> {
 }
 
 pub(crate) fn run_remote_command(session: &Session, command: &str) -> Result<String, String> {
+    // `timeout` is missing on macOS <= 12, so fall back to a bare shell there;
+    // libssh2's session timeout still bounds the fallback branch.
+    let quoted = shell_quote(command);
     let wrapped = format!(
-        "timeout {}s sh -lc {}",
-        COMMAND_TIMEOUT_SECS,
-        shell_quote(command)
+        "command -v timeout >/dev/null 2>&1 && exec timeout {secs}s sh -lc {quoted}; exec sh -lc {quoted}",
+        secs = COMMAND_TIMEOUT_SECS,
+        quoted = quoted
     );
     let mut channel = session
         .channel_session()

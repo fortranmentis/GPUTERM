@@ -957,6 +957,11 @@ button.telemetry-section:hover {
   color: #7dd3fc;
 }
 
+.gpu-vendor-tag.apple {
+  background: rgba(161, 161, 170, 0.2);
+  color: #d4d4d8;
+}
+
 .telemetry-section-body {
   display: flex;
   flex: 1;

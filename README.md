@@ -44,7 +44,7 @@ Working on a remote GPU box usually means juggling an SSH client, an SFTP tool, 
 - Resizable split between terminal and SFTP panes (persisted across launches)
 
 ### 📊 Live Telemetry
-- Bottom status bar polling CPU, RAM, disk, logged-in users, and **NVIDIA, AMD (ROCm), and Intel** GPUs every 1–10 s
+- Bottom status bar polling CPU, RAM, disk, logged-in users, and **NVIDIA, AMD (ROCm), Intel, and Apple Silicon** GPUs every 1–10 s
 - Click any section for a **draggable, resizable detail popover**: per-core CPU usage, top processes, VRAM/power/temperature per GPU, full mount list
 - **Pop any detail view out into its own OS window** — it refreshes independently and closes with its session
 - Telemetry runs on a dedicated SSH connection (per session) with automatic reconnect and exponential backoff
@@ -134,16 +134,16 @@ npm run tauri:build
 
 All metrics come from standard tools over SSH — nothing is installed on the server.
 
-| Section | Commands |
-| --- | --- |
-| CPU | `/proc/stat`, `/proc/loadavg`, `/proc/cpuinfo`, `nproc`, `lscpu` |
-| Memory | `/proc/meminfo` |
-| Disk | `df -P -T -B1` |
-| Users | `who` |
-| GPU | `nvidia-smi` (NVIDIA), `rocm-smi --json` (AMD/ROCm), `xpu-smi` / `intel_gpu_top` (Intel) — auto-detected per host |
-| Top processes | `ps -eo … --sort=-%cpu` / `--sort=-rss` |
+| Section | Linux | macOS |
+| --- | --- | --- |
+| CPU | `/proc/stat`, `/proc/loadavg`, `/proc/cpuinfo`, `nproc`, `lscpu` | `sysctl` (brand, cores, P/E split, loadavg), `top -l 2` |
+| Memory | `/proc/meminfo` | `sysctl hw.memsize`, `vm_stat`, `vm.swapusage` |
+| Disk | `df -P -T -B1` | `df -P -k` + `mount` |
+| Users | `who` | `who` |
+| GPU | `nvidia-smi` (NVIDIA), `rocm-smi --json` (AMD/ROCm), `xpu-smi` / `intel_gpu_top` (Intel) — auto-detected | `ioreg -c IOAccelerator` (Apple GPU utilization, no root needed) |
+| Top processes | `ps -eo … --sort=-%cpu` / `--sort=-rss` | `ps -Ao … -r` / `-m` |
 
-Commands run with a 3-second timeout on a dedicated SSH connection. GpuTerm detects which GPU tools exist on each host and shows a vendor tag on every card; `intel_gpu_top` needs root or `CAP_PERFMON`. If no GPU tool is present, the GPU section reports unavailable while everything else keeps working.
+Commands run with a 3-second timeout on a dedicated SSH connection. GpuTerm detects the remote OS and available GPU tools per host and shows a vendor tag on every card; `intel_gpu_top` needs root or `CAP_PERFMON`, and Apple GPU power/temperature would need root `powermetrics`, so they show as n/a. If no GPU source is present, the GPU section reports unavailable while everything else keeps working.
 
 </details>
 
@@ -217,7 +217,8 @@ src-tauri/src/ssh/      Rust backend
 - Keyboard-interactive SSH authentication is not implemented
 - Recursive directory upload/download and transfer resume are not implemented
 - `known_hosts.json` uses SHA-256 fingerprints, not the OpenSSH known_hosts format
-- Telemetry is Linux-first (`/proc`, `lscpu`, POSIX `df`); GPU monitoring uses `nvidia-smi`, `rocm-smi`, `xpu-smi`, or `intel_gpu_top` (AMD support currently targets `rocm-smi`)
+- Telemetry supports Linux and macOS remotes (Apple Silicon included); Apple GPU power/temperature and per-core CPU usage need root `powermetrics` and are not shown
+- GPU monitoring uses `nvidia-smi`, `rocm-smi`, `xpu-smi`, `intel_gpu_top`, or macOS `ioreg` (AMD support currently targets `rocm-smi`)
 
 Issues and pull requests are welcome — please run the test suites above before submitting.
 

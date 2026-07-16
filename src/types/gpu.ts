@@ -1,4 +1,4 @@
-export type GpuVendor = "nvidia" | "amd" | "intel";
+export type GpuVendor = "nvidia" | "amd" | "intel" | "apple";
 
 export type GpuMetric = {
   index: number;

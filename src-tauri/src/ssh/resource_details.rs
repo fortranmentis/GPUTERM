@@ -4,8 +4,14 @@ use crate::ssh::parse_util::{
     parse_optional_u64, required_section, split_sections,
 };
 use crate::ssh::gpu_monitor::{parse_gpu_probe, GpuMetric};
+use crate::ssh::macos_monitor::{
+    parse_kern_boottime, parse_macos_cpu_output, parse_swapusage, parse_vm_stat,
+    MACOS_CPU_DETAIL_COMMAND, MACOS_MEMORY_DETAIL_COMMAND,
+};
 use crate::ssh::session::{target_for_active_session, with_ops_session, AppState};
-use crate::ssh::system_monitor::{collect_gpu_metrics, run_remote_command};
+use crate::ssh::system_monitor::{
+    collect_gpu_metrics, detect_remote_os, run_remote_command, RemoteOs,
+};
 use crate::ssh::gpu_monitor::GPU_PROBE_COMMAND;
 use serde::Serialize;
 use ssh2::Session;
@@ -181,12 +187,30 @@ enum ResourceDetailValue {
 
 fn collect_details(session: &Session, resource_type: ResourceType) -> Result<ResourceDetailValue, String> {
     match resource_type {
-        ResourceType::Cpu => run_remote_command(session, CPU_DETAIL_COMMAND)
-            .and_then(|output| parse_cpu_detail_output(&output))
-            .map(ResourceDetailValue::Cpu),
-        ResourceType::Memory => run_remote_command(session, MEMORY_DETAIL_COMMAND)
-            .and_then(|output| parse_memory_detail_output(&output))
-            .map(ResourceDetailValue::Memory),
+        ResourceType::Cpu | ResourceType::Memory => {
+            // Stateless per popover tick, like the GPU tool re-probe below.
+            let os = detect_remote_os(session).unwrap_or(RemoteOs::Linux);
+            match (resource_type, os) {
+                (ResourceType::Cpu, RemoteOs::Linux) => {
+                    run_remote_command(session, CPU_DETAIL_COMMAND)
+                        .and_then(|output| parse_cpu_detail_output(&output))
+                        .map(ResourceDetailValue::Cpu)
+                }
+                (ResourceType::Cpu, RemoteOs::MacOs) => {
+                    run_remote_command(session, MACOS_CPU_DETAIL_COMMAND)
+                        .and_then(|output| parse_macos_cpu_detail_output(&output))
+                        .map(ResourceDetailValue::Cpu)
+                }
+                (_, RemoteOs::Linux) => run_remote_command(session, MEMORY_DETAIL_COMMAND)
+                    .and_then(|output| parse_memory_detail_output(&output))
+                    .map(ResourceDetailValue::Memory),
+                (_, RemoteOs::MacOs) => {
+                    run_remote_command(session, MACOS_MEMORY_DETAIL_COMMAND)
+                        .and_then(|output| parse_macos_memory_detail_output(&output))
+                        .map(ResourceDetailValue::Memory)
+                }
+            }
+        }
         ResourceType::Gpu => collect_gpu_details(session).map(ResourceDetailValue::Gpu),
     }
 }
@@ -220,6 +244,83 @@ fn collect_gpu_details(session: &Session) -> Result<Vec<GpuDetailMetric>, String
         run_remote_command(session, &command).unwrap_or_default()
     };
     parse_gpu_detail_output(&gpu_output, process_rows, &ps_output)
+}
+
+fn parse_macos_cpu_detail_output(output: &str) -> Result<CpuDetailMetric, String> {
+    // The command shares its sysctl/top sections with the telemetry collector.
+    let base = parse_macos_cpu_output(output)?;
+    let sections = split_sections(output);
+    let uptime_seconds = match (
+        sections.get("BOOTTIME").and_then(|value| parse_kern_boottime(value)),
+        sections.get("NOW").and_then(|value| parse_first_u64(value)),
+    ) {
+        (Some(boot), Some(now)) if now > boot => Some((now - boot) as f64),
+        _ => None,
+    };
+
+    Ok(CpuDetailMetric {
+        model_name: base.model_name,
+        usage_percent: base.usage_percent,
+        load_avg1: base.load_avg1,
+        load_avg5: base.load_avg5,
+        load_avg15: base.load_avg15,
+        total_cores: base.total_cores,
+        online_cores: base.online_cores,
+        avg_clock_ghz: None,
+        uptime_seconds,
+        // Per-core usage on macOS requires root (powermetrics); the popover
+        // hides the grid for an empty list.
+        logical_core_usage_percent: Vec::new(),
+        top_processes: sections
+            .get("PROCESSES")
+            .map(|value| parse_cpu_processes(value))
+            .unwrap_or_default(),
+    })
+}
+
+fn parse_macos_memory_detail_output(output: &str) -> Result<MemoryDetailMetric, String> {
+    let sections = split_sections(output);
+    let total_bytes = sections
+        .get("MEMSIZE")
+        .and_then(|value| parse_first_u64(value))
+        .ok_or_else(|| "macOS memory details unavailable (hw.memsize missing)".to_string())?;
+    let (page_size, pages) = required_section(&sections, "VMSTAT")
+        .ok()
+        .and_then(parse_vm_stat)
+        .ok_or_else(|| "macOS memory details unavailable (vm_stat missing)".to_string())?;
+    let count = |label: &str| pages.get(label).copied().unwrap_or(0);
+    let used_bytes = (count("Pages active")
+        + count("Pages wired down")
+        + count("Pages occupied by compressor"))
+        * page_size;
+    let free_bytes = count("Pages free") * page_size;
+    let cached_bytes = pages
+        .get("File-backed pages")
+        .map(|file_backed| file_backed * page_size);
+    let available_bytes = total_bytes.saturating_sub(used_bytes);
+    let (swap_total, swap_used, swap_free) = sections
+        .get("SWAP")
+        .map(|value| parse_swapusage(value))
+        .unwrap_or((None, None, None));
+    const MIB: u64 = 1024 * 1024;
+
+    Ok(MemoryDetailMetric {
+        total_mi_b: Some(total_bytes / MIB),
+        used_mi_b: Some(used_bytes / MIB),
+        available_mi_b: Some(available_bytes / MIB),
+        free_mi_b: Some(free_bytes / MIB),
+        buffers_mi_b: None,
+        cached_mi_b: cached_bytes.map(|bytes| bytes / MIB),
+        swap_total_mi_b: swap_total,
+        swap_used_mi_b: swap_used,
+        swap_free_mi_b: swap_free,
+        usage_percent: (total_bytes > 0)
+            .then_some((used_bytes as f64 / total_bytes as f64) * 100.0),
+        top_processes: sections
+            .get("PROCESSES")
+            .map(|value| parse_memory_processes(value))
+            .unwrap_or_default(),
+    })
 }
 
 fn gpu_metric_to_detail(metric: GpuMetric) -> GpuDetailMetric {

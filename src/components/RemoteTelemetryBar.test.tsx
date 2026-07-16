@@ -287,6 +287,35 @@ describe("RemoteTelemetryBar disk summary", () => {
     ).toBe(false);
   });
 
+  it("renders an Apple GPU card with the vendor tag and n/a fields", () => {
+    setTelemetry({
+      ...telemetry([]),
+      gpu: [
+        {
+          index: 0,
+          name: "Apple M2 Pro GPU",
+          uuid: "apple-gpu",
+          vendor: "apple",
+          driverVersion: "",
+          powerDrawW: null,
+          powerLimitW: null,
+          temperatureC: null,
+          gpuUtilPercent: 42,
+          memUtilPercent: null,
+          memoryTotalMiB: null,
+          memoryUsedMiB: 2048,
+          memoryFreeMiB: null,
+        },
+      ],
+    });
+
+    render(<RemoteTelemetryBar />);
+
+    const tag = screen.getByText("APPLE");
+    expect(tag).toHaveClass("gpu-vendor-tag", "apple");
+    expect(screen.getByText("Apple M2 Pro GPU")).toBeInTheDocument();
+  });
+
   it("polls resource details on the configured telemetry interval", async () => {
     const detailCalls = () =>
       mockInvoke.mock.calls.filter(([command]) => command === "get_resource_details").length;

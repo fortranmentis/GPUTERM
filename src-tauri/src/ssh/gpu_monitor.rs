@@ -70,6 +70,8 @@ pub struct GpuProbe {
     pub amd_smi: bool,
     pub xpu_smi: bool,
     pub intel_gpu_top: bool,
+    /// macOS host: the integrated Apple GPU is read from ioreg, no tool needed.
+    pub apple: bool,
     pub xpu_devices: Vec<XpuDevice>,
 }
 
@@ -82,7 +84,12 @@ pub struct XpuDevice {
 
 impl GpuProbe {
     pub fn any(&self) -> bool {
-        self.nvidia || self.rocm_smi || self.amd_smi || self.xpu_smi || self.intel_gpu_top
+        self.nvidia
+            || self.rocm_smi
+            || self.amd_smi
+            || self.xpu_smi
+            || self.intel_gpu_top
+            || self.apple
     }
 }
 
@@ -91,7 +98,7 @@ impl GpuProbe {
 /// /bin/sh, used by run_remote_command's `sh -lc`) only inspects its first
 /// operand, so a multi-argument form would silently ignore every tool after
 /// the first. The trailing `true` keeps the overall exit status zero.
-pub const GPU_PROBE_COMMAND: &str = "for t in nvidia-smi rocm-smi amd-smi xpu-smi intel_gpu_top; do command -v \"$t\" 2>/dev/null; done; for p in /opt/rocm/bin/rocm-smi /opt/rocm/bin/amd-smi; do [ -x \"$p\" ] && echo \"$p\"; done; true";
+pub const GPU_PROBE_COMMAND: &str = "uname -s 2>/dev/null; for t in nvidia-smi rocm-smi amd-smi xpu-smi intel_gpu_top; do command -v \"$t\" 2>/dev/null; done; for p in /opt/rocm/bin/rocm-smi /opt/rocm/bin/amd-smi; do [ -x \"$p\" ] && echo \"$p\"; done; true";
 
 pub fn parse_gpu_probe(output: &str) -> GpuProbe {
     let mut probe = GpuProbe::default();
@@ -103,6 +110,9 @@ pub fn parse_gpu_probe(output: &str) -> GpuProbe {
             "amd-smi" => probe.amd_smi = true,
             "xpu-smi" => probe.xpu_smi = true,
             "intel_gpu_top" => probe.intel_gpu_top = true,
+            // From the leading `uname -s`: a Darwin host exposes its Apple GPU
+            // through ioreg without any dedicated tool.
+            "Darwin" => probe.apple = true,
             _ => {}
         }
     }
@@ -457,7 +467,16 @@ mod tests {
         assert!(probe.xpu_smi);
         assert!(!probe.amd_smi);
         assert!(!probe.intel_gpu_top);
+        assert!(!probe.apple);
         assert!(probe.any());
+    }
+
+    #[test]
+    fn probe_marks_apple_on_darwin_uname_line() {
+        let probe = parse_gpu_probe("Darwin\n");
+        assert!(probe.apple);
+        assert!(probe.any());
+        assert!(!probe.nvidia);
     }
 
     #[test]

@@ -44,7 +44,7 @@
 - 터미널/SFTP 창 사이 너비 조절 스플리터 (재시작 후에도 유지)
 
 ### 📊 실시간 텔레메트리
-- 하단 상태바에서 CPU, RAM, 디스크, 로그인 사용자, **NVIDIA·AMD(ROCm)·Intel** GPU를 1~10초 주기로 폴링
+- 하단 상태바에서 CPU, RAM, 디스크, 로그인 사용자, **NVIDIA·AMD(ROCm)·Intel·Apple Silicon** GPU를 1~10초 주기로 폴링
 - 각 섹션을 클릭하면 **드래그·크기 조절이 가능한 상세 팝오버**: 코어별 CPU 사용률, 상위 프로세스, GPU별 VRAM/전력/온도, 전체 마운트 목록
 - **상세창을 별도 OS 창으로 분리** 가능 — 독립적으로 갱신되고 세션이 끊기면 함께 닫힘
 - 텔레메트리는 세션별 전용 SSH 연결에서 동작하며 끊기면 지수 백오프로 자동 재연결
@@ -134,16 +134,16 @@ npm run tauri:build
 
 모든 지표는 표준 도구를 SSH로 실행해 수집합니다 — 서버에 아무것도 설치하지 않습니다.
 
-| 섹션 | 명령 |
-| --- | --- |
-| CPU | `/proc/stat`, `/proc/loadavg`, `/proc/cpuinfo`, `nproc`, `lscpu` |
-| 메모리 | `/proc/meminfo` |
-| 디스크 | `df -P -T -B1` |
-| 사용자 | `who` |
-| GPU | `nvidia-smi`(NVIDIA), `rocm-smi --json`(AMD/ROCm), `xpu-smi` / `intel_gpu_top`(Intel) — 호스트별 자동 감지 |
-| 상위 프로세스 | `ps -eo … --sort=-%cpu` / `--sort=-rss` |
+| 섹션 | Linux | macOS |
+| --- | --- | --- |
+| CPU | `/proc/stat`, `/proc/loadavg`, `/proc/cpuinfo`, `nproc`, `lscpu` | `sysctl`(모델·코어·P/E 구성·loadavg), `top -l 2` |
+| 메모리 | `/proc/meminfo` | `sysctl hw.memsize`, `vm_stat`, `vm.swapusage` |
+| 디스크 | `df -P -T -B1` | `df -P -k` + `mount` |
+| 사용자 | `who` | `who` |
+| GPU | `nvidia-smi`(NVIDIA), `rocm-smi --json`(AMD/ROCm), `xpu-smi` / `intel_gpu_top`(Intel) — 자동 감지 | `ioreg -c IOAccelerator` (Apple GPU 사용률, root 불필요) |
+| 상위 프로세스 | `ps -eo … --sort=-%cpu` / `--sort=-rss` | `ps -Ao … -r` / `-m` |
 
-명령은 전용 SSH 연결에서 3초 타임아웃으로 실행됩니다. GpuTerm이 호스트별로 설치된 GPU 도구를 감지해 각 카드에 벤더 태그를 표시하며, `intel_gpu_top`은 root 또는 `CAP_PERFMON` 권한이 필요합니다. GPU 도구가 하나도 없으면 GPU 섹션만 '사용 불가'로 표시되고 나머지는 계속 동작합니다.
+명령은 전용 SSH 연결에서 3초 타임아웃으로 실행됩니다. GpuTerm이 원격 OS와 GPU 도구를 호스트별로 감지해 각 카드에 벤더 태그를 표시합니다. `intel_gpu_top`은 root 또는 `CAP_PERFMON`이 필요하고, Apple GPU의 전력·온도는 root `powermetrics`가 필요해 n/a로 표시됩니다. GPU 소스가 하나도 없으면 GPU 섹션만 '사용 불가'로 표시되고 나머지는 계속 동작합니다.
 
 </details>
 
@@ -217,7 +217,8 @@ src-tauri/src/ssh/      Rust 백엔드
 - keyboard-interactive SSH 인증 미지원
 - 디렉토리 재귀 업로드/다운로드 및 전송 이어받기 미지원
 - `known_hosts.json`은 OpenSSH known_hosts 형식이 아닌 SHA-256 지문 JSON 사용
-- 텔레메트리는 Linux 우선(`/proc`, `lscpu`, POSIX `df`); GPU 모니터링은 `nvidia-smi`·`rocm-smi`·`xpu-smi`·`intel_gpu_top` 사용 (AMD는 현재 `rocm-smi` 기준)
+- 텔레메트리는 Linux와 macOS(Apple Silicon 포함) 원격을 지원; Apple GPU 전력·온도와 코어별 CPU 사용률은 root `powermetrics`가 필요해 미표시
+- GPU 모니터링은 `nvidia-smi`·`rocm-smi`·`xpu-smi`·`intel_gpu_top`·macOS `ioreg` 사용 (AMD는 현재 `rocm-smi` 기준)
 
 이슈와 풀 리퀘스트를 환영합니다 — 제출 전에 위의 테스트를 실행해 주세요.
 
