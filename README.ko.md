@@ -4,7 +4,7 @@
 
 **GPU 서버를 위한 올인원 SSH/SFTP 데스크톱 클라이언트.**
 
-터미널, 파일 전송, 그리고 CPU · RAM · 디스크 · NVIDIA GPU 실시간 모니터링 — 하나의 네이티브 창에서.
+터미널, 파일 전송, 그리고 CPU · RAM · 디스크 · GPU(NVIDIA / AMD / Intel / Apple Silicon) 실시간 모니터링 — 하나의 네이티브 창에서.
 
 [![Release](https://img.shields.io/github/v/release/fortranmentis/GPUTERM?include_prereleases&label=release&color=2ea44f)](https://github.com/fortranmentis/GPUTERM/releases)
 [![License: MIT](https://img.shields.io/github/license/fortranmentis/GPUTERM?color=blue)](./LICENSE)
@@ -21,7 +21,7 @@
 
 ---
 
-원격 GPU 서버에서 작업하다 보면 SSH 클라이언트, SFTP 도구, 그리고 `watch nvidia-smi`를 띄워둔 터미널까지 세 개의 창을 오가게 됩니다. **GpuTerm은 이 셋을 하나로 합쳤습니다.** 한 번 접속하면 xterm.js 터미널, 드래그 앤 드롭 SFTP 브라우저, 그리고 CPU·메모리·디스크·로그인 사용자·NVIDIA GPU 전체를 폴링하는 실시간 텔레메트리 바가 함께 열립니다. 모니터링은 별도 SSH 채널로 동작하므로 셸 작업을 방해하지 않습니다.
+원격 GPU 서버에서 작업하다 보면 SSH 클라이언트, SFTP 도구, 그리고 `watch nvidia-smi`를 띄워둔 터미널까지 세 개의 창을 오가게 됩니다. **GpuTerm은 이 셋을 하나로 합쳤습니다.** 한 번 접속하면 xterm.js 터미널, 드래그 앤 드롭 SFTP 브라우저, 그리고 CPU·메모리·디스크·로그인 사용자·GPU(NVIDIA·AMD·Intel·Apple Silicon, Linux/macOS 모두)를 폴링하는 실시간 텔레메트리 바가 함께 열립니다. 모니터링은 별도 SSH 채널로 동작하므로 셸 작업을 방해하지 않습니다.
 
 > **상태:** 베타. 최신 프리릴리스는 [Releases](https://github.com/fortranmentis/GPUTERM/releases)에서 내려받거나 아래 안내에 따라 소스에서 빌드하세요.
 

@@ -4,7 +4,7 @@
 
 **The all-in-one SSH/SFTP desktop client for GPU servers.**
 
-Terminal, file transfers, and real-time CPU · RAM · Disk · NVIDIA GPU telemetry — in a single native window.
+Terminal, file transfers, and real-time CPU · RAM · Disk · GPU telemetry (NVIDIA / AMD / Intel / Apple Silicon) — in a single native window.
 
 [![Release](https://img.shields.io/github/v/release/fortranmentis/GPUTERM?include_prereleases&label=release&color=2ea44f)](https://github.com/fortranmentis/GPUTERM/releases)
 [![License: MIT](https://img.shields.io/github/license/fortranmentis/GPUTERM?color=blue)](./LICENSE)
@@ -21,7 +21,7 @@ Terminal, file transfers, and real-time CPU · RAM · Disk · NVIDIA GPU telemet
 
 ---
 
-Working on a remote GPU box usually means juggling an SSH client, an SFTP tool, and a second terminal running `watch nvidia-smi`. **GpuTerm replaces all three.** Connect once and get an xterm.js terminal, a drag-and-drop SFTP browser, and a live telemetry bar that polls CPU, memory, disk, logged-in users, and every NVIDIA GPU on the host — over its own SSH channel, so monitoring never blocks your shell.
+Working on a remote GPU box usually means juggling an SSH client, an SFTP tool, and a second terminal running `watch nvidia-smi`. **GpuTerm replaces all three.** Connect once and get an xterm.js terminal, a drag-and-drop SFTP browser, and a live telemetry bar that polls CPU, memory, disk, logged-in users, and every GPU on the host — NVIDIA, AMD, Intel, or Apple Silicon, on Linux and macOS remotes alike — over its own SSH channel, so monitoring never blocks your shell.
 
 > **Status:** beta. Download the latest prerelease from the [Releases](https://github.com/fortranmentis/GPUTERM/releases) page or build from source below.
 
