@@ -5,6 +5,7 @@ export type SessionProfile = {
   port: number;
   username: string;
   privateKeyPath?: string | null;
+  proxyJumpId?: string | null;
 };
 
 export type SessionConnectRequest = {
@@ -15,6 +16,8 @@ export type SessionConnectRequest = {
   username: string;
   password?: string | null;
   privateKeyPath?: string | null;
+  proxyJumpId?: string | null;
+  proxyJumpPassword?: string | null;
   cols?: number;
   rows?: number;
 };

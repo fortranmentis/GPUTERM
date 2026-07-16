@@ -249,8 +249,9 @@ fn download_file(
     request: SftpTransferRequest,
     cancel: Option<&AtomicBool>,
 ) -> Result<(), String> {
-    let session = open_ssh_session(&target)?;
-    let sftp = session
+    let connection = open_ssh_session(&target)?;
+    let sftp = connection
+        .session
         .sftp()
         .map_err(|error| format!("SFTP failed to start: {}", error))?;
     let remote_path = Path::new(&request.remote_path);
@@ -309,8 +310,9 @@ fn upload_file(
     let mut local_file = fs::File::open(&request.local_path)
         .map_err(|error| format!("Failed to open local file {}: {}", request.local_path, error))?;
 
-    let session = open_ssh_session(&target)?;
-    let sftp = session
+    let connection = open_ssh_session(&target)?;
+    let sftp = connection
+        .session
         .sftp()
         .map_err(|error| format!("SFTP failed to start: {}", error))?;
     let mut remote_file = sftp

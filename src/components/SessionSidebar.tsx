@@ -26,6 +26,8 @@ type SessionForm = {
   username: string;
   password: string;
   privateKeyPath: string;
+  proxyJumpId: string;
+  proxyJumpPassword: string;
 };
 
 const blankForm: SessionForm = {
@@ -36,42 +38,54 @@ const blankForm: SessionForm = {
   username: "",
   password: "",
   privateKeyPath: "",
+  proxyJumpId: "",
+  proxyJumpPassword: "",
 };
 
 const UNKNOWN_HOST_KEY_PREFIX = "UNKNOWN_HOST_KEY:";
+// A jump-host connection can raise one unknown-key prompt per hop
+// (bastion + target), so allow a few prompt-and-retry rounds.
+const MAX_HOST_KEY_PROMPTS = 3;
 
 /**
  * Runs an SSH action; when the backend reports an unknown host key, shows the
- * fingerprint to the user and retries once after they choose to trust it.
+ * fingerprint to the user and retries after they choose to trust it.
+ * Sentinel format: `UNKNOWN_HOST_KEY:{fingerprint}|{keyType}|{host}:{port}`.
  */
 async function withHostKeyPrompt<T>(action: () => Promise<T>): Promise<T> {
-  try {
-    return await action();
-  } catch (error) {
-    const text = String(error);
-    const prefixIndex = text.indexOf(UNKNOWN_HOST_KEY_PREFIX);
-    if (prefixIndex < 0) {
-      throw error;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await action();
+    } catch (error) {
+      const text = String(error);
+      const prefixIndex = text.indexOf(UNKNOWN_HOST_KEY_PREFIX);
+      if (prefixIndex < 0 || attempt >= MAX_HOST_KEY_PROMPTS) {
+        throw error;
+      }
+      const payload = text.slice(prefixIndex + UNKNOWN_HOST_KEY_PREFIX.length).trim();
+      const firstSeparator = payload.indexOf("|");
+      const secondSeparator = payload.indexOf("|", firstSeparator + 1);
+      if (firstSeparator <= 0 || secondSeparator <= firstSeparator) {
+        throw error;
+      }
+      const fingerprint = payload.slice(0, firstSeparator);
+      const keyType = payload.slice(firstSeparator + 1, secondSeparator);
+      const hostKey = payload.slice(secondSeparator + 1);
+      const portIndex = hostKey.lastIndexOf(":");
+      if (portIndex <= 0) {
+        throw error;
+      }
+      const host = hostKey.slice(0, portIndex);
+      const port = Number(hostKey.slice(portIndex + 1));
+      const trusted = await confirm(
+        `First connection to ${hostKey}.\n\nSHA256 (${keyType}) host key fingerprint:\n${fingerprint}\n\nTrust this host?`,
+        { title: "Unknown host key", kind: "warning" },
+      );
+      if (!trusted) {
+        throw new Error(`Connection canceled: ${hostKey} was not trusted`);
+      }
+      await invoke("trust_host_key", { host, port, keyType, fingerprint });
     }
-    const payload = text.slice(prefixIndex + UNKNOWN_HOST_KEY_PREFIX.length).trim();
-    const separator = payload.indexOf("|");
-    const fingerprint = payload.slice(0, separator);
-    const hostKey = payload.slice(separator + 1);
-    const portIndex = hostKey.lastIndexOf(":");
-    if (separator <= 0 || portIndex <= 0) {
-      throw error;
-    }
-    const host = hostKey.slice(0, portIndex);
-    const port = Number(hostKey.slice(portIndex + 1));
-    const trusted = await confirm(
-      `First connection to ${hostKey}.\n\nSHA256 host key fingerprint:\n${fingerprint}\n\nTrust this host?`,
-      { title: "Unknown host key", kind: "warning" },
-    );
-    if (!trusted) {
-      throw new Error(`Connection canceled: ${hostKey} was not trusted`);
-    }
-    await invoke("trust_host_key", { host, port, fingerprint });
-    return await action();
   }
 }
 
@@ -110,6 +124,8 @@ export function SessionSidebar() {
     username: form.username.trim(),
     password: form.password || null,
     privateKeyPath: form.privateKeyPath || null,
+    proxyJumpId: form.proxyJumpId || null,
+    proxyJumpPassword: form.proxyJumpPassword || null,
     cols: 120,
     rows: 32,
   });
@@ -121,6 +137,7 @@ export function SessionSidebar() {
     port: Number(form.port) || 22,
     username: form.username.trim(),
     privateKeyPath: form.privateKeyPath || null,
+    proxyJumpId: form.proxyJumpId || null,
   });
 
   const validate = () => {
@@ -151,7 +168,9 @@ export function SessionSidebar() {
         port: String(info.profile.port),
         username: info.profile.username,
         privateKeyPath: info.profile.privateKeyPath ?? "",
+        proxyJumpId: info.profile.proxyJumpId ?? "",
         password: "",
+        proxyJumpPassword: "",
       });
       await loadSessions();
       setMessage({
@@ -197,6 +216,7 @@ export function SessionSidebar() {
         port: String(profile.port),
         username: profile.username,
         privateKeyPath: profile.privateKeyPath ?? "",
+        proxyJumpId: profile.proxyJumpId ?? "",
       });
       setSessions(nextSessions);
       setMessage({ kind: "success", text: "Session saved" });
@@ -251,6 +271,8 @@ export function SessionSidebar() {
       username: session.username,
       password: "",
       privateKeyPath: session.privateKeyPath ?? "",
+      proxyJumpId: session.proxyJumpId ?? "",
+      proxyJumpPassword: "",
     });
     // Clicking a live session switches the terminal/SFTP/telemetry view to it.
     if (connectedSessionIds.includes(session.id)) {
@@ -330,6 +352,36 @@ export function SessionSidebar() {
             placeholder="C:\\Users\\you\\.ssh\\id_ed25519"
           />
         </label>
+        <label>
+          <span>Jump host</span>
+          <select
+            value={form.proxyJumpId}
+            onChange={(event) => updateForm({ proxyJumpId: event.target.value })}
+          >
+            <option value="">None (direct)</option>
+            {sessions
+              .filter((session) => session.id !== form.id)
+              .map((session) => (
+                <option value={session.id} key={session.id}>
+                  {session.name} ({session.username}@{session.host})
+                </option>
+              ))}
+          </select>
+        </label>
+        {form.proxyJumpId && (
+          <label>
+            <span>Jump host password</span>
+            <input
+              value={form.proxyJumpPassword}
+              type="password"
+              autoComplete="off"
+              placeholder="Leave blank for key/agent auth"
+              onChange={(event) =>
+                updateForm({ proxyJumpPassword: event.target.value })
+              }
+            />
+          </label>
+        )}
         <div className="button-row">
           <button className="primary-button" disabled={busy} type="submit">
             <PlugZap size={16} />
@@ -397,6 +449,14 @@ export function SessionSidebar() {
               <strong>{session.name}</strong>
               <small>
                 {session.username}@{session.host}:{session.port}
+                {session.proxyJumpId && (
+                  <>
+                    {" "}
+                    · via{" "}
+                    {sessions.find((item) => item.id === session.proxyJumpId)?.name ??
+                      "missing jump host"}
+                  </>
+                )}
               </small>
             </span>
             {session.privateKeyPath && <KeyRound size={14} />}

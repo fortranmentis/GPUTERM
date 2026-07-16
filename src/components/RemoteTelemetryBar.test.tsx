@@ -102,6 +102,7 @@ function gpuSummary(metric: GpuDetailMetric): GpuMetric {
     index: metric.index,
     name: metric.name,
     uuid: metric.uuid,
+    vendor: "nvidia",
     driverVersion: metric.driverVersion ?? "",
     powerDrawW: metric.powerDrawW,
     powerLimitW: metric.powerLimitW,
@@ -368,14 +369,14 @@ describe("RemoteTelemetryBar disk summary", () => {
 
     render(<RemoteTelemetryBar />);
 
-    fireEvent.click(screen.getByRole("button", { name: /GPU0 Session One GPU Zero/i }));
+    fireEvent.click(screen.getByRole("button", { name: /GPU0 NVIDIA Session One GPU Zero/i }));
     fireEvent.click(await screen.findByRole("tab", { name: "GPU1" }));
     expect(
       within(screen.getByRole("dialog", { name: /GPU details/i })).getByText("Session One GPU One"),
     ).toBeInTheDocument();
 
     fireEvent.keyDown(document, { key: "Escape" });
-    fireEvent.click(screen.getByRole("button", { name: /GPU0 Session One GPU Zero/i }));
+    fireEvent.click(screen.getByRole("button", { name: /GPU0 NVIDIA Session One GPU Zero/i }));
     await waitFor(() =>
       expect(
         within(screen.getByRole("dialog", { name: /GPU details/i })).getByText("Session One GPU One"),
@@ -398,7 +399,7 @@ describe("RemoteTelemetryBar disk summary", () => {
     await waitFor(() =>
       expect(screen.queryByRole("dialog", { name: /GPU details/i })).not.toBeInTheDocument(),
     );
-    fireEvent.click(screen.getByRole("button", { name: /GPU3 Session Two GPU/i }));
+    fireEvent.click(screen.getByRole("button", { name: /GPU3 NVIDIA Session Two GPU/i }));
 
     const sessionTwoDialog = await screen.findByRole("dialog", { name: /GPU details/i });
     expect(within(sessionTwoDialog).getByText("Session Two GPU")).toBeInTheDocument();

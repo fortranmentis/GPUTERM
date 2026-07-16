@@ -28,6 +28,7 @@ Working on a remote GPU box usually means juggling an SSH client, an SFTP tool, 
 ### 🖥️ SSH Terminal
 - Full PTY terminal powered by [xterm.js](https://xtermjs.org) and Rust [`ssh2`](https://crates.io/crates/ssh2)
 - **Multiple concurrent sessions** — each keeps its own terminal, scrollback, and SFTP path; click a connected profile in the sidebar to switch
+- **ProxyJump** — tunnel through a saved profile as a bastion (per-key-type host verification along the way)
 - Password, private key (with passphrase), and SSH agent authentication
 - UTF-8 safe streaming — multibyte characters (한글, 日本語, emoji) survive chunked reads
 - MOTD and early output are buffered and replayed, never lost to connection races
@@ -41,7 +42,7 @@ Working on a remote GPU box usually means juggling an SSH client, an SFTP tool, 
 - Resizable split between terminal and SFTP panes (persisted across launches)
 
 ### 📊 Live Telemetry
-- Bottom status bar polling CPU, RAM, disk, logged-in users, and NVIDIA GPUs every 1–10 s
+- Bottom status bar polling CPU, RAM, disk, logged-in users, and **NVIDIA, AMD (ROCm), and Intel** GPUs every 1–10 s
 - Click any section for a **draggable, resizable detail popover**: per-core CPU usage, top processes, VRAM/power/temperature per GPU, full mount list
 - **Pop any detail view out into its own OS window** — it refreshes independently and closes with its session
 - Telemetry runs on a dedicated SSH connection (per session) with automatic reconnect and exponential backoff
@@ -137,10 +138,10 @@ All metrics come from standard tools over SSH — nothing is installed on the se
 | Memory | `/proc/meminfo` |
 | Disk | `df -P -T -B1` |
 | Users | `who` |
-| GPU | `nvidia-smi --query-gpu=…`, `nvidia-smi --query-compute-apps=…` |
+| GPU | `nvidia-smi` (NVIDIA), `rocm-smi --json` (AMD/ROCm), `xpu-smi` / `intel_gpu_top` (Intel) — auto-detected per host |
 | Top processes | `ps -eo … --sort=-%cpu` / `--sort=-rss` |
 
-Commands run with a 3-second timeout on a dedicated SSH connection. If `nvidia-smi` is absent, the GPU section reports unavailable while everything else keeps working.
+Commands run with a 3-second timeout on a dedicated SSH connection. GpuTerm detects which GPU tools exist on each host and shows a vendor tag on every card; `intel_gpu_top` needs root or `CAP_PERFMON`. If no GPU tool is present, the GPU section reports unavailable while everything else keeps working.
 
 </details>
 
@@ -207,14 +208,14 @@ src-tauri/src/ssh/      Rust backend
 | `cargo` not found | Install via [rustup](https://rustup.rs), reopen the terminal (`%USERPROFILE%\.cargo\bin` on PATH) |
 | SSH auth fails | Verify host/port/user/credentials; confirm the server allows the auth method |
 | Host key mismatch | Verify the server fingerprint out-of-band, then remove the stale entry from `known_hosts.json` |
-| GPU shows unavailable | Run `nvidia-smi` on the host — NVIDIA drivers are required; other metrics still work |
+| GPU shows unavailable | Confirm a GPU tool is installed (`nvidia-smi`, `rocm-smi`, `xpu-smi`, or `intel_gpu_top`); other metrics still work regardless |
 
 ## Roadmap / Known limitations
 
 - Keyboard-interactive SSH authentication is not implemented
 - Recursive directory upload/download and transfer resume are not implemented
 - `known_hosts.json` uses SHA-256 fingerprints, not the OpenSSH known_hosts format
-- Telemetry is Linux-first (`/proc`, `lscpu`, POSIX `df`); GPU monitoring requires NVIDIA `nvidia-smi`
+- Telemetry is Linux-first (`/proc`, `lscpu`, POSIX `df`); GPU monitoring uses `nvidia-smi`, `rocm-smi`, `xpu-smi`, or `intel_gpu_top` (AMD support currently targets `rocm-smi`)
 
 Issues and pull requests are welcome — please run the test suites above before submitting.
 

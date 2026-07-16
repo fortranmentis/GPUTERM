@@ -931,6 +931,32 @@ button.telemetry-section:hover {
   text-transform: uppercase;
 }
 
+.gpu-vendor-tag {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(148, 163, 184, 0.18);
+  color: var(--subtle);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.gpu-vendor-tag.nvidia {
+  background: rgba(118, 185, 0, 0.18);
+  color: #a3e635;
+}
+
+.gpu-vendor-tag.amd {
+  background: rgba(237, 28, 36, 0.18);
+  color: #fca5a5;
+}
+
+.gpu-vendor-tag.intel {
+  background: rgba(0, 113, 197, 0.22);
+  color: #7dd3fc;
+}
+
 .telemetry-section-body {
   display: flex;
   flex: 1;

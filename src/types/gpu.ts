@@ -1,7 +1,10 @@
+export type GpuVendor = "nvidia" | "amd" | "intel";
+
 export type GpuMetric = {
   index: number;
   name: string;
   uuid: string;
+  vendor: GpuVendor;
   driverVersion: string;
   powerDrawW: number | null;
   powerLimitW: number | null;

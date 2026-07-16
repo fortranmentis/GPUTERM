@@ -28,6 +28,7 @@
 ### 🖥️ SSH 터미널
 - [xterm.js](https://xtermjs.org)와 Rust [`ssh2`](https://crates.io/crates/ssh2) 기반의 완전한 PTY 터미널
 - **다중 세션 동시 접속** — 세션마다 터미널·스크롤백·SFTP 경로를 독립적으로 유지하며, 사이드바에서 연결된 프로필을 클릭하면 전환
+- **ProxyJump** — 저장된 프로필을 점프 호스트(bastion)로 지정해 경유 접속 (경유 구간마다 키 종류별 호스트 키 검증)
 - 비밀번호, 개인키(패스프레이즈 포함), SSH 에이전트 인증 지원
 - UTF-8 안전 스트리밍 — 청크 경계에 걸린 멀티바이트 문자(한글, 日本語, 이모지)가 깨지지 않음
 - MOTD를 포함한 접속 초기 출력을 버퍼링 후 재생 — 연결 타이밍에 유실되지 않음
@@ -41,7 +42,7 @@
 - 터미널/SFTP 창 사이 너비 조절 스플리터 (재시작 후에도 유지)
 
 ### 📊 실시간 텔레메트리
-- 하단 상태바에서 CPU, RAM, 디스크, 로그인 사용자, NVIDIA GPU를 1~10초 주기로 폴링
+- 하단 상태바에서 CPU, RAM, 디스크, 로그인 사용자, **NVIDIA·AMD(ROCm)·Intel** GPU를 1~10초 주기로 폴링
 - 각 섹션을 클릭하면 **드래그·크기 조절이 가능한 상세 팝오버**: 코어별 CPU 사용률, 상위 프로세스, GPU별 VRAM/전력/온도, 전체 마운트 목록
 - **상세창을 별도 OS 창으로 분리** 가능 — 독립적으로 갱신되고 세션이 끊기면 함께 닫힘
 - 텔레메트리는 세션별 전용 SSH 연결에서 동작하며 끊기면 지수 백오프로 자동 재연결
@@ -137,10 +138,10 @@ npm run tauri:build
 | 메모리 | `/proc/meminfo` |
 | 디스크 | `df -P -T -B1` |
 | 사용자 | `who` |
-| GPU | `nvidia-smi --query-gpu=…`, `nvidia-smi --query-compute-apps=…` |
+| GPU | `nvidia-smi`(NVIDIA), `rocm-smi --json`(AMD/ROCm), `xpu-smi` / `intel_gpu_top`(Intel) — 호스트별 자동 감지 |
 | 상위 프로세스 | `ps -eo … --sort=-%cpu` / `--sort=-rss` |
 
-명령은 전용 SSH 연결에서 3초 타임아웃으로 실행됩니다. `nvidia-smi`가 없으면 GPU 섹션만 '사용 불가'로 표시되고 나머지는 계속 동작합니다.
+명령은 전용 SSH 연결에서 3초 타임아웃으로 실행됩니다. GpuTerm이 호스트별로 설치된 GPU 도구를 감지해 각 카드에 벤더 태그를 표시하며, `intel_gpu_top`은 root 또는 `CAP_PERFMON` 권한이 필요합니다. GPU 도구가 하나도 없으면 GPU 섹션만 '사용 불가'로 표시되고 나머지는 계속 동작합니다.
 
 </details>
 
@@ -207,14 +208,14 @@ src-tauri/src/ssh/      Rust 백엔드
 | `cargo`를 찾을 수 없음 | [rustup](https://rustup.rs)으로 설치 후 터미널 재시작 (`%USERPROFILE%\.cargo\bin`이 PATH에 있어야 함) |
 | SSH 인증 실패 | host/port/user/자격증명 확인; 서버가 해당 인증 방식을 허용하는지 확인 |
 | 호스트 키 불일치 | 다른 경로로 서버 지문을 검증한 뒤 `known_hosts.json`에서 이전 항목 제거 |
-| GPU가 '사용 불가'로 표시 | 서버에서 `nvidia-smi` 실행 확인 — NVIDIA 드라이버 필요; 다른 지표는 정상 동작 |
+| GPU가 '사용 불가'로 표시 | GPU 도구(`nvidia-smi`, `rocm-smi`, `xpu-smi`, `intel_gpu_top`) 설치 확인 — 다른 지표는 무관하게 정상 동작 |
 
 ## 로드맵 / 알려진 제한
 
 - keyboard-interactive SSH 인증 미지원
 - 디렉토리 재귀 업로드/다운로드 및 전송 이어받기 미지원
 - `known_hosts.json`은 OpenSSH known_hosts 형식이 아닌 SHA-256 지문 JSON 사용
-- 텔레메트리는 Linux 우선(`/proc`, `lscpu`, POSIX `df`); GPU 모니터링은 NVIDIA `nvidia-smi` 필요
+- 텔레메트리는 Linux 우선(`/proc`, `lscpu`, POSIX `df`); GPU 모니터링은 `nvidia-smi`·`rocm-smi`·`xpu-smi`·`intel_gpu_top` 사용 (AMD는 현재 `rocm-smi` 기준)
 
 이슈와 풀 리퀘스트를 환영합니다 — 제출 전에 위의 테스트를 실행해 주세요.
 

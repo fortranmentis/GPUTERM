@@ -3,8 +3,10 @@ use crate::ssh::parse_util::{
     parse_loadavg, parse_lscpu_value, parse_meminfo_values, parse_optional_f64,
     parse_optional_u64, required_section, split_sections,
 };
+use crate::ssh::gpu_monitor::{parse_gpu_probe, GpuMetric};
 use crate::ssh::session::{target_for_active_session, with_ops_session, AppState};
-use crate::ssh::system_monitor::run_remote_command;
+use crate::ssh::system_monitor::{collect_gpu_metrics, run_remote_command};
+use crate::ssh::gpu_monitor::GPU_PROBE_COMMAND;
 use serde::Serialize;
 use ssh2::Session;
 use std::collections::HashMap;
@@ -190,6 +192,17 @@ fn collect_details(session: &Session, resource_type: ResourceType) -> Result<Res
 }
 
 fn collect_gpu_details(session: &Session) -> Result<Vec<GpuDetailMetric>, String> {
+    // NVIDIA keeps its rich per-process detail path; AMD/Intel reuse the
+    // telemetry collectors and map into the same shape with nulls for the
+    // fields their tools do not expose.
+    let has_nvidia = run_remote_command(session, GPU_PROBE_COMMAND)
+        .map(|output| parse_gpu_probe(&output).nvidia)
+        .unwrap_or(true);
+    if !has_nvidia {
+        let mut probe = None;
+        let metrics = collect_gpu_metrics(session, &mut probe)?;
+        return Ok(metrics.into_iter().map(gpu_metric_to_detail).collect());
+    }
     let gpu_output = run_remote_command(session, GPU_DETAIL_QUERY)?;
     let process_output = run_remote_command(session, GPU_PROCESS_QUERY).unwrap_or_default();
     let process_rows = parse_gpu_process_output(&process_output)?;
@@ -207,6 +220,30 @@ fn collect_gpu_details(session: &Session) -> Result<Vec<GpuDetailMetric>, String
         run_remote_command(session, &command).unwrap_or_default()
     };
     parse_gpu_detail_output(&gpu_output, process_rows, &ps_output)
+}
+
+fn gpu_metric_to_detail(metric: GpuMetric) -> GpuDetailMetric {
+    GpuDetailMetric {
+        index: metric.index,
+        name: metric.name,
+        uuid: metric.uuid,
+        driver_version: (!metric.driver_version.is_empty()).then_some(metric.driver_version),
+        gpu_util_percent: metric.gpu_util_percent,
+        memory_util_percent: metric.mem_util_percent,
+        memory_total_mi_b: metric.memory_total_mi_b,
+        memory_used_mi_b: metric.memory_used_mi_b,
+        memory_free_mi_b: metric.memory_free_mi_b,
+        temperature_c: metric.temperature_c,
+        power_draw_w: metric.power_draw_w,
+        power_limit_w: metric.power_limit_w,
+        fan_speed_percent: None,
+        graphics_clock_m_hz: None,
+        memory_clock_m_hz: None,
+        pci_bus_id: None,
+        persistence_mode: None,
+        mig_mode: None,
+        processes: Vec::new(),
+    }
 }
 
 fn parse_cpu_detail_output(output: &str) -> Result<CpuDetailMetric, String> {

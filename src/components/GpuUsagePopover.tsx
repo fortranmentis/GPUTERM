@@ -71,7 +71,7 @@ export function GpuDetailContent({
   if (!selectedGpu) {
     return (
       <div className="resource-unavailable">
-        <strong>No NVIDIA GPU detected</strong>
+        <strong>No GPU detected</strong>
         {error && <span>{error}</span>}
       </div>
     );

@@ -153,7 +153,7 @@ describe("GpuUsagePopover", () => {
   it("shows a no-GPU message instead of selector and details", () => {
     render(<Harness metrics={[]} />);
 
-    expect(screen.getByText("No NVIDIA GPU detected")).toBeInTheDocument();
+    expect(screen.getByText("No GPU detected")).toBeInTheDocument();
     expect(screen.queryByRole("tablist", { name: "GPU selector" })).not.toBeInTheDocument();
     expect(screen.queryByText("Driver")).not.toBeInTheDocument();
   });

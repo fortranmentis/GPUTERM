@@ -1,4 +1,8 @@
-use crate::ssh::gpu_monitor::{parse_nvidia_smi_csv, GpuMetric, NVIDIA_SMI_QUERY};
+use crate::ssh::gpu_monitor::{
+    parse_gpu_probe, parse_intel_gpu_top_stream, parse_nvidia_smi_csv, parse_rocm_smi_json,
+    parse_xpu_discovery, parse_xpu_stats, xpu_stats_command, GpuMetric, GpuProbe,
+    GPU_PROBE_COMMAND, INTEL_GPU_TOP_COMMAND, NVIDIA_SMI_QUERY, XPU_DISCOVERY_COMMAND,
+};
 use crate::ssh::parse_util::{
     kib_to_mib, parse_average_clock, parse_cpu_model, parse_first_u64, parse_loadavg,
     parse_lscpu_value, parse_meminfo_values, required_section, split_sections,
@@ -165,8 +169,10 @@ pub fn start(
     thread::spawn(move || {
         let mut backoff = RECONNECT_BACKOFF_INITIAL;
         while !stop.load(Ordering::SeqCst) {
-            let session = match open_ssh_session(&target) {
-                Ok(session) => session,
+            // `connection` is bound per reconnect iteration, so its jump-host
+            // tunnel (if any) is torn down before the next attempt.
+            let connection = match open_ssh_session(&target) {
+                Ok(connection) => connection,
                 Err(error) => {
                     emit_connection_error_telemetry(&app, &target.session_id, &error);
                     sleep_with_stop_duration(backoff, &stop);
@@ -175,17 +181,23 @@ pub fn start(
                 }
             };
             backoff = RECONNECT_BACKOFF_INITIAL;
+            let session = connection.session();
             session.set_timeout(COMMAND_TIMEOUT_MS);
 
             let mut previous_cpu = None;
+            let mut gpu_probe = None;
             let mut consecutive_total_failures = 0_u32;
             while !stop.load(Ordering::SeqCst) {
                 let settings_snapshot = settings
                     .lock()
                     .map(|settings| settings.clone())
                     .unwrap_or_default();
-                let telemetry =
-                    collect_remote_telemetry(&target.session_id, &session, &mut previous_cpu);
+                let telemetry = collect_remote_telemetry(
+                    &target.session_id,
+                    session,
+                    &mut previous_cpu,
+                    &mut gpu_probe,
+                );
                 consecutive_total_failures = if telemetry_all_failed(&telemetry) {
                     consecutive_total_failures + 1
                 } else {
@@ -246,6 +258,7 @@ fn collect_remote_telemetry(
     session_id: &str,
     session: &Session,
     previous_cpu: &mut Option<CpuStatSample>,
+    gpu_probe: &mut Option<GpuProbe>,
 ) -> RemoteTelemetry {
     let mut errors = TelemetryErrors::default();
 
@@ -286,9 +299,7 @@ fn collect_remote_telemetry(
         }
     };
 
-    let gpu = match run_remote_command(session, NVIDIA_SMI_QUERY)
-        .and_then(|output| parse_nvidia_smi_csv(&output))
-    {
+    let gpu = match collect_gpu_metrics(session, gpu_probe) {
         Ok(metrics) => metrics,
         Err(error) => {
             errors.gpu = Some(error);
@@ -315,6 +326,84 @@ fn collect_remote_telemetry(
         users,
         errors,
     }
+}
+
+/// Detects available GPU tools once per connection (cached in `probe`), then
+/// collects metrics from every detected vendor and concatenates them.
+pub(crate) fn collect_gpu_metrics(
+    session: &Session,
+    probe: &mut Option<GpuProbe>,
+) -> Result<Vec<GpuMetric>, String> {
+    if probe.is_none() {
+        let mut detected = run_remote_command(session, GPU_PROBE_COMMAND)
+            .map(|output| parse_gpu_probe(&output))
+            .unwrap_or_default();
+        if detected.xpu_smi {
+            detected.xpu_devices = run_remote_command(session, XPU_DISCOVERY_COMMAND)
+                .map(|output| parse_xpu_discovery(&output))
+                .unwrap_or_default();
+        }
+        *probe = Some(detected);
+    }
+    let probe = probe.as_ref().expect("probe is populated above");
+
+    if !probe.any() {
+        return Err(
+            "No GPU management tool found (nvidia-smi / rocm-smi / xpu-smi / intel_gpu_top)"
+                .to_string(),
+        );
+    }
+
+    let mut metrics = Vec::new();
+    let mut errors = Vec::new();
+
+    if probe.nvidia {
+        match run_remote_command(session, NVIDIA_SMI_QUERY)
+            .and_then(|output| parse_nvidia_smi_csv(&output))
+        {
+            Ok(mut found) => metrics.append(&mut found),
+            Err(error) => errors.push(error),
+        }
+    }
+    // rocm-smi is the stable AMD target; amd-smi's JSON schema is still in flux.
+    if probe.rocm_smi {
+        let command = "rocm-smi --showproductname --showuniqueid --showuse --showmemuse --showmeminfo vram --showtemp --showpower --json 2>/dev/null";
+        match run_remote_command(session, command).and_then(|output| parse_rocm_smi_json(&output)) {
+            Ok(mut found) => metrics.append(&mut found),
+            Err(error) => errors.push(error),
+        }
+    }
+    if probe.xpu_smi && !probe.xpu_devices.is_empty() {
+        let command = xpu_stats_command(&probe.xpu_devices);
+        match run_remote_command(session, &command) {
+            Ok(output) => {
+                let sections = split_sections(&output);
+                for device in &probe.xpu_devices {
+                    if let Some(stats) = sections
+                        .get(&format!("XPU_{}", device.id))
+                        .and_then(|section| parse_xpu_stats(section, device))
+                    {
+                        metrics.push(stats);
+                    }
+                }
+            }
+            Err(error) => errors.push(error),
+        }
+    }
+    if probe.intel_gpu_top {
+        let next_index = metrics.iter().map(|m| m.index + 1).max().unwrap_or(0);
+        match run_remote_command(session, INTEL_GPU_TOP_COMMAND)
+            .and_then(|output| parse_intel_gpu_top_stream(&output, next_index))
+        {
+            Ok(igpu) => metrics.push(igpu),
+            Err(error) => errors.push(error),
+        }
+    }
+
+    if metrics.is_empty() && !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    Ok(metrics)
 }
 
 /// Parses `LC_ALL=C who` output. The login time column set varies between

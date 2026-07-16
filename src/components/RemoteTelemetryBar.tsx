@@ -507,7 +507,11 @@ function GpuTelemetryCard({
     : null;
   return (
     <button className="telemetry-section gpu-section" type="button" aria-expanded={expanded} onClick={onClick}>
-      <div className="telemetry-section-title"><Gauge size={16} /><span>GPU{metric.index}</span></div>
+      <div className="telemetry-section-title">
+        <Gauge size={16} />
+        <span>GPU{metric.index}</span>
+        <span className={`gpu-vendor-tag ${metric.vendor}`}>{metric.vendor.toUpperCase()}</span>
+      </div>
       <div className="telemetry-section-body">
         <strong title={metric.name}>{metric.name}</strong>
         <span>{formatPercent(metric.gpuUtilPercent)} | VRAM {formatGiBFromMiB(metric.memoryUsedMiB)} / {formatGiBFromMiB(metric.memoryTotalMiB)}</span>

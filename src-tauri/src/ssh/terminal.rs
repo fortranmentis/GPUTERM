@@ -3,7 +3,7 @@ use crate::ssh::session::{
     profile_from_request, target_from_request, upsert_profile, ActiveConnection, AppState,
     SessionConnectRequest, TerminalSessionInfo,
 };
-use crate::ssh::session::open_ssh_session;
+use crate::ssh::session::{open_ssh_session, SshConnection};
 use crate::ssh::system_monitor;
 use serde::Serialize;
 use ssh2::{Channel, ExtendedData, Session};
@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
 
 pub struct TerminalHandle {
-    pub session: Session,
+    // Holds the connection (and any jump-host tunnel) alive for the session.
+    pub connection: SshConnection,
     pub channel: Arc<Mutex<Channel>>,
     pub stop: Arc<AtomicBool>,
 }
@@ -41,7 +42,7 @@ pub async fn connect_terminal(
     request: SessionConnectRequest,
 ) -> Result<TerminalSessionInfo, String> {
     let profile = profile_from_request(&request);
-    let target = target_from_request(&profile, &request);
+    let target = target_from_request(&profile, &request)?;
 
     if let Some(password) = target.password.clone() {
         state.credentials.set_password(&profile.id, password);
@@ -49,14 +50,23 @@ pub async fn connect_terminal(
         state.credentials.clear_password(&profile.id);
     }
 
+    // Persist the jump-host password under the jump profile id so reconnects
+    // (telemetry, SFTP, resource details) can re-resolve the tunnel.
+    if let Some(proxy) = target.proxy.as_ref() {
+        if let Some(proxy_password) = proxy.password.clone() {
+            state.credentials.set_password(&proxy.session_id, proxy_password);
+        }
+    }
+
     let cols = request.cols.unwrap_or(120).max(1);
     let rows = request.rows.unwrap_or(32).max(1);
     let connect_target = target.clone();
     let opened = tauri::async_runtime::spawn_blocking(
-        move || -> Result<(Session, Channel), String> {
-            let session = open_ssh_session(&connect_target)?;
-            session.set_keepalive(true, KEEPALIVE_INTERVAL_SECS);
-            let mut channel = session
+        move || -> Result<(SshConnection, Channel), String> {
+            let connection = open_ssh_session(&connect_target)?;
+            connection.session.set_keepalive(true, KEEPALIVE_INTERVAL_SECS);
+            let mut channel = connection
+                .session
                 .channel_session()
                 .map_err(|error| format!("Failed to open SSH channel: {}", error))?;
             channel
@@ -68,14 +78,14 @@ pub async fn connect_terminal(
             channel
                 .shell()
                 .map_err(|error| format!("Failed to start remote shell: {}", error))?;
-            session.set_blocking(false);
-            Ok((session, channel))
+            connection.session.set_blocking(false);
+            Ok((connection, channel))
         },
     )
     .await
     .map_err(|error| format!("Terminal connect task failed: {}", error))?;
 
-    let (session, channel) = match opened {
+    let (connection, channel) = match opened {
         Ok(pair) => pair,
         Err(error) => {
             state.credentials.clear_password(&profile.id);
@@ -100,9 +110,9 @@ pub async fn connect_terminal(
 
     let stop = Arc::new(AtomicBool::new(false));
     let channel = Arc::new(Mutex::new(channel));
-    let reader_session = session.clone();
+    let reader_session = connection.session.clone();
     let handle = TerminalHandle {
-        session,
+        connection,
         channel: Arc::clone(&channel),
         stop: Arc::clone(&stop),
     };
@@ -346,6 +356,7 @@ fn stop_existing_session(state: &AppState, session_id: &str) {
                 let _ = channel.close();
             }
             let _ = handle
+                .connection
                 .session
                 .disconnect(None, "GpuTerm terminal disconnected", None);
         }
