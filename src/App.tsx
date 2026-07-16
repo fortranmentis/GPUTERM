@@ -84,13 +84,21 @@ function App() {
   useEffect(() => {
     // Closing the main window must take the detached detail windows with it;
     // otherwise the process keeps running until they are closed by hand.
+    // Registering this listener disables Tauri's automatic close — the API
+    // wrapper calls destroy() afterwards (needs core:window:allow-destroy in
+    // the capability), and a handler that throws would skip that destroy and
+    // leave the window unclosable, so failures here must be swallowed.
     const unlistenPromise = getCurrentWindow().onCloseRequested(async () => {
-      const windows = await getAllWebviewWindows();
-      await Promise.all(
-        windows
-          .filter((webviewWindow) => webviewWindow.label.startsWith("detail-"))
-          .map((webviewWindow) => webviewWindow.close().catch(() => undefined)),
-      );
+      try {
+        const windows = await getAllWebviewWindows();
+        await Promise.all(
+          windows
+            .filter((webviewWindow) => webviewWindow.label.startsWith("detail-"))
+            .map((webviewWindow) => webviewWindow.close().catch(() => undefined)),
+        );
+      } catch {
+        // Never block the main window's close over the detail windows.
+      }
     });
     return () => {
       unlistenPromise.then((unlisten) => unlisten()).catch(() => undefined);
