@@ -80,15 +80,14 @@ button {
 }
 
 .brand-mark {
-  display: grid;
+  display: block;
   width: 42px;
   height: 42px;
-  place-items: center;
   border: 1px solid rgba(34, 211, 238, 0.5);
   border-radius: 8px;
   background: #07151c;
-  color: var(--cyan);
-  font-weight: 800;
+  /* The logo asset is a full-bleed square; the radius clips its corners. */
+  object-fit: cover;
 }
 
 h1,

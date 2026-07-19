@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { selectIsActiveConnected, useSessionStore } from "../stores/sessionStore";
 import { useDisconnectSession } from "../hooks/useDisconnectSession";
+import gtLogo from "../assets/gt-logo.png";
 import type {
   SessionConnectRequest,
   SessionProfile,
@@ -283,7 +284,7 @@ export function SessionSidebar() {
   return (
     <aside className="session-sidebar">
       <div className="brand-row">
-        <div className="brand-mark">GT</div>
+        <img className="brand-mark" src={gtLogo} alt="GpuTerm logo" />
         <div>
           <h1>GpuTerm</h1>
           <p>{isActiveConnected && activeProfile ? activeProfile.host : "SSH/SFTP"}</p>
