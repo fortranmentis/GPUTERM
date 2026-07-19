@@ -153,27 +153,46 @@ pub(crate) fn detect_remote_os(session: &Session) -> Option<RemoteOs> {
     // Stage 1: uname answers for Linux, macOS, and MSYS/Cygwin environments.
     let (output, status) = run_raw_remote_command(session, "uname -s").ok()?;
     let name = output.trim();
-    if status == 0 && !name.is_empty() {
-        return Some(classify_uname(name));
+    let uname_answered = status == 0 && !name.is_empty();
+    if uname_answered {
+        if let Some(os) = classify_uname(name) {
+            return Some(os);
+        }
     }
     // Stage 2: a Windows host whose default shell (cmd.exe or PowerShell) has
-    // no uname. `cmd.exe /c ver` needs no quoting in either shell, and the
+    // no uname — or whose uname port printed something stage 1 didn't
+    // recognize. `cmd.exe /c ver` needs no quoting in either shell, and the
     // "Microsoft Windows" brand token survives localization.
     let (output, status) = run_raw_remote_command(session, "cmd.exe /c ver").ok()?;
-    (status == 0 && output.contains("Windows")).then_some(RemoteOs::Windows)
+    if status == 0 && output.contains("Windows") {
+        return Some(RemoteOs::Windows);
+    }
+    // uname answered with an unknown Unix flavour and ver ruled out Windows.
+    uname_answered.then_some(RemoteOs::Linux)
 }
 
 /// MSYS/Cygwin ports report `MINGW64_NT-…`/`CYGWIN_NT-…`; the physical host is
 /// Windows and PowerShell yields correct disks/users/GPU data where the POSIX
-/// emulation layer would not.
-fn classify_uname(name: &str) -> RemoteOs {
+/// emulation layer would not. Returns None for names it cannot place — the
+/// caller then falls back to the `ver` probe rather than assuming Linux,
+/// because standalone Windows uname ports (Gow prints "windows32", others
+/// "Windows_NT") would otherwise route a Windows host to the POSIX commands.
+fn classify_uname(name: &str) -> Option<RemoteOs> {
     if name == "Darwin" {
-        RemoteOs::MacOs
-    } else if name.starts_with("MINGW") || name.starts_with("MSYS") || name.starts_with("CYGWIN") {
-        RemoteOs::Windows
-    } else {
-        RemoteOs::Linux
+        return Some(RemoteOs::MacOs);
     }
+    if name.starts_with("MINGW")
+        || name.starts_with("MSYS")
+        || name.starts_with("CYGWIN")
+        || name.to_lowercase().contains("windows")
+    {
+        return Some(RemoteOs::Windows);
+    }
+    matches!(
+        name,
+        "Linux" | "GNU/Linux" | "FreeBSD" | "OpenBSD" | "NetBSD" | "DragonFly" | "SunOS" | "AIX"
+    )
+    .then_some(RemoteOs::Linux)
 }
 
 #[tauri::command]
@@ -1071,13 +1090,21 @@ mod tests {
 
     #[test]
     fn classifies_uname_output_per_os() {
-        assert_eq!(classify_uname("Darwin"), RemoteOs::MacOs);
-        assert_eq!(classify_uname("Linux"), RemoteOs::Linux);
-        assert_eq!(classify_uname("FreeBSD"), RemoteOs::Linux);
+        assert_eq!(classify_uname("Darwin"), Some(RemoteOs::MacOs));
+        assert_eq!(classify_uname("Linux"), Some(RemoteOs::Linux));
+        assert_eq!(classify_uname("FreeBSD"), Some(RemoteOs::Linux));
         // Git-for-Windows / MSYS / Cygwin run on a physical Windows host.
-        assert_eq!(classify_uname("MINGW64_NT-10.0-19045"), RemoteOs::Windows);
-        assert_eq!(classify_uname("MSYS_NT-10.0-22631"), RemoteOs::Windows);
-        assert_eq!(classify_uname("CYGWIN_NT-10.0-19045"), RemoteOs::Windows);
+        assert_eq!(classify_uname("MINGW64_NT-10.0-19045"), Some(RemoteOs::Windows));
+        assert_eq!(classify_uname("MSYS_NT-10.0-22631"), Some(RemoteOs::Windows));
+        assert_eq!(classify_uname("CYGWIN_NT-10.0-19045"), Some(RemoteOs::Windows));
+        // Standalone Windows uname ports on the host PATH must not be
+        // mistaken for Linux — they broke telemetry by routing a Windows
+        // host to the POSIX command set.
+        assert_eq!(classify_uname("Windows_NT"), Some(RemoteOs::Windows));
+        assert_eq!(classify_uname("windows32"), Some(RemoteOs::Windows));
+        assert_eq!(classify_uname("WindowsNT"), Some(RemoteOs::Windows));
+        // Unknown flavours defer to the `ver` probe instead of guessing.
+        assert_eq!(classify_uname("Haiku"), None);
     }
 
     #[test]
