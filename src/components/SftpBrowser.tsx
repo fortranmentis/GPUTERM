@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ClipboardEvent as ReactClipboardEvent,
+  type DragEvent,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { confirm as confirmDialog, open } from "@tauri-apps/plugin-dialog";
@@ -274,7 +281,7 @@ export function SftpBrowser() {
     if (files.some((file) => file.entryType === "directory")) {
       setMessage({
         kind: "error",
-        text: "Directory drag-and-drop is not supported yet",
+        text: "Directory upload is not supported yet",
       });
     }
 
@@ -540,6 +547,29 @@ export function SftpBrowser() {
     }
   };
 
+  const pasteLocalFilesOnRemote = async (
+    event: ReactClipboardEvent<HTMLElement>,
+  ) => {
+    const target = event.target as HTMLElement;
+    if (target.closest("input, textarea, [contenteditable='true']")) {
+      return;
+    }
+    const paths = readClipboardLocalPaths(event.clipboardData);
+    if (paths.length === 0) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      const pastedEntries = await invoke<LocalEntry[]>("describe_local_paths", {
+        paths,
+      });
+      await enqueueUploads(pastedEntries.map(localEntryToDragFile), path);
+    } catch (error) {
+      setMessage({ kind: "error", text: String(error) });
+    }
+  };
+
   return (
     <div className="sftp-browser">
       <RemoteFilePanel
@@ -577,6 +607,7 @@ export function SftpBrowser() {
         }}
         onDragLeaveLocalFiles={() => setRemoteDropActive(false)}
         onDropRemoteOnDirectory={dropRemoteOnDirectory}
+        onPasteLocalFiles={pasteLocalFilesOnRemote}
       />
 
       <div className="sftp-actions">
@@ -733,6 +764,68 @@ function readLocalDragFiles(dataTransfer: DataTransfer): LocalDragFile[] {
 function readRemoteDragFiles(dataTransfer: DataTransfer): RemoteDragFile[] {
   const encoded = dataTransfer.getData(REMOTE_DRAG_TYPE);
   return encoded ? safeParseDragFiles<RemoteDragFile>(encoded) : [];
+}
+
+export function readClipboardLocalPaths(clipboardData: DataTransfer): string[] {
+  const filePaths = Array.from(clipboardData.files ?? [])
+    .map((file) => (file as File & { path?: string }).path)
+    .filter((path): path is string => Boolean(path));
+  const payloads = [
+    "x-special/gnome-copied-files",
+    "text/uri-list",
+    "text/plain",
+  ]
+    .map((type) => {
+      try {
+        return clipboardData.getData(type);
+      } catch {
+        return "";
+      }
+    })
+    .filter(Boolean);
+
+  const textPaths = payloads.flatMap((payload) =>
+    payload
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(
+        (line) =>
+          line.length > 0 &&
+          line !== "copy" &&
+          line !== "cut" &&
+          !line.startsWith("#"),
+      )
+      .map(fileClipboardLineToPath)
+      .filter((path): path is string => path != null),
+  );
+  return [...new Set([...filePaths, ...textPaths])];
+}
+
+function fileClipboardLineToPath(line: string): string | null {
+  const unquoted =
+    line.length >= 2 &&
+    ((line.startsWith('"') && line.endsWith('"')) ||
+      (line.startsWith("'") && line.endsWith("'")))
+      ? line.slice(1, -1)
+      : line;
+  if (unquoted.startsWith("file://")) {
+    try {
+      const url = new URL(unquoted);
+      let pathname = decodeURIComponent(url.pathname);
+      if (/^\/[A-Za-z]:\//.test(pathname)) {
+        pathname = pathname.slice(1);
+      }
+      if (url.hostname && url.hostname !== "localhost") {
+        return `//${url.hostname}${pathname}`;
+      }
+      return pathname;
+    } catch {
+      return null;
+    }
+  }
+  return unquoted.startsWith("/") || /^[A-Za-z]:[\\/]/.test(unquoted)
+    ? unquoted
+    : null;
 }
 
 function safeParseDragFiles<T>(encoded: string): T[] {

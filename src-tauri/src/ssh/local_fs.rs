@@ -91,6 +91,50 @@ pub fn list_local_dir(path: String) -> Result<LocalListResponse, String> {
 }
 
 #[tauri::command]
+pub fn describe_local_paths(paths: Vec<String>) -> Result<Vec<LocalEntry>, String> {
+    paths
+        .into_iter()
+        .filter(|path| !path.trim().is_empty())
+        .map(|path| {
+            let canonical = fs::canonicalize(path.trim()).map_err(|error| {
+                format!("Local path is unavailable or does not exist: {}", error)
+            })?;
+            let metadata = fs::metadata(&canonical).map_err(|error| {
+                format!(
+                    "Failed to inspect local path {}: {}",
+                    canonical.display(),
+                    error
+                )
+            })?;
+            let name = canonical
+                .file_name()
+                .map(|value| value.to_string_lossy().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| canonical.to_string_lossy().to_string());
+            let entry_type = if metadata.is_dir() {
+                "directory"
+            } else if metadata.is_file() {
+                "file"
+            } else {
+                "other"
+            };
+            let modified_time = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs());
+            Ok(LocalEntry {
+                name,
+                path: canonical.to_string_lossy().to_string(),
+                entry_type: entry_type.to_string(),
+                size: metadata.is_file().then_some(metadata.len()),
+                modified_time,
+            })
+        })
+        .collect()
+}
+
+#[tauri::command]
 pub fn local_path_exists(path: String) -> Result<bool, String> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
@@ -141,4 +185,26 @@ fn write_app_settings(settings: &AppSettings) -> Result<(), String> {
 
 fn settings_path() -> PathBuf {
     config_dir().join("app_settings.json")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::describe_local_paths;
+    use std::fs;
+
+    #[test]
+    fn describes_files_pasted_from_a_local_file_manager() {
+        let root = std::env::temp_dir().join(format!("gputerm-paste-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("copied file.txt");
+        fs::write(&file, b"hello").unwrap();
+
+        let entries = describe_local_paths(vec![file.to_string_lossy().to_string()]).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "copied file.txt");
+        assert_eq!(entries[0].entry_type, "file");
+        assert_eq!(entries[0].size, Some(5));
+
+        fs::remove_dir_all(root).unwrap();
+    }
 }

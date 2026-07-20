@@ -1,8 +1,11 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { readFileSync } from "node:fs";
 import { useRef, useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import type { GpuDetailMetric } from "../types/resourceDetails";
 import { GpuUsagePopover } from "./GpuUsagePopover";
+
+const styles = readFileSync("src/styles.css", "utf8");
 
 const gpu0: GpuDetailMetric = {
   index: 0,
@@ -190,6 +193,18 @@ describe("GpuUsagePopover", () => {
     expect(dialog.style.width).not.toBe("");
     expect(dialog.style.height).not.toBe("");
     expect(dialog.style.maxHeight).toBe("");
+
+    const content = dialog.querySelector<HTMLElement>(".resource-detail-content");
+    const processTable = dialog.querySelector<HTMLElement>(".process-table");
+
+    expect(content).not.toBeNull();
+    expect(processTable).not.toBeNull();
+    expect(styles).toMatch(
+      /\.resource-detail-popover \.resource-detail-content\s*\{[^}]*display:\s*flex;[^}]*flex-direction:\s*column;/s,
+    );
+    expect(styles).toMatch(
+      /\.resource-detail-popover \.process-table\s*\{[^}]*flex:\s*1 1 96px;[^}]*max-height:\s*none;/s,
+    );
   });
 
   it("renders processes without GPU identity or with duplicate pids without key collisions", () => {

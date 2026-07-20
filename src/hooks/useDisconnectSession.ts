@@ -10,7 +10,7 @@ export function useDisconnectSession() {
   const removeConnectedSession = useSessionStore(
     (state) => state.removeConnectedSession,
   );
-  const setActiveSession = useSessionStore((state) => state.setActiveSession);
+  const showSession = useSessionStore((state) => state.showSession);
   const setMessage = useSessionStore((state) => state.setMessage);
 
   return async (sessionId?: string) => {
@@ -26,7 +26,7 @@ export function useDisconnectSession() {
         const remaining = state.connectedSessionIds.filter(
           (connectedId) => connectedId !== id,
         );
-        setActiveSession(remaining[remaining.length - 1] ?? null);
+        showSession(remaining[remaining.length - 1] ?? null);
       }
       setMessage({ kind: "info", text: "Disconnected" });
     } catch (error) {

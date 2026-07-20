@@ -48,28 +48,61 @@ describe("SessionSidebar profile form", () => {
       sessions: [savedProfile],
       activeSessionId: null,
       connectedSessionIds: [],
+      terminalIdsBySession: {},
       message: null,
     });
   });
 
-  it("binds the form to a selected profile and unbinds it with New", () => {
+  it("shows profile fields only after New while keeping saved-session auth available", () => {
     render(<SessionSidebar />);
 
-    expect(screen.getByText("New profile")).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("10.0.0.21")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: /lab-a100/i }));
-    expect(screen.getByText(/editing saved profile: lab-a100/i)).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("10.0.0.21")).toHaveValue("10.0.0.21");
+    expect(screen.queryByPlaceholderText("10.0.0.21")).toBeNull();
+    expect(screen.getByLabelText(/password \/ key passphrase/i)).toBeInTheDocument();
+    expect(screen.getByText("lab-a100", { selector: ".selected-session-actions > span" }))
+      .toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /^new$/i }));
     expect(screen.getByText("New profile")).toBeInTheDocument();
     expect(screen.getByPlaceholderText("10.0.0.21")).toHaveValue("");
   });
 
+  it("sends a password entered for a saved session", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "connect_terminal") {
+        return Promise.resolve({
+          sessionId: "profile-1",
+          terminalId: "terminal-1",
+          profile: savedProfile,
+        });
+      }
+      if (command === "load_sessions") {
+        return Promise.resolve([savedProfile]);
+      }
+      return Promise.resolve([]);
+    });
+
+    render(<SessionSidebar />);
+    fireEvent.click(screen.getByRole("button", { name: /lab-a100/i }));
+    fireEvent.change(screen.getByLabelText(/password \/ key passphrase/i), {
+      target: { value: "saved-secret" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^connect$/i }));
+
+    await waitFor(() => {
+      const connectCall = mockInvoke.mock.calls.find(
+        ([command]) => command === "connect_terminal",
+      );
+      const request = (connectCall?.[1] as { request: SessionConnectRequest }).request;
+      expect(request.password).toBe("saved-secret");
+    });
+  });
+
   it("saves a fresh profile with a new id after New", async () => {
     render(<SessionSidebar />);
 
-    fireEvent.click(screen.getByRole("button", { name: /lab-a100/i }));
     fireEvent.click(screen.getByRole("button", { name: /^new$/i }));
     fireEvent.change(screen.getByPlaceholderText("10.0.0.21"), {
       target: { value: "10.0.0.99" },
@@ -102,7 +135,11 @@ describe("SessionSidebar profile form", () => {
             "UNKNOWN_HOST_KEY:aabbcc|ecdsa-sha2-nistp256|10.0.0.21:22",
           );
         }
-        return Promise.resolve({ sessionId: "profile-1", profile: savedProfile });
+        return Promise.resolve({
+          sessionId: "profile-1",
+          terminalId: "terminal-1",
+          profile: savedProfile,
+        });
       }
       return Promise.resolve([]);
     });
@@ -120,6 +157,9 @@ describe("SessionSidebar profile form", () => {
       }),
     );
     await waitFor(() => expect(connectAttempts).toBe(2));
+    expect(useSessionStore.getState().terminalIdsBySession["profile-1"]).toEqual([
+      "terminal-1",
+    ]);
     expect(mockConfirm.mock.calls[0][0]).toContain("ecdsa-sha2-nistp256");
   });
 
@@ -135,7 +175,11 @@ describe("SessionSidebar profile form", () => {
         if (connectAttempts === 2) {
           return Promise.reject("UNKNOWN_HOST_KEY:targ02|ssh-ed25519|10.0.0.21:22");
         }
-        return Promise.resolve({ sessionId: "profile-1", profile: savedProfile });
+        return Promise.resolve({
+          sessionId: "profile-1",
+          terminalId: "terminal-1",
+          profile: savedProfile,
+        });
       }
       return Promise.resolve([]);
     });
@@ -158,23 +202,33 @@ describe("SessionSidebar profile form", () => {
       sessions: [savedProfile, bastionProfile],
       activeSessionId: null,
       connectedSessionIds: [],
+      terminalIdsBySession: {},
       message: null,
     });
     mockInvoke.mockImplementation((command) => {
       if (command === "connect_terminal") {
-        return Promise.resolve({ sessionId: "profile-1", profile: savedProfile });
+        return Promise.resolve({
+          sessionId: "profile-1",
+          terminalId: "terminal-1",
+          profile: savedProfile,
+        });
       }
       return Promise.resolve([]);
     });
 
     render(<SessionSidebar />);
-    fireEvent.click(screen.getByRole("button", { name: /lab-a100/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^new$/i }));
+    fireEvent.change(screen.getByPlaceholderText("10.0.0.21"), {
+      target: { value: "10.0.0.50" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("ubuntu"), {
+      target: { value: "worker" },
+    });
 
     const jumpSelect = screen.getByRole("combobox", { name: /jump host/i });
-    // The edited profile is not offered as its own jump host.
     expect(
-      within(jumpSelect).queryByRole("option", { name: /lab-a100/i }),
-    ).toBeNull();
+      within(jumpSelect).getByRole("option", { name: /bastion/i }),
+    ).toBeInTheDocument();
     fireEvent.change(jumpSelect, { target: { value: "profile-2" } });
     // The jump-host password field appears only once a jump host is chosen.
     fireEvent.change(screen.getByLabelText(/jump host password/i), {
@@ -197,6 +251,7 @@ describe("SessionSidebar profile form", () => {
       sessions: [{ ...savedProfile, proxyJumpId: "profile-2" }, bastionProfile],
       activeSessionId: null,
       connectedSessionIds: [],
+      terminalIdsBySession: {},
       message: null,
     });
 

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getAllWebviewWindows } from "@tauri-apps/api/webviewWindow";
+import { PanelLeftOpen } from "lucide-react";
 import { AppMessageOverlay } from "./components/AppMessage";
 import { RemoteTelemetryBar } from "./components/RemoteTelemetryBar";
 import { SessionSidebar } from "./components/SessionSidebar";
@@ -14,12 +15,15 @@ import type { SessionProfile, SftpProgressPayload } from "./types/session";
 
 type TerminalClosedPayload = {
   sessionId: string;
+  terminalId?: string;
+  sessionClosed?: boolean;
   message?: string | null;
 };
 
 const SFTP_WIDTH_STORAGE_KEY = "gputerm.sftpWidth";
 const MIN_SFTP_WIDTH = 280;
 const DEFAULT_SFTP_WIDTH = 400;
+const SIDEBAR_OPEN_STORAGE_KEY = "gputerm.sidebarOpen";
 
 function clampSftpWidth(value: number) {
   const max = Math.max(MIN_SFTP_WIDTH, Math.round(window.innerWidth * 0.6));
@@ -34,12 +38,14 @@ function initialSftpWidth() {
 function App() {
   const setSessions = useSessionStore((state) => state.setSessions);
   const setMessage = useSessionStore((state) => state.setMessage);
-  const removeConnectedSession = useSessionStore(
-    (state) => state.removeConnectedSession,
-  );
+  const removeTerminalPane = useSessionStore((state) => state.removeTerminalPane);
+  const showSession = useSessionStore((state) => state.showSession);
   const setSessionTelemetry = useSessionStore((state) => state.setSessionTelemetry);
   const setTelemetrySettings = useSessionStore((state) => state.setTelemetrySettings);
   const [sftpWidth, setSftpWidth] = useState(initialSftpWidth);
+  const [sidebarOpen, setSidebarOpen] = useState(
+    () => localStorage.getItem(SIDEBAR_OPEN_STORAGE_KEY) !== "false",
+  );
   const workspaceGridRef = useRef<HTMLDivElement | null>(null);
 
   const startSplitterDrag = (event: ReactMouseEvent<HTMLDivElement>) => {
@@ -121,14 +127,35 @@ function App() {
 
     listen<TerminalClosedPayload>("terminal-closed", (event) => {
       const state = useSessionStore.getState();
-      removeConnectedSession(event.payload.sessionId);
+      const terminalId = event.payload.terminalId ?? event.payload.sessionId;
+      const panes = state.terminalIdsBySession[event.payload.sessionId] ?? [];
+      // A replaced connection can finish shutting down after its successor is
+      // already live. Its unique terminal id keeps that stale close event from
+      // disconnecting the new session.
+      if (!panes.includes(terminalId)) {
+        return;
+      }
+      const remainingPanes = panes.filter((id) => id !== terminalId);
+      removeTerminalPane(event.payload.sessionId, terminalId);
+      const sessionClosed =
+        event.payload.sessionClosed === true || remainingPanes.length === 0;
+      if (sessionClosed && event.payload.sessionId === state.activeSessionId) {
+        const remainingSessions = state.connectedSessionIds.filter(
+          (id) => id !== event.payload.sessionId,
+        );
+        showSession(remainingSessions[remainingSessions.length - 1] ?? null);
+      }
       if (event.payload.message) {
         const isActive = event.payload.sessionId === state.activeSessionId;
         const profileName = state.sessions.find(
           (session) => session.id === event.payload.sessionId,
         )?.name;
         const prefix = !isActive && profileName ? `${profileName}: ` : "";
-        setMessage({ kind: "info", text: `${prefix}${event.payload.message}` });
+        const paneSuffix = sessionClosed ? "" : " (terminal pane)";
+        setMessage({
+          kind: "info",
+          text: `${prefix}${event.payload.message}${paneSuffix}`,
+        });
       }
     }).then((unlisten) => {
       if (disposed) {
@@ -163,12 +190,36 @@ function App() {
       disposed = true;
       unlisteners.forEach((unlisten) => unlisten());
     };
-  }, [removeConnectedSession, setMessage, setSessionTelemetry]);
+  }, [
+    removeTerminalPane,
+    showSession,
+    setMessage,
+    setSessionTelemetry,
+  ]);
+
+  const setHostSelectorOpen = (open: boolean) => {
+    setSidebarOpen(open);
+    localStorage.setItem(SIDEBAR_OPEN_STORAGE_KEY, String(open));
+    window.setTimeout(() => window.dispatchEvent(new Event("resize")), 0);
+  };
 
   return (
     <div className="app-shell">
-      <SessionSidebar />
-      <main className="workspace">
+      {sidebarOpen && (
+        <SessionSidebar onClose={() => setHostSelectorOpen(false)} />
+      )}
+      <main className={`workspace ${sidebarOpen ? "" : "sidebar-closed"}`}>
+        {!sidebarOpen && (
+          <button
+            className="icon-button host-selector-open"
+            type="button"
+            aria-label="Open host selector"
+            title="Open host selector"
+            onClick={() => setHostSelectorOpen(true)}
+          >
+            <PanelLeftOpen size={18} />
+          </button>
+        )}
         <AppMessageOverlay />
         <div
           className="workspace-grid"

@@ -15,6 +15,7 @@ type DetailResource = "cpu" | "memory" | "gpu" | "disk" | "users";
 
 type TerminalClosedPayload = {
   sessionId: string;
+  sessionClosed?: boolean;
 };
 
 const RESOURCE_META: Record<DetailResource, { title: string; icon: ReactNode }> = {
@@ -80,7 +81,10 @@ export function DetailWindow() {
     let disposed = false;
     let unlisten: (() => void) | null = null;
     listen<TerminalClosedPayload>("terminal-closed", (event) => {
-      if (event.payload.sessionId === sessionId) {
+      if (
+        event.payload.sessionId === sessionId &&
+        event.payload.sessionClosed !== false
+      ) {
         void getCurrentWindow().close();
       }
     }).then((next) => {

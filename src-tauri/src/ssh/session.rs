@@ -24,9 +24,9 @@ pub type OpsSessions = Arc<Mutex<HashMap<String, Arc<Mutex<SshConnection>>>>>;
 
 #[derive(Default)]
 pub struct AppState {
-    pub terminals: Mutex<HashMap<String, TerminalHandle>>,
-    pub active_connections: Mutex<HashMap<String, ActiveConnection>>,
-    pub telemetry_stops: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    pub terminals: Arc<Mutex<HashMap<String, TerminalHandle>>>,
+    pub active_connections: Arc<Mutex<HashMap<String, ActiveConnection>>>,
+    pub telemetry_stops: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     pub telemetry_settings: Arc<Mutex<SystemMonitorSettings>>,
     pub credentials: MemoryCredentialStore,
     pub ops_sessions: OpsSessions,
@@ -82,6 +82,7 @@ pub struct SessionConnectRequest {
 #[serde(rename_all = "camelCase")]
 pub struct TerminalSessionInfo {
     pub session_id: String,
+    pub terminal_id: String,
     pub profile: SessionProfile,
 }
 

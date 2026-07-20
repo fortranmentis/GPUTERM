@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
-import { SftpBrowser } from "./SftpBrowser";
+import { readClipboardLocalPaths, SftpBrowser } from "./SftpBrowser";
 import { useSessionStore } from "../stores/sessionStore";
 import { useTransferStore } from "../stores/transferStore";
 import type { LocalEntry, SftpEntry } from "../types/session";
@@ -71,6 +71,7 @@ describe("SftpBrowser local path browse", () => {
     useSessionStore.setState({
       activeSessionId: "session-1",
       connectedSessionIds: ["session-1"],
+      terminalIdsBySession: { "session-1": ["terminal-1"] },
       message: null,
     });
     mockInvoke.mockImplementation((command, args) => {
@@ -93,6 +94,9 @@ describe("SftpBrowser local path browse", () => {
       }
       if (command === "sftp_path_exists" || command === "local_path_exists") {
         return Promise.resolve(false);
+      }
+      if (command === "describe_local_paths") {
+        return Promise.resolve(localEntries);
       }
       if (command === "sftp_upload_file" || command === "sftp_download_file") {
         return Promise.resolve(undefined);
@@ -190,6 +194,35 @@ describe("SftpBrowser local path browse", () => {
     expect(screen.getByText("upload")).toBeInTheDocument();
   });
 
+  it("uploads files pasted from Nautilus on the remote panel", async () => {
+    localEntries = [localFile("copied file.txt")];
+    render(<SftpBrowser />);
+
+    await waitFor(() => expect(screen.getByText("/srv")).toBeInTheDocument());
+    fireEvent.paste(screen.getByTestId("remote-drop-zone"), {
+      clipboardData: {
+        files: [],
+        getData: (type: string) =>
+          type === "x-special/gnome-copied-files"
+            ? "copy\nfile:///home/me/copied%20file.txt"
+            : "",
+      },
+    });
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("describe_local_paths", {
+        paths: ["/home/me/copied file.txt"],
+      }),
+    );
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("sftp_upload_file", {
+        request: expect.objectContaining({
+          remotePath: "/srv/copied file.txt",
+        }),
+      }),
+    );
+  });
+
   it("creates a download task when remote files are dropped on the local panel", async () => {
     remoteEntries = [remoteFile("beta.log")];
     render(<SftpBrowser />);
@@ -263,7 +296,7 @@ describe("SftpBrowser local path browse", () => {
     ).toHaveLength(1);
     expect(
       useSessionStore.getState().message?.text,
-    ).toBe("Directory drag-and-drop is not supported yet");
+    ).toBe("Directory upload is not supported yet");
   });
 
   it("asks for overwrite confirmation and skips when rejected", async () => {
@@ -329,5 +362,22 @@ describe("SftpBrowser local path browse", () => {
 
     await waitFor(() => expect(screen.getByText("failed")).toBeInTheDocument());
     expect(screen.getByText("remote disk full")).toBeInTheDocument();
+  });
+});
+
+describe("Nautilus clipboard parsing", () => {
+  it("decodes GNOME copied-file URIs and ignores the copy marker", () => {
+    const clipboard = {
+      files: [],
+      getData: (type: string) =>
+        type === "x-special/gnome-copied-files"
+          ? "copy\nfile:///home/me/alpha%20one.txt\nfile:///tmp/beta.log"
+          : "",
+    } as unknown as DataTransfer;
+
+    expect(readClipboardLocalPaths(clipboard)).toEqual([
+      "/home/me/alpha one.txt",
+      "/tmp/beta.log",
+    ]);
   });
 });

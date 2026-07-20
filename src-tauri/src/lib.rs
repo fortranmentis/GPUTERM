@@ -1,6 +1,9 @@
 mod ssh;
 
-use ssh::local_fs::{list_local_dir, load_app_settings, local_path_exists, update_recent_local_path};
+use ssh::local_fs::{
+    describe_local_paths, list_local_dir, load_app_settings, local_path_exists,
+    update_recent_local_path,
+};
 use ssh::resource_details::get_resource_details;
 use ssh::session::{
     delete_session, load_sessions, save_session, test_ssh_connection, trust_host_key, AppState,
@@ -11,7 +14,8 @@ use ssh::sftp::{
 };
 use ssh::system_monitor::{get_telemetry_settings, update_telemetry_settings};
 use ssh::terminal::{
-    connect_terminal, disconnect_terminal, terminal_resize, terminal_write,
+    connect_terminal, create_terminal_split, disconnect_terminal, disconnect_terminal_pane,
+    terminal_resize, terminal_write,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -26,12 +30,15 @@ pub fn run() {
             load_app_settings,
             update_recent_local_path,
             list_local_dir,
+            describe_local_paths,
             local_path_exists,
             test_ssh_connection,
             trust_host_key,
             connect_terminal,
+            create_terminal_split,
             terminal_write,
             terminal_resize,
+            disconnect_terminal_pane,
             disconnect_terminal,
             get_telemetry_settings,
             update_telemetry_settings,

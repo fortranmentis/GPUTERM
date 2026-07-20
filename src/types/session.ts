@@ -24,7 +24,13 @@ export type SessionConnectRequest = {
 
 export type TerminalSessionInfo = {
   sessionId: string;
+  terminalId: string;
   profile: SessionProfile;
+};
+
+export type TerminalPaneInfo = {
+  sessionId: string;
+  terminalId: string;
 };
 
 export type AppMessage = {

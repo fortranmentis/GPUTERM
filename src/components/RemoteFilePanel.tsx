@@ -1,5 +1,5 @@
 import { ArrowUp, Folder, FolderOpen, RefreshCw } from "lucide-react";
-import type { DragEvent } from "react";
+import type { ClipboardEvent, DragEvent } from "react";
 import type { SftpEntry } from "../types/session";
 import { formatBytes } from "../utils/formatBytes";
 
@@ -26,6 +26,7 @@ type RemoteFilePanelProps = {
     targetDirectory: SftpEntry,
     event: DragEvent<HTMLButtonElement>,
   ) => void;
+  onPasteLocalFiles: (event: ClipboardEvent<HTMLElement>) => void;
 };
 
 export function RemoteFilePanel({
@@ -48,14 +49,18 @@ export function RemoteFilePanel({
   onDragOverLocalFiles,
   onDragLeaveLocalFiles,
   onDropRemoteOnDirectory,
+  onPasteLocalFiles,
 }: RemoteFilePanelProps) {
   return (
     <section
       className={`sftp-subpanel remote-drop-zone ${dropActive ? "drop-active" : ""}`}
       data-testid="remote-drop-zone"
+      tabIndex={0}
+      title="Drop files here or paste files copied from the system file manager"
       onDrop={onDropLocalFiles}
       onDragOver={onDragOverLocalFiles}
       onDragLeave={onDragLeaveLocalFiles}
+      onPaste={onPasteLocalFiles}
     >
       <div className="panel-title-row">
         <div>
