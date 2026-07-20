@@ -46,6 +46,8 @@ Nothing is ever installed on your servers: every metric comes from one-shot stan
 ### 🖥️ SSH Terminal
 - Full PTY terminal powered by [xterm.js](https://xtermjs.org) and Rust [`ssh2`](https://crates.io/crates/ssh2)
 - **Multiple concurrent sessions** — each keeps its own terminal, scrollback, and SFTP path; click a connected profile in the sidebar to switch
+- **Up to four side-by-side terminal cells** — split the focused session into another shell, or add a different saved session beside it; clicking a cell switches SFTP and telemetry context without collapsing the layout
+- **Collapsible host selector** — hide the sidebar for more workspace and reopen it from the top-left button; full profile fields appear only for **New**, while saved profiles show a connect-time credential prompt
 - **ProxyJump** — tunnel through a saved profile as a bastion (per-key-type host verification along the way)
 - Password, private key (with passphrase), and SSH agent authentication
 - UTF-8 safe streaming — multibyte characters (한글, 日本語, emoji) survive chunked reads
@@ -55,6 +57,7 @@ Nothing is ever installed on your servers: every metric comes from one-shot stan
 
 ### 📁 SFTP Browser
 - Side-by-side remote/local panels with drag-and-drop upload & download
+- **Paste uploads from desktop file managers** — copy local files in Nautilus or another URI-list-aware file manager, focus the remote pane, and paste
 - Streaming 1 MiB chunked transfers with a progress queue and **per-file cancellation**
 - Downloads are written to a temporary file and atomically renamed — no partial files ever
 - Overwrite confirmation, delete, mkdir, and a native OS folder picker
@@ -64,7 +67,7 @@ Nothing is ever installed on your servers: every metric comes from one-shot stan
 - Bottom status bar polling CPU, RAM, disk, logged-in users, and GPUs every 1–10 s — on **Linux, macOS, and Windows remotes**
 - **NVIDIA, AMD, Intel, and Apple Silicon** GPUs are auto-detected per host; every card carries a vendor tag
 - **Hybrid iGPU + dGPU hosts show both cards** — on Windows, counters are attributed to adapters by their DirectX LUID, so the integrated GPU is never mistaken for the discrete one
-- Click any section for a **draggable, resizable detail popover**: per-core CPU usage, top processes, VRAM/power/temperature per GPU, full mount list
+- Click any section for a **draggable, resizable detail popover** whose tables expand with the window: per-core CPU usage, top processes, VRAM/power/temperature per GPU, full mount list
 - **Pop any detail view out into its own OS window** — it refreshes independently and closes with its session
 - Telemetry runs on a dedicated SSH connection (per session) with automatic reconnect and exponential backoff
 - Hosts without any GPU gracefully fall back to system-only metrics
@@ -160,7 +163,18 @@ npm run tauri:build
 
 1. **Create a profile** — enter host, port, username, and a password or private key path in the sidebar. Press **New** to start a fresh profile, **Save** to keep it. To route through a bastion, pick any saved profile as the **Jump host**.
 2. **Connect** — on first contact GpuTerm shows the server's SHA-256 host key fingerprint and asks for confirmation before trusting it. Connect as many servers as you like; connected profiles show a green dot, and clicking one switches the whole view to that session.
-3. **Work** — type in the terminal, drag files between the SFTP panels, and watch live metrics in the bottom bar. Click CPU / RAM / Disk / GPU / Users for detail popovers you can drag around, resize, or pop out into separate windows with the ↗ button.
+3. **Split terminals** — use the columns button to open another shell for the focused session, or the **+** button to add a different saved session beside it.
+4. **Work** — type in the terminal, drag or paste files into the remote SFTP panel, and watch live metrics in the bottom bar. Click CPU / RAM / Disk / GPU / Users for detail popovers you can drag around, resize, or pop out into separate windows with the ↗ button.
+
+<details>
+<summary>Terminal split controls</summary>
+
+- The **columns** button opens another independent PTY shell for the currently focused session.
+- The **+** button lists saved profiles. A live session is added immediately; a disconnected profile asks for its password/key passphrase (and jump-host password when applicable) before connecting.
+- Up to four cells can be shown side by side. Each mixed-session cell displays its profile name.
+- Clicking a cell makes that session active for SFTP and telemetry while preserving the split layout. The cell's **×** button closes that terminal pane.
+
+</details>
 
 <details>
 <summary>SFTP transfer details</summary>
@@ -168,6 +182,7 @@ npm run tauri:build
 - Drop multiple files at once; each becomes an independent queue item with progress, status, and error reporting.
 - Running transfers can be canceled individually from the queue.
 - If the target file exists, GpuTerm asks before overwriting.
+- Files copied in Nautilus and compatible desktop file managers can be pasted into the focused remote pane to enqueue uploads.
 - The last local directory is remembered across launches.
 - Directory drag-and-drop is detected but not yet transferred (see [Roadmap](#roadmap--known-limitations)).
 
@@ -211,7 +226,7 @@ Commands run with a 3-second timeout on a dedicated SSH connection (10 s on Wind
 │                             sftp-progress · terminal-closed            │
 ├────────────────────────────────────────────────────────────────────────┤
 │  Rust backend (ssh2 / libssh2)                                         │
-│    • Terminal      – PTY shell, dedicated connection per session       │
+│    • Terminal      – PTY shell, dedicated connection per terminal cell │
 │    • Telemetry     – own connection, auto-reconnect with backoff       │
 │    • SFTP ops      – pooled per-session "operations" connection        │
 │    • Bulk transfer – dedicated connection per file, cancellable        │
