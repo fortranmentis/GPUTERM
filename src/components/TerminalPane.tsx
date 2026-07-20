@@ -11,6 +11,7 @@ import {
   clearPendingOutput,
   takePendingOutput,
 } from "../utils/terminalBuffer";
+import { attachWebKitHangulImeWorkaround } from "../utils/xtermHangulIme";
 
 type TerminalOutputPayload = {
   sessionId: string;
@@ -25,6 +26,7 @@ type TermEntry = {
   terminal: Terminal;
   fitAddon: FitAddon;
   onData: IDisposable;
+  imeWorkaround: { dispose(): void };
 };
 
 function createTerminal(): Terminal {
@@ -140,6 +142,7 @@ export function TerminalPane() {
       const fitAddon = new FitAddon();
       terminal.loadAddon(fitAddon);
       terminal.open(host);
+      const imeWorkaround = attachWebKitHangulImeWorkaround(terminal);
       const onData = terminal.onData((data) => {
         if (!useSessionStore.getState().connectedSessionIds.includes(id)) {
           return;
@@ -148,7 +151,7 @@ export function TerminalPane() {
           setMessage({ kind: "error", text: String(error) });
         });
       });
-      instancesRef.current.set(id, { terminal, fitAddon, onData });
+      instancesRef.current.set(id, { terminal, fitAddon, onData, imeWorkaround });
 
       const pending = takePendingOutput(pendingOutputRef.current, id);
       if (pending) {
@@ -163,6 +166,7 @@ export function TerminalPane() {
     for (const [id, entry] of [...instancesRef.current]) {
       if (!hostIds.includes(id)) {
         entry.onData.dispose();
+        entry.imeWorkaround.dispose();
         entry.terminal.dispose();
         instancesRef.current.delete(id);
       }
@@ -225,6 +229,7 @@ export function TerminalPane() {
       resizeObserver.disconnect();
       for (const entry of instancesRef.current.values()) {
         entry.onData.dispose();
+        entry.imeWorkaround.dispose();
         entry.terminal.dispose();
       }
       instancesRef.current.clear();
