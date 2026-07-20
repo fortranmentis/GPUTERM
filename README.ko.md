@@ -109,10 +109,10 @@
 <details>
 <summary>"알 수 없는 게시자" / Gatekeeper 경고 안내</summary>
 
-베타 빌드는 코드 서명이 없어 첫 실행 시 OS가 경고를 표시합니다:
+베타 빌드는 신뢰된 게시자/개발자 인증서 서명과 공증이 없어 첫 실행 시 OS가 경고할 수 있습니다. macOS 앱 번들은 무결성을 위한 ad-hoc 서명이 적용됩니다:
 
 - **Windows** — SmartScreen이 *"Windows의 PC 보호"*를 표시: **추가 정보 → 실행**을 클릭하세요.
-- **macOS** — Gatekeeper가 앱을 차단: **GpuTerm.app 우클릭 → 열기 → 열기**, 또는 한 번만 `xattr -cr /Applications/GpuTerm.app`을 실행하세요.
+- **macOS** — Gatekeeper가 ad-hoc 서명 앱을 차단하면 **GpuTerm.app 우클릭 → 열기 → 열기**, 또는 한 번만 `xattr -cr /Applications/GpuTerm.app`을 실행하세요.
 
 설치 파일은 태그된 소스로부터 GitHub Actions에서 빌드되므로([릴리스 & CI](#릴리스--ci) 참고) 무엇이 들어갔는지 언제든 검증할 수 있고, 아래 안내로 직접 빌드할 수도 있습니다.
 

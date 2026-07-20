@@ -109,10 +109,10 @@ Download from the [latest release](https://github.com/fortranmentis/GPUTERM/rele
 <details>
 <summary>“Unknown publisher” / Gatekeeper warnings</summary>
 
-Beta builds are not code-signed, so your OS will warn on first launch:
+Beta builds are not signed with a trusted publisher/developer identity or notarized, so your OS may warn on first launch. The macOS app bundle is ad-hoc signed for integrity:
 
 - **Windows** — SmartScreen shows *“Windows protected your PC”*: click **More info → Run anyway**.
-- **macOS** — Gatekeeper blocks the app: right-click **GpuTerm.app → Open → Open**, or run `xattr -cr /Applications/GpuTerm.app` once.
+- **macOS** — if Gatekeeper blocks the ad-hoc-signed app, right-click **GpuTerm.app → Open → Open**, or run `xattr -cr /Applications/GpuTerm.app` once.
 
 The installers are built on GitHub Actions from the tagged source (see [Releases & CI](#releases--ci)), so you can always audit exactly what went into them — or build your own below.
 
