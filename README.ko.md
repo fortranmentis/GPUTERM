@@ -7,8 +7,9 @@
 터미널, 파일 전송, 그리고 CPU · RAM · 디스크 · GPU(NVIDIA / AMD / Intel / Apple Silicon) 실시간 모니터링 — 하나의 네이티브 창에서.
 
 [![Release](https://img.shields.io/github/v/release/fortranmentis/GPUTERM?include_prereleases&label=release&color=2ea44f)](https://github.com/fortranmentis/GPUTERM/releases)
+[![Release Build](https://github.com/fortranmentis/GPUTERM/actions/workflows/release.yml/badge.svg)](https://github.com/fortranmentis/GPUTERM/actions/workflows/release.yml)
+[![Downloads](https://img.shields.io/github/downloads/fortranmentis/GPUTERM/total?color=8b5cf6)](https://github.com/fortranmentis/GPUTERM/releases)
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue)](./LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-8b5cf6)](#설치)
 [![Built with Tauri](https://img.shields.io/badge/Tauri-2-FFC131?logo=tauri&logoColor=white)](https://tauri.app)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white)](https://react.dev)
 [![Rust](https://img.shields.io/badge/Rust-stable-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org)
@@ -23,7 +24,22 @@
 
 원격 GPU 서버에서 작업하다 보면 SSH 클라이언트, SFTP 도구, 그리고 `watch nvidia-smi`를 띄워둔 터미널까지 세 개의 창을 오가게 됩니다. **GpuTerm은 이 셋을 하나로 합쳤습니다.** 한 번 접속하면 xterm.js 터미널, 드래그 앤 드롭 SFTP 브라우저, 그리고 CPU·메모리·디스크·로그인 사용자·GPU(NVIDIA·AMD·Intel·Apple Silicon, Linux/macOS/Windows 모두)를 폴링하는 실시간 텔레메트리 바가 함께 열립니다. 모니터링은 별도 SSH 채널로 동작하므로 셸 작업을 방해하지 않습니다.
 
-> **상태:** 베타. 최신 프리릴리스는 [Releases](https://github.com/fortranmentis/GPUTERM/releases)에서 내려받거나 아래 안내에 따라 소스에서 빌드하세요.
+서버에는 아무것도 설치하지 않습니다: 모든 지표는 표준 명령(`nvidia-smi`, `/proc`, `sysctl`, PowerShell CIM 등)을 SSH로 1회씩 실행해 수집하며, 핵심 지표에는 root/관리자 권한도 필요 없습니다.
+
+> **상태:** 베타. 모든 [릴리스](https://github.com/fortranmentis/GPUTERM/releases)에 Windows·macOS·Linux 설치 파일이 첨부되며, 아래 안내에 따라 소스에서 직접 빌드할 수도 있습니다.
+
+## 목차
+
+- [주요 기능](#주요-기능)
+- [모니터링 지원 범위](#모니터링-지원-범위)
+- [설치](#설치)
+- [사용법](#사용법)
+- [아키텍처](#아키텍처)
+- [개발](#개발)
+- [FAQ](#faq)
+- [문제 해결](#문제-해결)
+- [로드맵 / 알려진 제한](#로드맵--알려진-제한)
+- [라이선스](#라이선스)
 
 ## 주요 기능
 
@@ -33,6 +49,7 @@
 - **ProxyJump** — 저장된 프로필을 점프 호스트(bastion)로 지정해 경유 접속 (경유 구간마다 키 종류별 호스트 키 검증)
 - 비밀번호, 개인키(패스프레이즈 포함), SSH 에이전트 인증 지원
 - UTF-8 안전 스트리밍 — 청크 경계에 걸린 멀티바이트 문자(한글, 日本語, 이모지)가 깨지지 않음
+- **한글 입력 정상 동작** — WebKit 계열 웹뷰의 자모 분리 버그를 네이티브 터미널과 같은 백스페이스-재작성 방식으로 해결해, 터미널에서 한글 IME 조합이 올바르게 처리됩니다
 - MOTD를 포함한 접속 초기 출력을 버퍼링 후 재생 — 연결 타이밍에 유실되지 않음
 - 원격 PTY 크기 자동 동기화 및 SSH keepalive
 
@@ -44,22 +61,59 @@
 - 터미널/SFTP 창 사이 너비 조절 스플리터 (재시작 후에도 유지)
 
 ### 📊 실시간 텔레메트리
-- 하단 상태바에서 CPU, RAM, 디스크, 로그인 사용자, **NVIDIA·AMD(ROCm)·Intel·Apple Silicon** GPU를 1~10초 주기로 폴링
+- 하단 상태바에서 CPU, RAM, 디스크, 로그인 사용자, GPU를 1~10초 주기로 폴링 — **Linux·macOS·Windows 원격 모두 지원**
+- **NVIDIA·AMD·Intel·Apple Silicon** GPU를 호스트별로 자동 감지하며, 카드마다 벤더 태그 표시
+- **내장 + 외장 하이브리드 구성도 두 GPU 모두 표시** — Windows에서는 DirectX LUID로 카운터를 어댑터에 정확히 귀속시켜 내장 GPU가 외장으로 오인되지 않습니다
 - 각 섹션을 클릭하면 **드래그·크기 조절이 가능한 상세 팝오버**: 코어별 CPU 사용률, 상위 프로세스, GPU별 VRAM/전력/온도, 전체 마운트 목록
 - **상세창을 별도 OS 창으로 분리** 가능 — 독립적으로 갱신되고 세션이 끊기면 함께 닫힘
 - 텔레메트리는 세션별 전용 SSH 연결에서 동작하며 끊기면 지수 백오프로 자동 재연결
-- NVIDIA GPU가 없는 서버에서는 시스템 지표만 표시하며 정상 동작
+- GPU가 전혀 없는 서버에서는 시스템 지표만 표시하며 정상 동작
 
 ### 🔐 기본 보안
 - 비밀번호는 메모리에서만 유지 — 디스크에 기록하지 않음
 - 최초 접속 시 SHA-256 호스트 키 지문을 확인하는 TOFU 프롬프트, 지문 불일치 시 연결 차단
 - 프로덕션·개발 창 모두에 제한적인 Tauri Content Security Policy 적용
 
+## 모니터링 지원 범위
+
+| 지표 | Linux | macOS (Apple Silicon) | Windows (OpenSSH Server) |
+| --- | :-: | :-: | :-: |
+| CPU 모델 · 코어 · 사용률 | ✅ | ✅ (P/E 코어 구성) | ✅ |
+| Load average | ✅ | ✅ | — (Windows에 개념 없음) |
+| 메모리 + 스왑 | ✅ | ✅ (활성 상태 보기 기준) | ✅ (페이지 파일을 스왑으로) |
+| 디스크 / 마운트 | ✅ | ✅ | ✅ (고정 드라이브) |
+| 로그인 사용자 | ✅ `who` | ✅ `who` | ✅ `quser` (Home 에디션 제외) |
+| NVIDIA GPU (사용률·VRAM·전력·온도·프로세스) | ✅ `nvidia-smi` | — | ✅ `nvidia-smi` |
+| AMD GPU | ✅ `rocm-smi` (전체) | — | ◐ WDDM 카운터 (사용률 + VRAM) |
+| Intel GPU | ◐ `xpu-smi` / `intel_gpu_top` | — | ◐ WDDM 카운터 (사용률 + VRAM) |
+| Apple GPU | — | ◐ 사용률 + 메모리 (전력·온도는 root 필요) | — |
+| 상세 팝오버 (코어별 CPU, 상위 프로세스) | ✅ | ✅ (코어별은 root 필요) | ✅ |
+
+✅ 전체 지원 ◐ 부분 지원 ([알려진 제한](#로드맵--알려진-제한) 참고) — 실행되는 원격 명령 목록은 [사용법](#사용법)에 있습니다.
+
 ## 설치
 
 ### 빌드된 설치 파일
 
-[최신 릴리스](https://github.com/fortranmentis/GPUTERM/releases)에서 OS별 설치 파일(`.msi`/`.exe`, `.dmg`, `.deb`/`.AppImage`)을 내려받으세요.
+[최신 릴리스](https://github.com/fortranmentis/GPUTERM/releases)에서 내려받으세요:
+
+| OS | 파일 | 비고 |
+| --- | --- | --- |
+| Windows 10/11 (x64) | `GpuTerm_x.y.z_x64-setup.exe` | NSIS 설치 프로그램 |
+| macOS (Apple Silicon) | `GpuTerm_x.y.z_aarch64.dmg` | Intel Mac은 현재 소스 빌드 필요 |
+| Debian / Ubuntu (x64) | `GpuTerm_x.y.z_amd64.deb` | `sudo apt install ./GpuTerm_*.deb` |
+
+<details>
+<summary>"알 수 없는 게시자" / Gatekeeper 경고 안내</summary>
+
+베타 빌드는 코드 서명이 없어 첫 실행 시 OS가 경고를 표시합니다:
+
+- **Windows** — SmartScreen이 *"Windows의 PC 보호"*를 표시: **추가 정보 → 실행**을 클릭하세요.
+- **macOS** — Gatekeeper가 앱을 차단: **GpuTerm.app 우클릭 → 열기 → 열기**, 또는 한 번만 `xattr -cr /Applications/GpuTerm.app`을 실행하세요.
+
+설치 파일은 태그된 소스로부터 GitHub Actions에서 빌드되므로([릴리스 & CI](#릴리스--ci) 참고) 무엇이 들어갔는지 언제든 검증할 수 있고, 아래 안내로 직접 빌드할 수도 있습니다.
+
+</details>
 
 ### 소스에서 빌드
 
@@ -104,7 +158,7 @@ npm run tauri:build
 
 ## 사용법
 
-1. **프로필 생성** — 사이드바에 host, port, username과 비밀번호 또는 개인키 경로를 입력합니다. **New**로 새 프로필을 시작하고 **Save**로 저장합니다.
+1. **프로필 생성** — 사이드바에 host, port, username과 비밀번호 또는 개인키 경로를 입력합니다. **New**로 새 프로필을 시작하고 **Save**로 저장합니다. 경유 접속이 필요하면 저장된 프로필을 **Jump host**로 지정하세요.
 2. **접속** — 최초 접속 시 서버의 SHA-256 호스트 키 지문을 보여주고 신뢰 여부를 확인받습니다. 여러 서버에 동시에 접속할 수 있으며, 연결된 프로필에는 초록 점이 표시되고 클릭하면 해당 세션으로 화면이 전환됩니다.
 3. **작업** — 터미널에 입력하고, SFTP 패널 사이로 파일을 끌어다 놓고, 하단 바에서 실시간 지표를 확인하세요. CPU / RAM / Disk / GPU / Users를 클릭하면 상세 팝오버가 열리며, 드래그·크기 조절은 물론 ↗ 버튼으로 별도 창 분리도 가능합니다.
 
@@ -124,8 +178,8 @@ npm run tauri:build
 
 - **Interval:** 1, 2(기본), 5, 10초 — 상세 팝오버도 같은 주기로 폴링합니다.
 - **Mode:** GPU + System, GPU only, System only.
-- **Ignore FS:** 디스크 요약에서 숨길 파일시스템 타입을 쉼표로 구분해 지정 (기본: `tmpfs`, `devtmpfs`, `squashfs`, `proc`, `sysfs`, `cgroup`, `cgroup2`, `overlay`). 디스크 팝오버에서 일시적으로 표시할 수 있습니다.
-- 마운트 우선순위는 `/` → `/home` → `/data` → `/mnt*` → `/media*` → 기타이며, 사용률 80% 이상은 경고, 90% 이상은 위험으로 표시됩니다.
+- **Ignore FS:** 디스크 요약에서 숨길 파일시스템 타입을 쉼표로 구분해 지정 (기본: `tmpfs`, `devtmpfs`, `squashfs`, `proc`, `sysfs`, `cgroup`, `cgroup2`, `overlay`, `devfs`, `autofs`). 디스크 팝오버에서 일시적으로 표시할 수 있습니다.
+- 마운트 우선순위는 `/` → `/home` → `/data` → `/mnt*` → `/media*` → 드라이브 문자 → 기타이며, 사용률 80% 이상은 경고, 90% 이상은 위험으로 표시됩니다.
 
 </details>
 
@@ -179,9 +233,10 @@ npm run tauri:build
 ## 개발
 
 ```bash
-npm run test                                   # 프론트엔드 테스트 (Vitest)
+npm run test                                    # 프론트엔드 테스트 (Vitest)
 cargo test --manifest-path src-tauri/Cargo.toml # 백엔드 테스트
-npm run build                                  # TypeScript + Vite 프로덕션 빌드
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets  # 린트
+npm run build                                   # TypeScript + Vite 프로덕션 빌드
 ```
 
 <details>
@@ -191,10 +246,14 @@ npm run build                                  # TypeScript + Vite 프로덕션 
 src/                    React 프론트엔드
   components/           TerminalPane, SftpBrowser, RemoteTelemetryBar, 팝오버…
   stores/               Zustand 스토어 (세션, 전송)
-  utils/                공용 포맷터, 터미널 버퍼, 디스크 우선순위
+  utils/                공용 포맷터, 터미널 버퍼, 디스크 우선순위,
+                        WebKit 한글 IME 워크어라운드
 src-tauri/src/ssh/      Rust 백엔드
   terminal.rs           PTY 셸 + UTF-8 안전 리더
-  system_monitor.rs     텔레메트리 루프 + 파서
+  system_monitor.rs     텔레메트리 루프, OS 감지, Linux 파서
+  macos_monitor.rs      macOS 수집기 (sysctl, vm_stat, ioreg)
+  windows_monitor.rs    Windows 수집기 (PowerShell CIM, WDDM GPU 카운터)
+  gpu_monitor.rs        GPU 도구 감지 + 벤더별 파서
   resource_details.rs   CPU/RAM/GPU 상세 지표 수집
   sftp.rs               전송, 취소, SFTP 명령
   session.rs            연결, 호스트 키, 프로필, 연결 풀
@@ -202,15 +261,66 @@ src-tauri/src/ssh/      Rust 백엔드
 
 </details>
 
+### 릴리스 & CI
+
+`v*` 태그를 푸시하면 [Release Build 워크플로](.github/workflows/release.yml)가 실행되어 GitHub 호스트 러너에서 Windows `.exe`(NSIS), Debian `.deb`, macOS `.dmg`를 빌드하고 해당 태그의 GitHub 릴리스에 자동 첨부합니다. Actions 페이지에서 기존 태그를 지정해 수동 실행할 수도 있습니다.
+
+## FAQ
+
+<details>
+<summary><b>서버에 뭔가 설치되나요?</b></summary>
+
+아니요. 모든 지표는 읽기 전용 표준 명령(`nvidia-smi`, `cat /proc/...`, `sysctl`, PowerShell `Get-CimInstance` 등)을 SSH로 1회씩 실행해 수집합니다. 원격 호스트에 아무것도 복사·설치되지 않고, 흔적도 남지 않습니다.
+
+</details>
+
+<details>
+<summary><b>비밀번호는 어디에 저장되나요?</b></summary>
+
+어디에도 저장되지 않습니다. 비밀번호(및 키 패스프레이즈)는 앱이 실행되는 동안 메모리에만 유지되고 디스크에 기록되지 않습니다. 저장되는 프로필에는 host, port, username과 개인키의 *경로*만 들어갑니다. [데이터 저장 위치](#아키텍처) 표를 참고하세요.
+
+</details>
+
+<details>
+<summary><b>원격 호스트에 root/관리자 권한이 필요한가요?</b></summary>
+
+핵심 지표에는 필요 없습니다. 일부 부가 지표만 권한이 필요하며 없으면 n/a로 표시됩니다: macOS의 코어별 CPU와 GPU 전력·온도(`powermetrics`), Windows의 프로세스 소유자, Linux의 `intel_gpu_top`(root 또는 `CAP_PERFMON`).
+
+</details>
+
+<details>
+<summary><b>어떤 원격 OS를 지원하나요?</b></summary>
+
+Linux, macOS(Apple Silicon 포함), 그리고 OpenSSH Server가 설치된 Windows를 지원합니다 — [지원 범위 표](#모니터링-지원-범위)를 참고하세요. 원격 OS는 접속 시 자동 감지되며, WSL은 Linux로, Windows의 MSYS/Cygwin/Git-Bash 셸은 Windows로 올바르게 인식됩니다.
+
+</details>
+
+<details>
+<summary><b>설치할 때 OS가 경고를 띄우는 이유는?</b></summary>
+
+베타 설치 파일은 코드 서명이 없기 때문입니다. [서명 경고 안내](#설치)의 1회성 SmartScreen/Gatekeeper 절차를 따르거나, 직접 소스에서 빌드하세요.
+
+</details>
+
+<details>
+<summary><b>회사에서 쓰거나 상업 제품에 활용해도 되나요?</b></summary>
+
+GpuTerm은 [PolyForm Noncommercial 1.0.0](./LICENSE)에 따라 개인·비상업 용도로 무료입니다. 이 소스를 활용한 유료 제품 출시를 포함한 상업적 이용은 해당 라이선스에서 허용되지 않습니다 — 상업용 라이선스는 메인테이너에게 문의하세요.
+
+</details>
+
 ## 문제 해결
 
 | 증상 | 확인 사항 |
 | --- | --- |
+| SmartScreen / Gatekeeper가 앱을 차단 | 서명 없는 베타 빌드의 정상 동작 — [서명 경고 안내](#설치) 참고 |
 | Windows에서 `tauri:dev` 실패 | VS Build Tools 2022(C++ 워크로드)와 WebView2 Runtime 설치 후 터미널 재시작 |
 | `cargo`를 찾을 수 없음 | [rustup](https://rustup.rs)으로 설치 후 터미널 재시작 (`%USERPROFILE%\.cargo\bin`이 PATH에 있어야 함) |
 | SSH 인증 실패 | host/port/user/자격증명 확인; 서버가 해당 인증 방식을 허용하는지 확인 |
 | 호스트 키 불일치 | 다른 경로로 서버 지문을 검증한 뒤 `known_hosts.json`에서 이전 항목 제거 |
 | GPU가 '사용 불가'로 표시 | GPU 도구(`nvidia-smi`, `rocm-smi`, `xpu-smi`, `intel_gpu_top`) 설치 확인 — 다른 지표는 무관하게 정상 동작 |
+| Windows 원격에서 "The system cannot find the path specified" 표시 | v1.0.9-beta에서 수정 — 이전 빌드는 PATH에 `uname` 포트가 있는 Windows 호스트를 Linux로 오인했습니다; 앱을 업데이트하세요 |
+| 터미널에서 한글이 자모로 분리됨 | macOS/WebKit 클라이언트용으로 수정 완료 — 최신 릴리스로 업데이트하세요 |
 
 ## 로드맵 / 알려진 제한
 
@@ -220,6 +330,7 @@ src-tauri/src/ssh/      Rust 백엔드
 - 텔레메트리는 Linux·macOS(Apple Silicon 포함)·Windows 원격을 지원; Apple GPU 전력·온도와 코어별 CPU 사용률은 root `powermetrics`가 필요해 미표시
 - GPU 모니터링은 `nvidia-smi`·`rocm-smi`·`xpu-smi`·`intel_gpu_top`·macOS `ioreg`·Windows WDDM 성능 카운터 사용 (Linux의 AMD는 현재 `rocm-smi` 기준)
 - Windows 원격: Windows PowerShell 5.1 이상 필요(기본 탑재); load average는 존재하지 않아 n/a로 표시; AMD/Intel GPU는 사용률·전용 VRAM만 제공(전력·온도 불가, Windows 10 1709+ 및 WDDM 2.x 드라이버 필요); 프로세스 소유자와 GPU 프로세스 커맨드라인은 관리자 권한이 필요해 n/a 또는 프로세스 이름으로 대체; Home 에디션에는 `quser`가 없어 사용자 섹션이 비어 있음; 내장+외장 하이브리드 호스트는 두 GPU 모두 표시(카운터는 DirectX 레지스트리의 어댑터 LUID로 정확히 매핑, 해당 키가 없으면 위치 기반 휴리스틱으로 폴백)
+- macOS 설치 파일은 현재 Apple Silicon 전용 (Intel Mac은 소스 빌드 필요)
 
 이슈와 풀 리퀘스트를 환영합니다 — 제출 전에 위의 테스트를 실행해 주세요.
 

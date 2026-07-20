@@ -7,8 +7,9 @@
 Terminal, file transfers, and real-time CPU · RAM · Disk · GPU telemetry (NVIDIA / AMD / Intel / Apple Silicon) — in a single native window.
 
 [![Release](https://img.shields.io/github/v/release/fortranmentis/GPUTERM?include_prereleases&label=release&color=2ea44f)](https://github.com/fortranmentis/GPUTERM/releases)
+[![Release Build](https://github.com/fortranmentis/GPUTERM/actions/workflows/release.yml/badge.svg)](https://github.com/fortranmentis/GPUTERM/actions/workflows/release.yml)
+[![Downloads](https://img.shields.io/github/downloads/fortranmentis/GPUTERM/total?color=8b5cf6)](https://github.com/fortranmentis/GPUTERM/releases)
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue)](./LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-8b5cf6)](#installation)
 [![Built with Tauri](https://img.shields.io/badge/Tauri-2-FFC131?logo=tauri&logoColor=white)](https://tauri.app)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white)](https://react.dev)
 [![Rust](https://img.shields.io/badge/Rust-stable-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org)
@@ -23,7 +24,22 @@ Terminal, file transfers, and real-time CPU · RAM · Disk · GPU telemetry (NVI
 
 Working on a remote GPU box usually means juggling an SSH client, an SFTP tool, and a second terminal running `watch nvidia-smi`. **GpuTerm replaces all three.** Connect once and get an xterm.js terminal, a drag-and-drop SFTP browser, and a live telemetry bar that polls CPU, memory, disk, logged-in users, and every GPU on the host — NVIDIA, AMD, Intel, or Apple Silicon, on Linux, macOS, and Windows remotes alike — over its own SSH channel, so monitoring never blocks your shell.
 
-> **Status:** beta. Download the latest prerelease from the [Releases](https://github.com/fortranmentis/GPUTERM/releases) page or build from source below.
+Nothing is ever installed on your servers: every metric comes from one-shot standard commands (`nvidia-smi`, `/proc`, `sysctl`, PowerShell CIM, …) over SSH, and no admin/root rights are required for the core metrics.
+
+> **Status:** beta. Prebuilt installers for Windows, macOS, and Linux are attached to every [release](https://github.com/fortranmentis/GPUTERM/releases); you can also build from source below.
+
+## Table of contents
+
+- [Features](#features)
+- [What you can monitor](#what-you-can-monitor)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Architecture](#architecture)
+- [Development](#development)
+- [FAQ](#faq)
+- [Troubleshooting](#troubleshooting)
+- [Roadmap / Known limitations](#roadmap--known-limitations)
+- [License](#license)
 
 ## Features
 
@@ -33,6 +49,7 @@ Working on a remote GPU box usually means juggling an SSH client, an SFTP tool, 
 - **ProxyJump** — tunnel through a saved profile as a bastion (per-key-type host verification along the way)
 - Password, private key (with passphrase), and SSH agent authentication
 - UTF-8 safe streaming — multibyte characters (한글, 日本語, emoji) survive chunked reads
+- **CJK input works correctly** — Korean IME composition in the terminal is handled with the same backspace-rewrite protocol native terminals use, fixing the jamo-splitting bug in WebKit-based webviews
 - MOTD and early output are buffered and replayed, never lost to connection races
 - Automatic remote PTY resize and SSH keepalive
 
@@ -44,22 +61,59 @@ Working on a remote GPU box usually means juggling an SSH client, an SFTP tool, 
 - Resizable split between terminal and SFTP panes (persisted across launches)
 
 ### 📊 Live Telemetry
-- Bottom status bar polling CPU, RAM, disk, logged-in users, and **NVIDIA, AMD (ROCm), Intel, and Apple Silicon** GPUs every 1–10 s
+- Bottom status bar polling CPU, RAM, disk, logged-in users, and GPUs every 1–10 s — on **Linux, macOS, and Windows remotes**
+- **NVIDIA, AMD, Intel, and Apple Silicon** GPUs are auto-detected per host; every card carries a vendor tag
+- **Hybrid iGPU + dGPU hosts show both cards** — on Windows, counters are attributed to adapters by their DirectX LUID, so the integrated GPU is never mistaken for the discrete one
 - Click any section for a **draggable, resizable detail popover**: per-core CPU usage, top processes, VRAM/power/temperature per GPU, full mount list
 - **Pop any detail view out into its own OS window** — it refreshes independently and closes with its session
 - Telemetry runs on a dedicated SSH connection (per session) with automatic reconnect and exponential backoff
-- Non-NVIDIA hosts gracefully fall back to system-only metrics
+- Hosts without any GPU gracefully fall back to system-only metrics
 
 ### 🔐 Security by default
 - Passwords live in memory only — never written to disk
 - Trust-on-first-use host key prompt with SHA-256 fingerprint; mismatches block the connection
 - Restrictive Tauri Content Security Policy in production and development
 
+## What you can monitor
+
+| Metric | Linux | macOS (Apple Silicon) | Windows (OpenSSH Server) |
+| --- | :-: | :-: | :-: |
+| CPU model · cores · usage | ✅ | ✅ (P/E core split) | ✅ |
+| Load average | ✅ | ✅ | — (doesn't exist on Windows) |
+| Memory + swap | ✅ | ✅ (Activity Monitor semantics) | ✅ (page file as swap) |
+| Disks / mounts | ✅ | ✅ | ✅ (fixed drives) |
+| Logged-in users | ✅ `who` | ✅ `who` | ✅ `quser` (absent on Home editions) |
+| NVIDIA GPU (util · VRAM · power · temp · processes) | ✅ `nvidia-smi` | — | ✅ `nvidia-smi` |
+| AMD GPU | ✅ `rocm-smi` (full) | — | ◐ WDDM counters (util + VRAM) |
+| Intel GPU | ◐ `xpu-smi` / `intel_gpu_top` | — | ◐ WDDM counters (util + VRAM) |
+| Apple GPU | — | ◐ util + memory (power/temp need root) | — |
+| Detail popovers (per-core CPU, top processes) | ✅ | ✅ (no per-core without root) | ✅ |
+
+✅ full support ◐ partial (see [known limitations](#roadmap--known-limitations)) — the exact remote commands are listed under [Usage](#usage).
+
 ## Installation
 
-### Prebuilt binaries
+### Prebuilt installers
 
-Grab the installer for your OS from the [latest release](https://github.com/fortranmentis/GPUTERM/releases) (`.msi`/`.exe`, `.dmg`, `.deb`/`.AppImage`).
+Download from the [latest release](https://github.com/fortranmentis/GPUTERM/releases):
+
+| OS | File | Notes |
+| --- | --- | --- |
+| Windows 10/11 (x64) | `GpuTerm_x.y.z_x64-setup.exe` | NSIS installer |
+| macOS (Apple Silicon) | `GpuTerm_x.y.z_aarch64.dmg` | Intel Macs: build from source for now |
+| Debian / Ubuntu (x64) | `GpuTerm_x.y.z_amd64.deb` | `sudo apt install ./GpuTerm_*.deb` |
+
+<details>
+<summary>“Unknown publisher” / Gatekeeper warnings</summary>
+
+Beta builds are not code-signed, so your OS will warn on first launch:
+
+- **Windows** — SmartScreen shows *“Windows protected your PC”*: click **More info → Run anyway**.
+- **macOS** — Gatekeeper blocks the app: right-click **GpuTerm.app → Open → Open**, or run `xattr -cr /Applications/GpuTerm.app` once.
+
+The installers are built on GitHub Actions from the tagged source (see [Releases & CI](#releases--ci)), so you can always audit exactly what went into them — or build your own below.
+
+</details>
 
 ### Build from source
 
@@ -104,7 +158,7 @@ npm run tauri:build
 
 ## Usage
 
-1. **Create a profile** — enter host, port, username, and a password or private key path in the sidebar. Press **New** to start a fresh profile, **Save** to keep it.
+1. **Create a profile** — enter host, port, username, and a password or private key path in the sidebar. Press **New** to start a fresh profile, **Save** to keep it. To route through a bastion, pick any saved profile as the **Jump host**.
 2. **Connect** — on first contact GpuTerm shows the server's SHA-256 host key fingerprint and asks for confirmation before trusting it. Connect as many servers as you like; connected profiles show a green dot, and clicking one switches the whole view to that session.
 3. **Work** — type in the terminal, drag files between the SFTP panels, and watch live metrics in the bottom bar. Click CPU / RAM / Disk / GPU / Users for detail popovers you can drag around, resize, or pop out into separate windows with the ↗ button.
 
@@ -124,8 +178,8 @@ npm run tauri:build
 
 - **Interval:** 1, 2 (default), 5, or 10 seconds — detail popovers poll on the same cadence.
 - **Mode:** GPU + System, GPU only, or System only.
-- **Ignore FS:** comma-separated filesystem types hidden from the disk summary (default: `tmpfs`, `devtmpfs`, `squashfs`, `proc`, `sysfs`, `cgroup`, `cgroup2`, `overlay`). The disk popover can temporarily reveal them.
-- Mount points are prioritized `/` → `/home` → `/data` → `/mnt*` → `/media*` → others; disks ≥ 80% are flagged warning, ≥ 90% critical.
+- **Ignore FS:** comma-separated filesystem types hidden from the disk summary (default: `tmpfs`, `devtmpfs`, `squashfs`, `proc`, `sysfs`, `cgroup`, `cgroup2`, `overlay`, `devfs`, `autofs`). The disk popover can temporarily reveal them.
+- Mount points are prioritized `/` → `/home` → `/data` → `/mnt*` → `/media*` → drive letters → others; disks ≥ 80% are flagged warning, ≥ 90% critical.
 
 </details>
 
@@ -179,9 +233,10 @@ Passwords and private key contents are **never** written to any of these files.
 ## Development
 
 ```bash
-npm run test                                   # frontend tests (Vitest)
+npm run test                                    # frontend tests (Vitest)
 cargo test --manifest-path src-tauri/Cargo.toml # backend tests
-npm run build                                  # TypeScript + Vite production build
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets  # lints
+npm run build                                   # TypeScript + Vite production build
 ```
 
 <details>
@@ -191,10 +246,14 @@ npm run build                                  # TypeScript + Vite production bu
 src/                    React frontend
   components/           TerminalPane, SftpBrowser, RemoteTelemetryBar, popovers…
   stores/               Zustand stores (session, transfers)
-  utils/                Shared formatters, terminal buffer, disk priority
+  utils/                Shared formatters, terminal buffer, disk priority,
+                        WebKit Hangul IME workaround
 src-tauri/src/ssh/      Rust backend
   terminal.rs           PTY shell + UTF-8 safe reader
-  system_monitor.rs     Telemetry loop + parsers
+  system_monitor.rs     Telemetry loop, OS detection, Linux parsers
+  macos_monitor.rs      macOS collectors (sysctl, vm_stat, ioreg)
+  windows_monitor.rs    Windows collectors (PowerShell CIM, WDDM GPU counters)
+  gpu_monitor.rs        GPU tool probing + vendor parsers
   resource_details.rs   On-demand CPU/RAM/GPU detail collection
   sftp.rs               Transfers, cancellation, SFTP commands
   session.rs            Connections, host keys, profiles, connection pool
@@ -202,15 +261,66 @@ src-tauri/src/ssh/      Rust backend
 
 </details>
 
+### Releases & CI
+
+Pushing a `v*` tag runs the [Release Build workflow](.github/workflows/release.yml), which builds the Windows `.exe` (NSIS), Debian `.deb`, and macOS `.dmg` on GitHub-hosted runners and attaches them to the GitHub release for that tag. It can also be dispatched manually for an existing tag from the Actions page.
+
+## FAQ
+
+<details>
+<summary><b>Does GpuTerm install anything on my servers?</b></summary>
+
+No. Every metric is collected by running one-shot, read-only standard commands over SSH (`nvidia-smi`, `cat /proc/...`, `sysctl`, PowerShell `Get-CimInstance`, …). Nothing is copied to, installed on, or left behind on the remote host.
+
+</details>
+
+<details>
+<summary><b>Where are my passwords stored?</b></summary>
+
+Nowhere. Passwords (and key passphrases) are held in memory for the lifetime of the app and never written to disk. Saved profiles keep only the host, port, username, and the *path* to a private key. See the [data locations](#architecture) table.
+
+</details>
+
+<details>
+<summary><b>Do I need root/admin on the remote host?</b></summary>
+
+No for all core metrics. A few extras need elevation and simply show n/a without it: per-core CPU and GPU power/temperature on macOS (`powermetrics`), process owners on Windows, and `intel_gpu_top` on Linux (root or `CAP_PERFMON`).
+
+</details>
+
+<details>
+<summary><b>Which remote OSes are supported?</b></summary>
+
+Linux, macOS (Apple Silicon included), and Windows with OpenSSH Server — see the [support matrix](#what-you-can-monitor). The remote OS is auto-detected per connection; WSL counts as Linux, and MSYS/Cygwin/Git-Bash shells on Windows are correctly detected as Windows.
+
+</details>
+
+<details>
+<summary><b>Why does my OS warn me when installing?</b></summary>
+
+Beta installers are not code-signed. See the [unsigned-binaries note](#installation) for the one-time SmartScreen/Gatekeeper steps, or build from source.
+
+</details>
+
+<details>
+<summary><b>Can I use GpuTerm at work / in a commercial product?</b></summary>
+
+GpuTerm is free for personal and noncommercial use under [PolyForm Noncommercial 1.0.0](./LICENSE). Commercial use (including shipping paid products built on this source) is not permitted under that license — contact the maintainer about a commercial license.
+
+</details>
+
 ## Troubleshooting
 
 | Symptom | Check |
 | --- | --- |
+| SmartScreen / Gatekeeper blocks the app | Expected for unsigned beta builds — see the [unsigned-binaries note](#installation) |
 | `tauri:dev` fails on Windows | VS Build Tools 2022 (C++ workload) + WebView2 Runtime installed, then restart the terminal |
 | `cargo` not found | Install via [rustup](https://rustup.rs), reopen the terminal (`%USERPROFILE%\.cargo\bin` on PATH) |
 | SSH auth fails | Verify host/port/user/credentials; confirm the server allows the auth method |
 | Host key mismatch | Verify the server fingerprint out-of-band, then remove the stale entry from `known_hosts.json` |
 | GPU shows unavailable | Confirm a GPU tool is installed (`nvidia-smi`, `rocm-smi`, `xpu-smi`, or `intel_gpu_top`); other metrics still work regardless |
+| Windows remote shows “The system cannot find the path specified” | Fixed in v1.0.9-beta — older builds misdetected Windows hosts that have a `uname` port on PATH as Linux; update the app |
+| Korean input splits into jamo in the terminal | Fixed for macOS/WebKit clients — update to the latest release |
 
 ## Roadmap / Known limitations
 
@@ -220,6 +330,7 @@ src-tauri/src/ssh/      Rust backend
 - Telemetry supports Linux, macOS (Apple Silicon included), and Windows remotes; Apple GPU power/temperature and per-core CPU usage need root `powermetrics` and are not shown
 - GPU monitoring uses `nvidia-smi`, `rocm-smi`, `xpu-smi`, `intel_gpu_top`, macOS `ioreg`, or Windows WDDM performance counters (AMD support on Linux currently targets `rocm-smi`)
 - Windows remotes: requires Windows PowerShell 5.1+ (preinstalled); load averages don't exist and show as n/a; AMD/Intel GPUs report utilization and dedicated VRAM only (no power/temperature, needs Windows 10 1709+ with a WDDM 2.x driver); process owners and GPU process command lines need elevation and fall back to n/a / process names; `quser` is missing on Home editions, so the Users section stays empty there; hybrid iGPU+dGPU hosts show both cards (counters are attributed by adapter LUID from the DirectX registry, falling back to a positional heuristic if that key is unavailable)
+- macOS installer currently targets Apple Silicon only (Intel Macs: build from source)
 
 Issues and pull requests are welcome — please run the test suites above before submitting.
 
