@@ -7,7 +7,7 @@
 터미널, 파일 전송, 그리고 CPU · RAM · 디스크 · GPU(NVIDIA / AMD / Intel / Apple Silicon) 실시간 모니터링 — 하나의 네이티브 창에서.
 
 [![Release](https://img.shields.io/github/v/release/fortranmentis/GPUTERM?include_prereleases&label=release&color=2ea44f)](https://github.com/fortranmentis/GPUTERM/releases)
-[![License: MIT](https://img.shields.io/github/license/fortranmentis/GPUTERM?color=blue)](./LICENSE)
+[![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-8b5cf6)](#설치)
 [![Built with Tauri](https://img.shields.io/badge/Tauri-2-FFC131?logo=tauri&logoColor=white)](https://tauri.app)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white)](https://react.dev)
@@ -225,4 +225,4 @@ src-tauri/src/ssh/      Rust 백엔드
 
 ## 라이선스
 
-[MIT](./LICENSE) © GpuTerm contributors. [Tauri](https://tauri.app), [React](https://react.dev), [xterm.js](https://xtermjs.org), [ssh2](https://crates.io/crates/ssh2)로 만들어졌으며, 서드파티 라이선스는 각 저작자에게 있습니다.
+[PolyForm Noncommercial 1.0.0](./LICENSE) © GpuTerm contributors. **개인 및 비상업적 용도로는 무료이며, 상업적 이용은 허용되지 않습니다** — 자세한 내용은 [라이선스](./LICENSE)를 참고하시거나 상업용 라이선스는 메인테이너에게 문의하세요. [Tauri](https://tauri.app), [React](https://react.dev), [xterm.js](https://xtermjs.org), [ssh2](https://crates.io/crates/ssh2)로 만들어졌으며, 이 서드파티 구성요소들은 각자의 (오픈소스) 라이선스를 따릅니다.
