@@ -9,6 +9,8 @@
 
 ## Fixes
 
+- Fixed Windows release builds opening an attached console window. GpuTerm now uses the Windows GUI subsystem in release mode, so closing a console can no longer terminate the application.
+- Fixed the monitoring Interval and Mode selectors rendering with a white native background on Debian/WebKitGTK. Select controls now use an explicit cross-platform dark appearance, including their options and arrow indicator.
 - Fixed local-host monitoring so local terminals collect metrics directly on Linux, macOS, and Windows instead of attempting to use an SSH operations connection.
 - Fixed saved-session reconnects that previously opened without a usable password prompt or could leave the terminal blank while credentials were unavailable.
 - Added authenticated-vault corruption and wrong-password handling, fresh nonces for every write, fixed v1 KDF parameter validation, atomic replacement, rollback on failed persistence, and owner-only `0600` vault files on Unix platforms.
@@ -18,7 +20,7 @@
 
 - Frontend: 89 Vitest tests, including vault creation, unlock retry, reset confirmation, credential masks, saved-session reconnects, ProxyJump prompts, local profiles, terminal splits, and panel persistence.
 - Backend: 97 Rust tests passed (1 ignored), including AES-GCM authentication failure, ciphertext tampering, fresh nonce generation, KDF parameter tampering, Unix file permissions, local telemetry parsers, and local PTY behavior.
-- Static/build checks: Clippy passed on all targets with warnings denied; the TypeScript production build completed successfully.
+- Static/build checks: Clippy passed on all targets with warnings denied; the TypeScript production build completed successfully, including the release-only Windows GUI subsystem attribute and WebKitGTK-independent select styling.
 - Packaging: native Windows NSIS `.exe`, Debian/Ubuntu `.deb`, and Apple Silicon `.dmg` builds run on GitHub-hosted runners.
 - macOS: every nested Mach-O and code bundle is ad-hoc signed inside-out; the final `GpuTerm.app` is deep-signed and checked with `codesign --verify --deep --strict`. The generated DMG is verified, mounted, and the enclosed app signature is checked again.
 - Release assets include `SHA256SUMS.txt` covering all three installers.

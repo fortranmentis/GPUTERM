@@ -1,4 +1,5 @@
 :root {
+  color-scheme: dark;
   color: #d8e0ea;
   background: #070a0f;
   font-family:
@@ -41,7 +42,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -208,11 +210,41 @@ input {
   border: 1px solid var(--line);
   border-radius: 6px;
   outline: none;
+  background-color: #090e15;
+  color: var(--text);
+}
+
+select {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 0 30px 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  outline: none;
+  background-color: #090e15;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 13px) 50%,
+    calc(100% - 9px) 50%;
+  background-repeat: no-repeat;
+  background-size: 4px 4px;
+  color: var(--text);
+  color-scheme: dark;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+select option {
   background: #090e15;
   color: var(--text);
 }
 
-input:focus {
+input:focus,
+select:focus {
   border-color: var(--cyan-strong);
   box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.12);
 }
@@ -222,6 +254,11 @@ input::placeholder {
 }
 
 input:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+select:disabled {
   cursor: not-allowed;
   opacity: 0.65;
 }
@@ -1457,9 +1494,13 @@ button.file-row.selected {
   padding: 0 7px;
   border: 1px solid var(--line);
   border-radius: 6px;
-  background: #090e15;
+  background-color: #090e15;
   color: var(--text);
   font-size: 12px;
+}
+
+.mini-control select {
+  padding-right: 26px;
 }
 
 .ignore-control {
