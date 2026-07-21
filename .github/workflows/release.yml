@@ -1,19 +1,48 @@
 name: Release Build
 
-# Builds the desktop installers (Windows NSIS .exe, Linux .deb, macOS .dmg)
-# and attaches them to the GitHub release for the given tag. Runs on tag
-# pushes, or manually via workflow_dispatch for an existing tag.
+# Creates/updates the prerelease, builds the native installers, and attaches
+# them to the tag. The macOS path signs every nested code object before the
+# final app bundle and creates the DMG only from that verified app.
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to build and attach installers to (e.g. v1.0.8-beta)"
+        description: "Release tag to build and attach installers to (e.g. v1.1.1-beta)"
         required: true
   push:
     tags: ["v*"]
 
 jobs:
+  create-release:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Create or update prerelease notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --title "GpuTerm $VERSION" \
+              --notes-file RELEASE_NOTES.md \
+              --prerelease
+          else
+            gh release create "$RELEASE_TAG" \
+              --verify-tag \
+              --title "GpuTerm $VERSION" \
+              --notes-file RELEASE_NOTES.md \
+              --prerelease
+          fi
+
   build:
+    needs: create-release
     permissions:
       contents: write
     strategy:
@@ -25,7 +54,7 @@ jobs:
           - platform: ubuntu-22.04
             bundles: deb
           - platform: macos-latest
-            bundles: dmg
+            bundles: app
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -56,7 +85,9 @@ jobs:
 
       - run: npm ci
 
-      - uses: tauri-apps/tauri-action@v0
+      - name: Build and upload Windows/Linux installer
+        if: matrix.platform != 'macos-latest'
+        uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -64,3 +95,86 @@ jobs:
           releaseName: "GpuTerm __VERSION__"
           prerelease: true
           args: --bundles ${{ matrix.bundles }}
+
+      - name: Build macOS application bundle
+        if: matrix.platform == 'macos-latest'
+        run: npm run tauri:build -- --bundles app
+
+      - name: Fully ad-hoc sign macOS application bundle
+        if: matrix.platform == 'macos-latest'
+        id: mac_app
+        shell: bash
+        run: |
+          APP_PATH="$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit)"
+          test -n "$APP_PATH"
+          scripts/sign-macos-ad-hoc.sh "$APP_PATH"
+          echo "app_path=$APP_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Create and verify DMG from signed application
+        if: matrix.platform == 'macos-latest'
+        id: mac_dmg
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          APP_PATH: ${{ steps.mac_app.outputs.app_path }}
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          STAGING="$RUNNER_TEMP/gputerm-dmg"
+          MOUNT_POINT="$RUNNER_TEMP/gputerm-dmg-mount"
+          DMG_PATH="$RUNNER_TEMP/GpuTerm_${VERSION}_aarch64.dmg"
+          mkdir -p "$STAGING" "$MOUNT_POINT"
+          ditto "$APP_PATH" "$STAGING/GpuTerm.app"
+          ln -s /Applications "$STAGING/Applications"
+          hdiutil create \
+            -volname "GpuTerm" \
+            -srcfolder "$STAGING" \
+            -ov \
+            -format UDZO \
+            "$DMG_PATH"
+          hdiutil verify "$DMG_PATH"
+          hdiutil attach "$DMG_PATH" -readonly -nobrowse -mountpoint "$MOUNT_POINT"
+          trap 'hdiutil detach "$MOUNT_POINT" >/dev/null' EXIT
+          codesign --verify --deep --strict --verbose=4 "$MOUNT_POINT/GpuTerm.app"
+          hdiutil detach "$MOUNT_POINT"
+          trap - EXIT
+          echo "dmg_path=$DMG_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Upload verified macOS DMG
+        if: matrix.platform == 'macos-latest'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          DMG_PATH: ${{ steps.mac_dmg.outputs.dmg_path }}
+        run: gh release upload "$RELEASE_TAG" "$DMG_PATH#macOS Apple Silicon (fully ad-hoc signed)" --clobber
+
+  checksums:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download installer assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          mkdir assets
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir assets \
+            --pattern 'GpuTerm_*'
+          test "$(find assets -maxdepth 1 -name '*.exe' | wc -l)" -eq 1
+          test "$(find assets -maxdepth 1 -name '*.dmg' | wc -l)" -eq 1
+          test "$(find assets -maxdepth 1 -name '*.deb' | wc -l)" -eq 1
+
+      - name: Generate and upload SHA-256 checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        working-directory: assets
+        run: |
+          shasum -a 256 GpuTerm_* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          gh release upload "$RELEASE_TAG" SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber

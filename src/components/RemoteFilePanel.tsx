@@ -1,9 +1,16 @@
-import { ArrowUp, Folder, FolderOpen, RefreshCw } from "lucide-react";
+import {
+  ArrowUp,
+  Folder,
+  FolderOpen,
+  PanelRightClose,
+  RefreshCw,
+} from "lucide-react";
 import type { ClipboardEvent, DragEvent } from "react";
 import type { SftpEntry } from "../types/session";
 import { formatBytes } from "../utils/formatBytes";
 
 type RemoteFilePanelProps = {
+  onClose?: () => void;
   connected: boolean;
   loading: boolean;
   path: string;
@@ -30,6 +37,7 @@ type RemoteFilePanelProps = {
 };
 
 export function RemoteFilePanel({
+  onClose,
   connected,
   loading,
   path,
@@ -67,16 +75,29 @@ export function RemoteFilePanel({
           <h2>SFTP</h2>
           <p>{connected ? path : "Disconnected"}</p>
         </div>
-        <button
-          className="icon-button"
-          type="button"
-          disabled={!connected || loading}
-          aria-label="Refresh directory"
-          title="Refresh"
-          onClick={onRefresh}
-        >
-          <RefreshCw size={16} />
-        </button>
+        <div className="panel-title-actions">
+          <button
+            className="icon-button"
+            type="button"
+            disabled={!connected || loading}
+            aria-label="Refresh directory"
+            title="Refresh"
+            onClick={onRefresh}
+          >
+            <RefreshCw size={16} />
+          </button>
+          {onClose && (
+            <button
+              className="icon-button ghost"
+              type="button"
+              aria-label="Close SFTP panel"
+              title="Close SFTP panel"
+              onClick={onClose}
+            >
+              <PanelRightClose size={17} />
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="path-row">

@@ -46,7 +46,7 @@ Nothing is ever installed on your servers: every metric comes from one-shot stan
 ### 🖥️ SSH Terminal
 - Full PTY terminal powered by [xterm.js](https://xtermjs.org) and Rust [`ssh2`](https://crates.io/crates/ssh2)
 - **Multiple concurrent sessions** — each keeps its own terminal, scrollback, and SFTP path; click a connected profile in the sidebar to switch
-- **Up to four side-by-side terminal cells** — split the focused session into another shell, or add a different saved session beside it; clicking a cell switches SFTP and telemetry context without collapsing the layout
+- **Up to four flexible terminal cells** — place a new shell or another saved session to the left, right, top, or bottom of the focused pane; choose its initial ratio and drag dividers to resize nested layouts
 - **Collapsible host selector** — hide the sidebar for more workspace and reopen it from the top-left button; full profile fields appear only for **New**, while saved profiles show a connect-time credential prompt
 - **ProxyJump** — tunnel through a saved profile as a bastion (per-key-type host verification along the way)
 - Password, private key (with passphrase), and SSH agent authentication
@@ -62,9 +62,11 @@ Nothing is ever installed on your servers: every metric comes from one-shot stan
 - Downloads are written to a temporary file and atomically renamed — no partial files ever
 - Overwrite confirmation, delete, mkdir, and a native OS folder picker
 - Resizable split between terminal and SFTP panes (persisted across launches)
+- **Collapsible SFTP panel** — close it with the directional panel button and restore it from the top-right; the terminal immediately expands into the freed width
 
 ### 📊 Live Telemetry
 - Bottom status bar polling CPU, RAM, disk, logged-in users, and GPUs every 1–10 s — on **Linux, macOS, and Windows remotes**
+- **Collapsible monitoring bar** — close it independently and restore it from the bottom-right; visibility is remembered across launches
 - **NVIDIA, AMD, Intel, and Apple Silicon** GPUs are auto-detected per host; every card carries a vendor tag
 - **Hybrid iGPU + dGPU hosts show both cards** — on Windows, counters are attributed to adapters by their DirectX LUID, so the integrated GPU is never mistaken for the discrete one
 - Click any section for a **draggable, resizable detail popover** whose tables expand with the window: per-core CPU usage, top processes, VRAM/power/temperature per GPU, full mount list
@@ -109,12 +111,18 @@ Download from the [latest release](https://github.com/fortranmentis/GPUTERM/rele
 <details>
 <summary>“Unknown publisher” / Gatekeeper warnings</summary>
 
-Beta builds are not signed with a trusted publisher/developer identity or notarized, so your OS may warn on first launch. The macOS app bundle is ad-hoc signed for integrity:
+Beta builds are not signed with a trusted publisher/developer identity or notarized, so your OS may warn on first launch. The macOS app bundle is fully ad-hoc signed inside-out (nested Mach-O code first, then the final application bundle) and verified for integrity before the DMG is published:
 
 - **Windows** — SmartScreen shows *“Windows protected your PC”*: click **More info → Run anyway**.
 - **macOS** — if Gatekeeper blocks the ad-hoc-signed app, right-click **GpuTerm.app → Open → Open**, or run `xattr -cr /Applications/GpuTerm.app` once.
 
 The installers are built on GitHub Actions from the tagged source (see [Releases & CI](#releases--ci)), so you can always audit exactly what went into them — or build your own below.
+
+After copying the app to `/Applications`, you can verify the sealed bundle yourself:
+
+```bash
+codesign --verify --deep --strict --verbose=2 /Applications/GpuTerm.app
+```
 
 </details>
 
@@ -163,7 +171,7 @@ npm run tauri:build
 
 1. **Create a profile** — enter host, port, username, and a password or private key path in the sidebar. Press **New** to start a fresh profile, **Save** to keep it. To route through a bastion, pick any saved profile as the **Jump host**.
 2. **Connect** — on first contact GpuTerm shows the server's SHA-256 host key fingerprint and asks for confirmation before trusting it. Connect as many servers as you like; connected profiles show a green dot, and clicking one switches the whole view to that session.
-3. **Split terminals** — use the columns button to open another shell for the focused session, or the **+** button to add a different saved session beside it.
+3. **Split terminals** — use the columns button to open another shell for the focused session, or the **+** button to add a different saved session. Choose left/right/top/bottom placement and the new pane's initial size before adding it.
 4. **Work** — type in the terminal, drag or paste files into the remote SFTP panel, and watch live metrics in the bottom bar. Click CPU / RAM / Disk / GPU / Users for detail popovers you can drag around, resize, or pop out into separate windows with the ↗ button.
 
 <details>
@@ -171,8 +179,17 @@ npm run tauri:build
 
 - The **columns** button opens another independent PTY shell for the currently focused session.
 - The **+** button lists saved profiles. A live session is added immediately; a disconnected profile asks for its password/key passphrase (and jump-host password when applicable) before connecting.
-- Up to four cells can be shown side by side. Each mixed-session cell displays its profile name.
+- Up to four cells can be nested horizontally and vertically. Choose a 20–80% initial size, then drag any divider to adjust the ratio. Each mixed-session cell displays its profile name.
 - Clicking a cell makes that session active for SFTP and telemetry while preserving the split layout. The cell's **×** button closes that terminal pane.
+
+</details>
+
+<details>
+<summary>Workspace panel controls</summary>
+
+- The host selector, SFTP browser, and monitoring bar each have a directional close button in their header.
+- Reopen a hidden panel from its matching workspace edge: host selector at the top-left, SFTP at the top-right, and monitoring at the bottom-right.
+- Each panel's open/closed state is saved locally. Hiding SFTP expands terminal width; hiding monitoring expands terminal height.
 
 </details>
 
@@ -278,7 +295,7 @@ src-tauri/src/ssh/      Rust backend
 
 ### Releases & CI
 
-Pushing a `v*` tag runs the [Release Build workflow](.github/workflows/release.yml), which builds the Windows `.exe` (NSIS), Debian `.deb`, and macOS `.dmg` on GitHub-hosted runners and attaches them to the GitHub release for that tag. It can also be dispatched manually for an existing tag from the Actions page.
+Pushing a `v*` tag runs the [Release Build workflow](.github/workflows/release.yml), which creates the prerelease from [RELEASE_NOTES.md](./RELEASE_NOTES.md), builds the Windows `.exe` (NSIS), Debian `.deb`, and macOS `.dmg` on GitHub-hosted runners, and attaches them to the tag. The macOS job signs every nested code object inside-out, deep-signs and verifies the final app, builds the DMG from that verified bundle, mounts it, and verifies the enclosed app again. A `SHA256SUMS.txt` file is published after all three installers succeed. The workflow can also be dispatched manually for an existing tag from the Actions page.
 
 ## FAQ
 
@@ -313,7 +330,7 @@ Linux, macOS (Apple Silicon included), and Windows with OpenSSH Server — see t
 <details>
 <summary><b>Why does my OS warn me when installing?</b></summary>
 
-Beta installers are not code-signed. See the [unsigned-binaries note](#installation) for the one-time SmartScreen/Gatekeeper steps, or build from source.
+Beta installers do not carry a trusted publisher/Developer ID signature or Apple notarization. The macOS bundle is fully ad-hoc signed for integrity, but this does not establish publisher trust. See the [installation warning](#installation) for the one-time SmartScreen/Gatekeeper steps, or build from source.
 
 </details>
 
@@ -328,7 +345,7 @@ GpuTerm is free for personal and noncommercial use under [PolyForm Noncommercial
 
 | Symptom | Check |
 | --- | --- |
-| SmartScreen / Gatekeeper blocks the app | Expected for unsigned beta builds — see the [unsigned-binaries note](#installation) |
+| SmartScreen / Gatekeeper blocks the app | Expected for a beta without a trusted publisher signature/notarization — see the [installation warning](#installation) |
 | `tauri:dev` fails on Windows | VS Build Tools 2022 (C++ workload) + WebView2 Runtime installed, then restart the terminal |
 | `cargo` not found | Install via [rustup](https://rustup.rs), reopen the terminal (`%USERPROFILE%\.cargo\bin` on PATH) |
 | SSH auth fails | Verify host/port/user/credentials; confirm the server allows the auth method |

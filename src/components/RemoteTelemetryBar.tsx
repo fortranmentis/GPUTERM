@@ -6,6 +6,7 @@ import {
   Gauge,
   HardDrive,
   MemoryStick,
+  PanelBottomClose,
   Thermometer,
   Users,
   Zap,
@@ -62,7 +63,11 @@ const DETAIL_TITLES: Record<Exclude<OpenResource, null>, string> = {
   users: "Logged-in users",
 };
 
-export function RemoteTelemetryBar() {
+type RemoteTelemetryBarProps = {
+  onClose?: () => void;
+};
+
+export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
   const connected = useSessionStore(selectIsActiveConnected);
   const telemetry = useSessionStore(selectActiveTelemetry);
@@ -244,6 +249,17 @@ export function RemoteTelemetryBar() {
         <div className="telemetry-status-label">
           <Activity size={16} />
           <span>{telemetry?.hostname ?? "Telemetry"}</span>
+          {onClose && (
+            <button
+              className="icon-button ghost telemetry-close-button"
+              type="button"
+              aria-label="Close monitoring panel"
+              title="Close monitoring panel"
+              onClick={onClose}
+            >
+              <PanelBottomClose size={17} />
+            </button>
+          )}
         </div>
         <label className="mini-control">
           <span>Interval</span>
@@ -526,4 +542,3 @@ function MiniBar({ value }: { value: number | null }) {
   const width = value == null ? 0 : Math.max(0, Math.min(100, value));
   return <div className="mini-bar"><div className="mini-bar-fill" style={{ width: `${width}%` }} /></div>;
 }
-

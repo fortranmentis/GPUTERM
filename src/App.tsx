@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getAllWebviewWindows } from "@tauri-apps/api/webviewWindow";
-import { PanelLeftOpen } from "lucide-react";
+import { PanelBottomOpen, PanelLeftOpen, PanelRightOpen } from "lucide-react";
 import { AppMessageOverlay } from "./components/AppMessage";
 import { RemoteTelemetryBar } from "./components/RemoteTelemetryBar";
 import { SessionSidebar } from "./components/SessionSidebar";
@@ -24,6 +24,8 @@ const SFTP_WIDTH_STORAGE_KEY = "gputerm.sftpWidth";
 const MIN_SFTP_WIDTH = 280;
 const DEFAULT_SFTP_WIDTH = 400;
 const SIDEBAR_OPEN_STORAGE_KEY = "gputerm.sidebarOpen";
+const SFTP_OPEN_STORAGE_KEY = "gputerm.sftpOpen";
+const MONITORING_OPEN_STORAGE_KEY = "gputerm.monitoringOpen";
 
 function clampSftpWidth(value: number) {
   const max = Math.max(MIN_SFTP_WIDTH, Math.round(window.innerWidth * 0.6));
@@ -45,6 +47,12 @@ function App() {
   const [sftpWidth, setSftpWidth] = useState(initialSftpWidth);
   const [sidebarOpen, setSidebarOpen] = useState(
     () => localStorage.getItem(SIDEBAR_OPEN_STORAGE_KEY) !== "false",
+  );
+  const [sftpOpen, setSftpOpen] = useState(
+    () => localStorage.getItem(SFTP_OPEN_STORAGE_KEY) !== "false",
+  );
+  const [monitoringOpen, setMonitoringOpen] = useState(
+    () => localStorage.getItem(MONITORING_OPEN_STORAGE_KEY) !== "false",
   );
   const workspaceGridRef = useRef<HTMLDivElement | null>(null);
 
@@ -203,12 +211,33 @@ function App() {
     window.setTimeout(() => window.dispatchEvent(new Event("resize")), 0);
   };
 
+  const setSftpPanelOpen = (open: boolean) => {
+    setSftpOpen(open);
+    localStorage.setItem(SFTP_OPEN_STORAGE_KEY, String(open));
+    window.setTimeout(() => window.dispatchEvent(new Event("resize")), 0);
+  };
+
+  const setMonitoringPanelOpen = (open: boolean) => {
+    setMonitoringOpen(open);
+    localStorage.setItem(MONITORING_OPEN_STORAGE_KEY, String(open));
+    window.setTimeout(() => window.dispatchEvent(new Event("resize")), 0);
+  };
+
+  const workspaceClassName = [
+    "workspace",
+    sidebarOpen ? "" : "sidebar-closed",
+    sftpOpen ? "" : "sftp-closed",
+    monitoringOpen ? "" : "monitoring-closed",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return (
     <div className="app-shell">
       {sidebarOpen && (
         <SessionSidebar onClose={() => setHostSelectorOpen(false)} />
       )}
-      <main className={`workspace ${sidebarOpen ? "" : "sidebar-closed"}`}>
+      <main className={workspaceClassName}>
         {!sidebarOpen && (
           <button
             className="icon-button host-selector-open"
@@ -220,29 +249,59 @@ function App() {
             <PanelLeftOpen size={18} />
           </button>
         )}
+        {!sftpOpen && (
+          <button
+            className="icon-button sftp-panel-open"
+            type="button"
+            aria-label="Open SFTP panel"
+            title="Open SFTP panel"
+            onClick={() => setSftpPanelOpen(true)}
+          >
+            <PanelRightOpen size={18} />
+          </button>
+        )}
+        {!monitoringOpen && (
+          <button
+            className="icon-button monitoring-panel-open"
+            type="button"
+            aria-label="Open monitoring panel"
+            title="Open monitoring panel"
+            onClick={() => setMonitoringPanelOpen(true)}
+          >
+            <PanelBottomOpen size={18} />
+          </button>
+        )}
         <AppMessageOverlay />
         <div
           className="workspace-grid"
           ref={workspaceGridRef}
           style={{
-            gridTemplateColumns: `minmax(0, 1fr) 6px min(${sftpWidth}px, 60%)`,
+            gridTemplateColumns: sftpOpen
+              ? `minmax(0, 1fr) 6px min(${sftpWidth}px, 60%)`
+              : "minmax(0, 1fr)",
           }}
         >
           <section className="terminal-region">
             <TerminalPane />
           </section>
-          <div
-            className="workspace-splitter"
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="Resize SFTP panel"
-            onMouseDown={startSplitterDrag}
-          />
-          <section className="sftp-region">
-            <SftpBrowser />
-          </section>
+          {sftpOpen && (
+            <>
+              <div
+                className="workspace-splitter"
+                role="separator"
+                aria-orientation="vertical"
+                aria-label="Resize SFTP panel"
+                onMouseDown={startSplitterDrag}
+              />
+              <section className="sftp-region">
+                <SftpBrowser onClose={() => setSftpPanelOpen(false)} />
+              </section>
+            </>
+          )}
         </div>
-        <RemoteTelemetryBar />
+        {monitoringOpen && (
+          <RemoteTelemetryBar onClose={() => setMonitoringPanelOpen(false)} />
+        )}
       </main>
     </div>
   );

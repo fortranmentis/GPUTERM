@@ -43,7 +43,11 @@ type SftpTransferRequest = {
   transferId: string;
 };
 
-export function SftpBrowser() {
+type SftpBrowserProps = {
+  onClose?: () => void;
+};
+
+export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
   const connected = useSessionStore(selectIsActiveConnected);
   const setMessage = useSessionStore((state) => state.setMessage);
@@ -573,6 +577,7 @@ export function SftpBrowser() {
   return (
     <div className="sftp-browser">
       <RemoteFilePanel
+        onClose={onClose}
         connected={connected}
         loading={loading}
         path={path}

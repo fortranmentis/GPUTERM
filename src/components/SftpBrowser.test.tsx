@@ -363,6 +363,19 @@ describe("SftpBrowser local path browse", () => {
     await waitFor(() => expect(screen.getByText("failed")).toBeInTheDocument());
     expect(screen.getByText("remote disk full")).toBeInTheDocument();
   });
+
+  it("exposes the SFTP panel close control", async () => {
+    const onClose = vi.fn();
+
+    render(<SftpBrowser onClose={onClose} />);
+    await waitFor(() => expect(screen.getByText("/srv")).toBeInTheDocument());
+    const closeButton = screen.getByRole("button", { name: "Close SFTP panel" });
+    expect(closeButton).toHaveClass("ghost");
+    expect(closeButton.querySelector(".lucide-panel-right-close")).toBeInTheDocument();
+    fireEvent.click(closeButton);
+
+    expect(onClose).toHaveBeenCalledOnce();
+  });
 });
 
 describe("Nautilus clipboard parsing", () => {

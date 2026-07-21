@@ -435,4 +435,16 @@ describe("RemoteTelemetryBar disk summary", () => {
     expect(within(sessionTwoDialog).queryByText("Session One GPU One")).not.toBeInTheDocument();
     expect(screen.queryByRole("tablist", { name: "GPU selector" })).not.toBeInTheDocument();
   });
+
+  it("exposes the monitoring panel close control", () => {
+    const onClose = vi.fn();
+
+    render(<RemoteTelemetryBar onClose={onClose} />);
+    const closeButton = screen.getByRole("button", { name: "Close monitoring panel" });
+    expect(closeButton).toHaveClass("ghost");
+    expect(closeButton.querySelector(".lucide-panel-bottom-close")).toBeInTheDocument();
+    fireEvent.click(closeButton);
+
+    expect(onClose).toHaveBeenCalledOnce();
+  });
 });

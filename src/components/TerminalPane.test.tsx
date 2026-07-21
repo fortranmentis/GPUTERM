@@ -1,16 +1,30 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { TerminalPane } from "./TerminalPane";
 import { useSessionStore } from "../stores/sessionStore";
 import type { SessionConnectRequest, SessionProfile } from "../types/session";
 
+const terminalMocks = vi.hoisted(() => ({
+  open: vi.fn(),
+  refresh: vi.fn(),
+  write: vi.fn(),
+}));
+const eventHandlers = vi.hoisted(
+  () => new Map<string, (event: { payload: unknown }) => void>(),
+);
+
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(() => Promise.resolve(() => undefined)),
+  listen: vi.fn(
+    (eventName: string, handler: (event: { payload: unknown }) => void) => {
+      eventHandlers.set(eventName, handler);
+      return Promise.resolve(() => eventHandlers.delete(eventName));
+    },
+  ),
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
@@ -27,12 +41,21 @@ vi.mock("@xterm/xterm", () => ({
   Terminal: class {
     cols = 100;
     rows = 30;
-    element = null;
+    element: HTMLElement | undefined;
     textarea = null;
 
     loadAddon() {}
-    open() {}
-    write() {}
+    open(host: HTMLElement) {
+      this.element = document.createElement("div");
+      host.appendChild(this.element);
+      terminalMocks.open(host);
+    }
+    write(data: string) {
+      terminalMocks.write(data);
+    }
+    refresh(start: number, end: number) {
+      terminalMocks.refresh(start, end);
+    }
     dispose() {}
     focus() {}
     input() {}
@@ -66,6 +89,10 @@ describe("TerminalPane multi-session split", () => {
   beforeEach(() => {
     mockInvoke.mockReset();
     mockInvoke.mockResolvedValue(undefined);
+    terminalMocks.open.mockReset();
+    terminalMocks.refresh.mockReset();
+    terminalMocks.write.mockReset();
+    eventHandlers.clear();
     vi.stubGlobal(
       "ResizeObserver",
       class {
@@ -83,6 +110,42 @@ describe("TerminalPane multi-session split", () => {
     });
   });
 
+  it("mounts a newly connected terminal in the visible pane and replays early output", async () => {
+    useSessionStore.setState({
+      activeSessionId: null,
+      terminalViewRevision: 0,
+      connectedSessionIds: [],
+      terminalIdsBySession: {},
+    });
+
+    render(<TerminalPane />);
+    await waitFor(() =>
+      expect(eventHandlers.has("terminal-output")).toBe(true),
+    );
+
+    act(() => {
+      eventHandlers.get("terminal-output")?.({
+        payload: {
+          sessionId: "alpha",
+          terminalId: "terminal-alpha",
+          data: "welcome\r\n",
+        },
+      });
+      useSessionStore.getState().addConnectedSession("alpha", "terminal-alpha");
+    });
+
+    expect(terminalMocks.open).not.toHaveBeenCalled();
+
+    act(() => {
+      useSessionStore.getState().showSession("alpha");
+    });
+
+    await waitFor(() => expect(terminalMocks.open).toHaveBeenCalledOnce());
+    const host = terminalMocks.open.mock.calls[0][0] as HTMLElement;
+    expect(host.closest(".terminal-split-cell-hidden")).toBeNull();
+    expect(terminalMocks.write).toHaveBeenCalledWith("welcome\r\n");
+  });
+
   it("keeps the original same-session split behavior", async () => {
     mockInvoke.mockImplementation((command) => {
       if (command === "create_terminal_split") {
@@ -95,7 +158,17 @@ describe("TerminalPane multi-session split", () => {
     });
 
     render(<TerminalPane />);
+    await waitFor(() => expect(terminalMocks.open).toHaveBeenCalledOnce());
+    const originalTerminalElement = (
+      terminalMocks.open.mock.calls[0][0] as HTMLElement
+    ).firstElementChild;
     fireEvent.click(screen.getByRole("button", { name: "Split terminal" }));
+    const splitOptions = screen.getByRole("dialog", {
+      name: "Split terminal options",
+    });
+    fireEvent.click(
+      within(splitOptions).getByRole("button", { name: "Split pane" }),
+    );
 
     await waitFor(() =>
       expect(mockInvoke).toHaveBeenCalledWith("create_terminal_split", {
@@ -113,6 +186,10 @@ describe("TerminalPane multi-session split", () => {
       "terminal-alpha",
       "terminal-alpha-2",
     ]);
+    expect(originalTerminalElement).toBeInTheDocument();
+    expect(
+      originalTerminalElement?.closest(".terminal-split-cell-hidden"),
+    ).toBeNull();
   });
 
   it("adds an already connected session beside the current session", async () => {
@@ -167,7 +244,7 @@ describe("TerminalPane multi-session split", () => {
     fireEvent.change(screen.getByLabelText("Password / key passphrase"), {
       target: { value: "beta-secret" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Add beside" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add pane" }));
 
     await waitFor(() => {
       const connectCall = mockInvoke.mock.calls.find(
@@ -194,5 +271,46 @@ describe("TerminalPane multi-session split", () => {
       "alpha",
       "beta",
     ]);
+  });
+
+  it("places a new split below the focused pane with the selected size", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "create_terminal_split") {
+        return Promise.resolve({
+          sessionId: "alpha",
+          terminalId: "terminal-alpha-bottom",
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<TerminalPane />);
+    fireEvent.click(screen.getByRole("button", { name: "Split terminal" }));
+    const splitOptions = screen.getByRole("dialog", {
+      name: "Split terminal options",
+    });
+    fireEvent.click(
+      within(splitOptions).getByRole("button", {
+        name: "Place new pane bottom",
+      }),
+    );
+    fireEvent.change(
+      within(splitOptions).getByRole("slider", { name: "New pane size" }),
+      { target: { value: "35" } },
+    );
+    fireEvent.click(
+      within(splitOptions).getByRole("button", { name: "Split pane" }),
+    );
+
+    const separator = await screen.findByRole("separator", {
+      name: "Resize terminal panes",
+    });
+    expect(separator).toHaveAttribute("aria-orientation", "horizontal");
+    expect(separator.parentElement).toHaveStyle({
+      gridTemplateRows: "65fr 6px 35fr",
+    });
+    expect(
+      screen.getAllByRole("group", { name: "Alpha terminal pane" }),
+    ).toHaveLength(2);
   });
 });

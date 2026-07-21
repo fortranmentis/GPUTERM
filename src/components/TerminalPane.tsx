@@ -4,6 +4,8 @@ import {
   useRef,
   useState,
   type FormEvent,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -13,6 +15,10 @@ import {
   ArrowLeft,
   Columns2,
   LoaderCircle,
+  PanelBottom,
+  PanelLeft,
+  PanelRight,
+  PanelTop,
   Plus,
   Server,
   Terminal as TerminalIcon,
@@ -27,6 +33,16 @@ import {
 } from "../utils/terminalBuffer";
 import { withHostKeyPrompt } from "../utils/hostKeyPrompt";
 import { attachWebKitHangulImeWorkaround } from "../utils/xtermHangulIme";
+import {
+  createTerminalLayout,
+  getTerminalLayoutPaneIds,
+  insertTerminalPane,
+  reconcileTerminalLayout,
+  removeTerminalPaneFromLayout,
+  updateTerminalSplitRatio,
+  type TerminalLayoutNode,
+  type TerminalSplitPlacement,
+} from "../utils/terminalLayout";
 import type {
   SessionConnectRequest,
   SessionProfile,
@@ -56,6 +72,71 @@ type TermEntry = {
 };
 
 const MAX_TERMINAL_PANES = 4;
+
+type SplitPlacementControlsProps = {
+  placement: TerminalSplitPlacement;
+  ratio: number;
+  onPlacementChange: (placement: TerminalSplitPlacement) => void;
+  onRatioChange: (ratio: number) => void;
+};
+
+function SplitPlacementControls({
+  placement,
+  ratio,
+  onPlacementChange,
+  onRatioChange,
+}: SplitPlacementControlsProps) {
+  const placements: Array<{
+    value: TerminalSplitPlacement;
+    label: string;
+    icon: typeof PanelLeft;
+  }> = [
+    { value: "left", label: "Left", icon: PanelLeft },
+    { value: "right", label: "Right", icon: PanelRight },
+    { value: "top", label: "Top", icon: PanelTop },
+    { value: "bottom", label: "Bottom", icon: PanelBottom },
+  ];
+
+  return (
+    <div className="terminal-split-options">
+      <fieldset>
+        <legend>New pane position</legend>
+        <div className="terminal-split-placement-grid">
+          {placements.map((option) => {
+            const Icon = option.icon;
+            return (
+              <button
+                key={option.value}
+                type="button"
+                className={placement === option.value ? "selected" : ""}
+                aria-pressed={placement === option.value}
+                aria-label={`Place new pane ${option.label.toLowerCase()}`}
+                onClick={() => onPlacementChange(option.value)}
+              >
+                <Icon size={15} />
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+      </fieldset>
+      <label className="terminal-split-ratio">
+        <span>
+          New pane size <output>{ratio}%</output>
+        </span>
+        <input
+          type="range"
+          min="20"
+          max="80"
+          step="5"
+          value={ratio}
+          aria-label="New pane size"
+          onChange={(event) => onRatioChange(Number(event.target.value))}
+        />
+      </label>
+    </div>
+  );
+}
 
 function createTerminal(): Terminal {
   return new Terminal({
@@ -125,11 +206,16 @@ export function TerminalPane() {
   const pendingOutputRef = useRef<Map<string, string>>(new Map());
   const activePaneIdsRef = useRef<string[]>([]);
   const fitTimerRef = useRef<number | null>(null);
+  const splitPickerRef = useRef<HTMLDivElement | null>(null);
   const sessionPickerRef = useRef<HTMLDivElement | null>(null);
   const lastTerminalViewRevisionRef = useRef<number | null>(null);
-  const [visiblePaneIds, setVisiblePaneIds] = useState<string[]>([]);
+  const [paneLayout, setPaneLayout] = useState<TerminalLayoutNode | null>(null);
   const [focusedTerminalId, setFocusedTerminalId] = useState<string | null>(null);
   const [splitting, setSplitting] = useState(false);
+  const [splitPickerOpen, setSplitPickerOpen] = useState(false);
+  const [splitPlacement, setSplitPlacement] =
+    useState<TerminalSplitPlacement>("right");
+  const [newPaneRatio, setNewPaneRatio] = useState(50);
   const [sessionPickerOpen, setSessionPickerOpen] = useState(false);
   const [selectedOtherSessionId, setSelectedOtherSessionId] = useState<
     string | null
@@ -143,6 +229,10 @@ export function TerminalPane() {
   const activeSessionPaneIds = activeSessionId
     ? terminalIdsBySession[activeSessionId] ?? []
     : [];
+  const visiblePaneIds = useMemo(
+    () => getTerminalLayoutPaneIds(paneLayout),
+    [paneLayout],
+  );
   const allTerminalIds = useMemo(
     () => Object.values(terminalIdsBySession).flat(),
     [terminalIdsBySession],
@@ -192,7 +282,7 @@ export function TerminalPane() {
       lastTerminalViewRevisionRef.current !== terminalViewRevision
     ) {
       lastTerminalViewRevisionRef.current = terminalViewRevision;
-      setVisiblePaneIds(activeSessionPaneIds);
+      setPaneLayout(createTerminalLayout(activeSessionPaneIds));
     }
   }, [
     activeSessionId,
@@ -201,14 +291,14 @@ export function TerminalPane() {
   ]);
 
   useEffect(() => {
-    setVisiblePaneIds((current) => {
-      const next = current.filter((terminalId) =>
+    setPaneLayout((current) => {
+      const currentIds = getTerminalLayoutPaneIds(current);
+      const retainedIds = currentIds.filter((terminalId) =>
         allTerminalIds.includes(terminalId),
       );
-      if (next.length === 0 && activeSessionPaneIds.length > 0) {
-        return activeSessionPaneIds;
-      }
-      return next.length === current.length ? current : next;
+      const desiredIds =
+        retainedIds.length > 0 ? retainedIds : activeSessionPaneIds;
+      return reconcileTerminalLayout(current, desiredIds);
     });
   }, [activeSessionPaneIds.join("|"), allTerminalIds.join("|")]);
 
@@ -220,6 +310,7 @@ export function TerminalPane() {
       }
       try {
         entry.fitAddon.fit();
+        entry.terminal.refresh(0, Math.max(0, entry.terminal.rows - 1));
         if (entry.writable) {
           invoke("terminal_resize", {
             terminalId,
@@ -241,6 +332,27 @@ export function TerminalPane() {
       fitTimerRef.current = null;
       fitVisiblePanes();
     }, delayMs);
+  };
+
+  const registerTerminalHost = (
+    terminalId: string,
+    element: HTMLDivElement | null,
+  ) => {
+    if (!element) {
+      hostRefs.current.delete(terminalId);
+      return;
+    }
+
+    hostRefs.current.set(terminalId, element);
+    const entry = instancesRef.current.get(terminalId);
+    const terminalElement = entry?.terminal.element;
+    if (entry && terminalElement && terminalElement.parentElement !== element) {
+      // A pane can move to a different branch when the split layout changes.
+      // Keep the existing xterm DOM and scrollback attached to the new host
+      // instead of leaving it inside the detached React element.
+      element.appendChild(terminalElement);
+      scheduleFit(0);
+    }
   };
 
   const flushInput = async (terminalId: string, entry: TermEntry) => {
@@ -277,7 +389,11 @@ export function TerminalPane() {
   useEffect(() => {
     for (const terminalId of allTerminalIds) {
       const host = hostRefs.current.get(terminalId);
-      if (!host || instancesRef.current.has(terminalId)) {
+      if (
+        !host ||
+        !visiblePaneIds.includes(terminalId) ||
+        instancesRef.current.has(terminalId)
+      ) {
         continue;
       }
       const terminal = createTerminal();
@@ -319,7 +435,7 @@ export function TerminalPane() {
     }
 
     scheduleFit(60);
-  }, [allTerminalIds]);
+  }, [allTerminalIds.join("|"), visiblePaneIds.join("|")]);
 
   useEffect(() => {
     const nextFocused =
@@ -344,12 +460,17 @@ export function TerminalPane() {
   }, [focusedTerminalId]);
 
   useEffect(() => {
-    if (!sessionPickerOpen) {
+    if (!sessionPickerOpen && !splitPickerOpen) {
       return;
     }
     const handlePointerDown = (event: MouseEvent) => {
-      if (!sessionPickerRef.current?.contains(event.target as Node)) {
+      const target = event.target as Node;
+      if (
+        !sessionPickerRef.current?.contains(target) &&
+        !splitPickerRef.current?.contains(target)
+      ) {
         setSessionPickerOpen(false);
+        setSplitPickerOpen(false);
         setSelectedOtherSessionId(null);
         setOtherSessionPassword("");
         setOtherProxyPassword("");
@@ -358,6 +479,7 @@ export function TerminalPane() {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setSessionPickerOpen(false);
+        setSplitPickerOpen(false);
         setSelectedOtherSessionId(null);
         setOtherSessionPassword("");
         setOtherProxyPassword("");
@@ -369,7 +491,7 @@ export function TerminalPane() {
       document.removeEventListener("mousedown", handlePointerDown);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [sessionPickerOpen]);
+  }, [sessionPickerOpen, splitPickerOpen]);
 
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -446,6 +568,63 @@ export function TerminalPane() {
     }
   };
 
+  const closeSplitPicker = () => setSplitPickerOpen(false);
+
+  const insertPaneIntoLayout = (
+    terminalId: string,
+    targetTerminalId = focusedTerminalId,
+  ) => {
+    setPaneLayout((current) =>
+      insertTerminalPane(
+        current,
+        targetTerminalId,
+        terminalId,
+        splitPlacement,
+        newPaneRatio,
+      ),
+    );
+  };
+
+  const startPaneResize = (
+    event: ReactMouseEvent<HTMLDivElement>,
+    path: readonly ("first" | "second")[],
+    direction: "horizontal" | "vertical",
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const splitElement = event.currentTarget.parentElement;
+    if (!splitElement) {
+      return;
+    }
+
+    const bounds = splitElement.getBoundingClientRect();
+    const previousUserSelect = document.body.style.userSelect;
+    const previousCursor = document.body.style.cursor;
+    const cursor = direction === "horizontal" ? "col-resize" : "row-resize";
+    document.body.style.userSelect = "none";
+    document.body.style.cursor = cursor;
+
+    const handleMove = (moveEvent: MouseEvent) => {
+      const ratio =
+        direction === "horizontal"
+          ? ((moveEvent.clientX - bounds.left) / bounds.width) * 100
+          : ((moveEvent.clientY - bounds.top) / bounds.height) * 100;
+      setPaneLayout((current) =>
+        updateTerminalSplitRatio(current, path, ratio),
+      );
+      scheduleFit(0);
+    };
+    const handleUp = () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", handleUp);
+      document.body.style.userSelect = previousUserSelect;
+      document.body.style.cursor = previousCursor;
+      scheduleFit(20);
+    };
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", handleUp);
+  };
+
   const addSplit = async () => {
     const sourceTerminalId =
       focusedTerminalId && visiblePaneIds.includes(focusedTerminalId)
@@ -474,8 +653,9 @@ export function TerminalPane() {
         rows: source?.rows ?? 24,
       });
       addTerminalPane(sourceSessionId, info.terminalId);
-      setVisiblePaneIds((current) => [...current, info.terminalId]);
+      insertPaneIntoLayout(info.terminalId, sourceTerminalId);
       focusPane(info.terminalId, sourceSessionId);
+      closeSplitPicker();
     } catch (error) {
       setMessage({ kind: "error", text: String(error) });
     } finally {
@@ -490,9 +670,10 @@ export function TerminalPane() {
     }
     try {
       await invoke("disconnect_terminal_pane", { terminalId });
-      const remaining = visiblePaneIds.filter((id) => id !== terminalId);
+      const nextLayout = removeTerminalPaneFromLayout(paneLayout, terminalId);
+      const remaining = getTerminalLayoutPaneIds(nextLayout);
       removeTerminalPane(sessionId, terminalId);
-      setVisiblePaneIds(remaining);
+      setPaneLayout(nextLayout);
       const nextTerminalId = remaining[0] ?? null;
       if (nextTerminalId) {
         focusPane(nextTerminalId);
@@ -515,9 +696,9 @@ export function TerminalPane() {
     profile: SessionProfile,
     terminalId: string,
   ) => {
-    setVisiblePaneIds((current) =>
-      current.includes(terminalId) ? current : [...current, terminalId],
-    );
+    if (!visiblePaneIds.includes(terminalId)) {
+      insertPaneIntoLayout(terminalId);
+    }
     focusPane(terminalId, profile.id);
     closeSessionPicker();
   };
@@ -566,12 +747,12 @@ export function TerminalPane() {
       );
       const terminalId = info.terminalId ?? info.sessionId;
       addConnectedSession(info.sessionId, terminalId);
-      setVisiblePaneIds((current) => [...current, terminalId]);
+      insertPaneIntoLayout(terminalId);
       focusPane(terminalId, info.sessionId);
       closeSessionPicker();
       setMessage({
         kind: "success",
-        text: `${info.profile.name} added beside the current terminal`,
+        text: `${info.profile.name} added to the terminal layout`,
       });
     } catch (error) {
       setMessage({ kind: "error", text: String(error) });
@@ -581,6 +762,102 @@ export function TerminalPane() {
   };
 
   const disconnect = useDisconnectSession();
+
+  const renderTerminalCell = (terminalId: string, visible: boolean) => {
+    const paneSessionId = sessionIdByTerminalId.get(terminalId);
+    const paneProfile = sessions.find(
+      (session) => session.id === paneSessionId,
+    );
+    return (
+      <div
+        key={terminalId}
+        role={visible ? "group" : undefined}
+        aria-label={
+          visible ? `${paneProfile?.name ?? "SSH"} terminal pane` : undefined
+        }
+        className={`terminal-split-cell ${
+          visible ? "" : "terminal-split-cell-hidden"
+        } ${visible && terminalId === focusedTerminalId ? "focused" : ""} ${
+          visible && visibleSessionIds.size > 1 ? "mixed-session" : ""
+        }`}
+        onMouseDown={() => {
+          if (visible) {
+            focusPane(terminalId);
+          }
+        }}
+      >
+        {visible && visibleSessionIds.size > 1 && (
+          <span
+            className="terminal-split-session-label"
+            title={
+              paneProfile
+                ? `${paneProfile.name} (${paneProfile.username}@${paneProfile.host})`
+                : paneSessionId
+            }
+          >
+            {paneProfile?.name ?? "SSH"}
+          </span>
+        )}
+        {visible && visiblePaneIds.length > 1 && (
+          <button
+            className="terminal-split-close"
+            type="button"
+            aria-label="Close terminal pane"
+            title="Close terminal pane"
+            onClick={(event) => {
+              event.stopPropagation();
+              void closeSplit(terminalId);
+            }}
+          >
+            <X size={13} />
+          </button>
+        )}
+        <div
+          className="xterm-host"
+          ref={(element) => registerTerminalHost(terminalId, element)}
+        />
+      </div>
+    );
+  };
+
+  const renderLayoutNode = (
+    node: TerminalLayoutNode,
+    path: readonly ("first" | "second")[] = [],
+  ): ReactNode => {
+    if (node.type === "pane") {
+      return renderTerminalCell(node.terminalId, true);
+    }
+
+    const horizontal = node.direction === "horizontal";
+    const style = horizontal
+      ? { gridTemplateColumns: `${node.ratio}fr 6px ${100 - node.ratio}fr` }
+      : { gridTemplateRows: `${node.ratio}fr 6px ${100 - node.ratio}fr` };
+    return (
+      <div
+        className={`terminal-split-node ${node.direction}`}
+        style={style}
+      >
+        <div className="terminal-split-child">
+          {renderLayoutNode(node.first, [...path, "first"])}
+        </div>
+        <div
+          className="terminal-pane-divider"
+          role="separator"
+          aria-label="Resize terminal panes"
+          aria-orientation={horizontal ? "vertical" : "horizontal"}
+          aria-valuemin={15}
+          aria-valuemax={85}
+          aria-valuenow={node.ratio}
+          onMouseDown={(event) =>
+            startPaneResize(event, path, node.direction)
+          }
+        />
+        <div className="terminal-split-child">
+          {renderLayoutNode(node.second, [...path, "second"])}
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div className="terminal-pane">
@@ -601,24 +878,60 @@ export function TerminalPane() {
           )}
         </div>
         <div className="terminal-tab-actions">
-          <button
-            className="icon-button"
-            type="button"
-            disabled={
-              !isFocusedConnected ||
-              splitting ||
-              visiblePaneIds.length >= MAX_TERMINAL_PANES
-            }
-            aria-label="Split terminal"
-            title="Split focused session"
-            onClick={addSplit}
-          >
-            {splitting ? (
-              <LoaderCircle className="spin" size={16} />
-            ) : (
-              <Columns2 size={16} />
+          <div className="terminal-split-picker-anchor" ref={splitPickerRef}>
+            <button
+              className="icon-button"
+              type="button"
+              disabled={
+                !isFocusedConnected ||
+                splitting ||
+                visiblePaneIds.length >= MAX_TERMINAL_PANES
+              }
+              aria-label="Split terminal"
+              title="Split focused session"
+              aria-expanded={splitPickerOpen}
+              onClick={() => {
+                setSessionPickerOpen(false);
+                setSplitPickerOpen((open) => !open);
+              }}
+            >
+              {splitting ? (
+                <LoaderCircle className="spin" size={16} />
+              ) : (
+                <Columns2 size={16} />
+              )}
+            </button>
+            {splitPickerOpen && (
+              <div
+                className="terminal-split-picker"
+                role="dialog"
+                aria-label="Split terminal options"
+              >
+                <div className="terminal-session-picker-heading">
+                  Split focused pane
+                </div>
+                <SplitPlacementControls
+                  placement={splitPlacement}
+                  ratio={newPaneRatio}
+                  onPlacementChange={setSplitPlacement}
+                  onRatioChange={setNewPaneRatio}
+                />
+                <button
+                  className="primary-button"
+                  type="button"
+                  disabled={splitting}
+                  onClick={() => void addSplit()}
+                >
+                  {splitting ? (
+                    <LoaderCircle className="spin" size={15} />
+                  ) : (
+                    <Columns2 size={15} />
+                  )}
+                  Split pane
+                </button>
+              </div>
             )}
-          </button>
+          </div>
           <div className="terminal-session-picker-anchor" ref={sessionPickerRef}>
             <button
               className="icon-button"
@@ -629,12 +942,13 @@ export function TerminalPane() {
                 otherSessions.length === 0
               }
               aria-label="Add another session"
-              title="Add another session beside this terminal"
+              title="Add another session to this terminal layout"
               aria-expanded={sessionPickerOpen}
               onClick={() => {
                 if (sessionPickerOpen) {
                   closeSessionPicker();
                 } else {
+                  setSplitPickerOpen(false);
                   setSessionPickerOpen(true);
                 }
               }}
@@ -651,6 +965,12 @@ export function TerminalPane() {
                 role="dialog"
                 aria-label="Add another session"
               >
+                <SplitPlacementControls
+                  placement={splitPlacement}
+                  ratio={newPaneRatio}
+                  onPlacementChange={setSplitPlacement}
+                  onRatioChange={setNewPaneRatio}
+                />
                 {selectedOtherProfile ? (
                   <form onSubmit={connectOtherSession}>
                     <div className="terminal-session-picker-title">
@@ -707,7 +1027,7 @@ export function TerminalPane() {
                       ) : (
                         <Plus size={15} />
                       )}
-                      Add beside
+                      Add pane
                     </button>
                   </form>
                 ) : (
@@ -756,79 +1076,11 @@ export function TerminalPane() {
         {visiblePaneIds.length === 0 && (
           <div className="terminal-empty">No active SSH session</div>
         )}
-        <div
-          className="terminal-split-grid"
-          style={{
-            gridTemplateColumns: `repeat(${Math.max(1, visiblePaneIds.length)}, minmax(0, 1fr))`,
-          }}
-        >
-          {renderTerminalIds.map((terminalId) => {
-            const visible = visiblePaneIds.includes(terminalId);
-            const paneSessionId = sessionIdByTerminalId.get(terminalId);
-            const paneProfile = sessions.find(
-              (session) => session.id === paneSessionId,
-            );
-            return (
-              <div
-                key={terminalId}
-                role={visible ? "group" : undefined}
-                aria-label={
-                  visible
-                    ? `${paneProfile?.name ?? "SSH"} terminal pane`
-                    : undefined
-                }
-                className={`terminal-split-cell ${
-                  visible ? "" : "terminal-split-cell-hidden"
-                } ${
-                  visible && terminalId === focusedTerminalId ? "focused" : ""
-                } ${
-                  visible && visibleSessionIds.size > 1 ? "mixed-session" : ""
-                }`}
-                onMouseDown={() => {
-                  if (visible) {
-                    focusPane(terminalId);
-                  }
-                }}
-              >
-                {visible && visibleSessionIds.size > 1 && (
-                  <span
-                    className="terminal-split-session-label"
-                    title={
-                      paneProfile
-                        ? `${paneProfile.name} (${paneProfile.username}@${paneProfile.host})`
-                        : paneSessionId
-                    }
-                  >
-                    {paneProfile?.name ?? "SSH"}
-                  </span>
-                )}
-                {visible && visiblePaneIds.length > 1 && (
-                  <button
-                    className="terminal-split-close"
-                    type="button"
-                    aria-label="Close terminal pane"
-                    title="Close terminal pane"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      void closeSplit(terminalId);
-                    }}
-                  >
-                    <X size={13} />
-                  </button>
-                )}
-                <div
-                  className="xterm-host"
-                  ref={(element) => {
-                    if (element) {
-                      hostRefs.current.set(terminalId, element);
-                    } else {
-                      hostRefs.current.delete(terminalId);
-                    }
-                  }}
-                />
-              </div>
-            );
-          })}
+        <div className="terminal-split-grid">
+          {paneLayout && renderLayoutNode(paneLayout)}
+          {renderTerminalIds
+            .filter((terminalId) => !visiblePaneIds.includes(terminalId))
+            .map((terminalId) => renderTerminalCell(terminalId, false))}
         </div>
       </div>
     </div>
