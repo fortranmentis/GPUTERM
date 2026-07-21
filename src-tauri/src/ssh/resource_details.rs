@@ -1,19 +1,20 @@
-use crate::ssh::parse_util::{
-    kib_to_mib, optional_string, parse_average_clock, parse_cpu_model, parse_first_u64,
-    parse_loadavg, parse_lscpu_value, parse_meminfo_values, parse_optional_f64,
-    parse_optional_u64, required_section, split_sections,
-};
+use crate::ssh::gpu_monitor::GPU_PROBE_COMMAND;
 use crate::ssh::gpu_monitor::{parse_gpu_probe, GpuMetric};
 use crate::ssh::macos_monitor::{
     parse_kern_boottime, parse_macos_cpu_output, parse_swapusage, parse_vm_stat,
     MACOS_CPU_DETAIL_COMMAND, MACOS_MEMORY_DETAIL_COMMAND,
 };
+use crate::ssh::parse_util::{
+    kib_to_mib, optional_string, parse_average_clock, parse_cpu_model, parse_first_u64,
+    parse_loadavg, parse_lscpu_value, parse_meminfo_values, parse_optional_f64, parse_optional_u64,
+    required_section, split_sections,
+};
 use crate::ssh::session::{target_for_active_session, with_ops_session, AppState};
 use crate::ssh::system_monitor::{
-    calculate_cpu_usage, collect_gpu_metrics, detect_remote_os, run_remote_command,
-    run_remote_command_for, RemoteOs, WINDOWS_COMMAND_TIMEOUT_MS,
+    calculate_cpu_usage, collect_gpu_metrics, collect_local_gpu_metrics, detect_remote_os,
+    local_os, run_local_command_for, run_remote_command, run_remote_command_for, RemoteOs,
+    WINDOWS_COMMAND_TIMEOUT_MS,
 };
-use crate::ssh::gpu_monitor::GPU_PROBE_COMMAND;
 use crate::ssh::windows_monitor::{
     parse_windows_cpu_info, parse_windows_cpu_times, parse_windows_gpu_counters,
     parse_windows_gpu_probe, parse_windows_memory_output, parse_windows_process_identity,
@@ -157,6 +158,29 @@ pub async fn get_resource_details(
     resource_type: String,
 ) -> Result<ResourceDetails, String> {
     let resource_type = ResourceType::parse(&resource_type)?;
+    let is_local = state
+        .active_connections
+        .lock()
+        .map_err(|_| "Active session state is unavailable".to_string())?
+        .get(&session_id)
+        .map(|connection| connection.profile.is_local)
+        .ok_or_else(|| "No active terminal session is available".to_string())?;
+    if is_local {
+        return tauri::async_runtime::spawn_blocking(move || {
+            let mut details = ResourceDetails::default();
+            match collect_local_details(resource_type) {
+                Ok(ResourceDetailValue::Cpu(metric)) => details.cpu = Some(metric),
+                Ok(ResourceDetailValue::Memory(metric)) => details.memory = Some(metric),
+                Ok(ResourceDetailValue::Gpu(metrics)) => details.gpus = metrics,
+                Err(error) => {
+                    details.set_error(resource_type, format!("Metrics unavailable: {}", error))
+                }
+            }
+            details
+        })
+        .await
+        .map_err(|error| format!("Local resource detail task failed: {}", error));
+    }
     let target = target_for_active_session(&state, &session_id)?;
     let ops = Arc::clone(&state.ops_sessions);
     let os_cache = Arc::clone(&state.remote_os_cache);
@@ -175,12 +199,50 @@ pub async fn get_resource_details(
             Ok(ResourceDetailValue::Cpu(metric)) => details.cpu = Some(metric),
             Ok(ResourceDetailValue::Memory(metric)) => details.memory = Some(metric),
             Ok(ResourceDetailValue::Gpu(metrics)) => details.gpus = metrics,
-            Err(error) => details.set_error(resource_type, format!("Metrics unavailable: {}", error)),
+            Err(error) => {
+                details.set_error(resource_type, format!("Metrics unavailable: {}", error))
+            }
         }
         details
     })
     .await
     .map_err(|error| format!("Resource detail task failed: {}", error))
+}
+
+fn collect_local_details(resource_type: ResourceType) -> Result<ResourceDetailValue, String> {
+    let os = local_os();
+    match (resource_type, os) {
+        (ResourceType::Cpu, RemoteOs::Linux) => run_local_command_for(os, CPU_DETAIL_COMMAND)
+            .and_then(|output| parse_cpu_detail_output(&output))
+            .map(ResourceDetailValue::Cpu),
+        (ResourceType::Cpu, RemoteOs::MacOs) => run_local_command_for(os, MACOS_CPU_DETAIL_COMMAND)
+            .and_then(|output| parse_macos_cpu_detail_output(&output))
+            .map(ResourceDetailValue::Cpu),
+        (ResourceType::Cpu, RemoteOs::Windows) => {
+            run_local_command_for(os, WINDOWS_CPU_DETAIL_COMMAND)
+                .and_then(|output| parse_windows_cpu_detail_output(&output))
+                .map(ResourceDetailValue::Cpu)
+        }
+        (ResourceType::Memory, RemoteOs::Linux) => run_local_command_for(os, MEMORY_DETAIL_COMMAND)
+            .and_then(|output| parse_memory_detail_output(&output))
+            .map(ResourceDetailValue::Memory),
+        (ResourceType::Memory, RemoteOs::MacOs) => {
+            run_local_command_for(os, MACOS_MEMORY_DETAIL_COMMAND)
+                .and_then(|output| parse_macos_memory_detail_output(&output))
+                .map(ResourceDetailValue::Memory)
+        }
+        (ResourceType::Memory, RemoteOs::Windows) => {
+            run_local_command_for(os, WINDOWS_MEMORY_DETAIL_COMMAND)
+                .and_then(|output| parse_windows_memory_detail_output(&output))
+                .map(ResourceDetailValue::Memory)
+        }
+        (ResourceType::Gpu, _) => {
+            let mut probe = None;
+            collect_local_gpu_metrics(os, &mut probe)
+                .map(|metrics| metrics.into_iter().map(gpu_metric_to_detail).collect())
+                .map(ResourceDetailValue::Gpu)
+        }
+    }
 }
 
 impl ResourceDetails {
@@ -229,11 +291,9 @@ fn collect_details(
     os: RemoteOs,
 ) -> Result<ResourceDetailValue, String> {
     match (resource_type, os) {
-        (ResourceType::Cpu, RemoteOs::Linux) => {
-            run_remote_command(session, CPU_DETAIL_COMMAND)
-                .and_then(|output| parse_cpu_detail_output(&output))
-                .map(ResourceDetailValue::Cpu)
-        }
+        (ResourceType::Cpu, RemoteOs::Linux) => run_remote_command(session, CPU_DETAIL_COMMAND)
+            .and_then(|output| parse_cpu_detail_output(&output))
+            .map(ResourceDetailValue::Cpu),
         (ResourceType::Cpu, RemoteOs::MacOs) => {
             run_remote_command(session, MACOS_CPU_DETAIL_COMMAND)
                 .and_then(|output| parse_macos_cpu_detail_output(&output))
@@ -358,7 +418,9 @@ fn parse_macos_cpu_detail_output(output: &str) -> Result<CpuDetailMetric, String
     let base = parse_macos_cpu_output(output)?;
     let sections = split_sections(output);
     let uptime_seconds = match (
-        sections.get("BOOTTIME").and_then(|value| parse_kern_boottime(value)),
+        sections
+            .get("BOOTTIME")
+            .and_then(|value| parse_kern_boottime(value)),
         sections.get("NOW").and_then(|value| parse_first_u64(value)),
     ) {
         (Some(boot), Some(now)) if now > boot => Some((now - boot) as f64),
@@ -396,10 +458,9 @@ fn parse_macos_memory_detail_output(output: &str) -> Result<MemoryDetailMetric, 
         .and_then(parse_vm_stat)
         .ok_or_else(|| "macOS memory details unavailable (vm_stat missing)".to_string())?;
     let count = |label: &str| pages.get(label).copied().unwrap_or(0);
-    let used_bytes = (count("Pages active")
-        + count("Pages wired down")
-        + count("Pages occupied by compressor"))
-        * page_size;
+    let used_bytes =
+        (count("Pages active") + count("Pages wired down") + count("Pages occupied by compressor"))
+            * page_size;
     let free_bytes = count("Pages free") * page_size;
     let cached_bytes = pages
         .get("File-backed pages")
@@ -612,7 +673,11 @@ fn parse_cpu_detail_output(output: &str) -> Result<CpuDetailMetric, String> {
         .filter(|name| name.starts_with("cpu") && *name != "cpu")
         .cloned()
         .collect::<Vec<_>>();
-    logical_names.sort_by_key(|name| name.trim_start_matches("cpu").parse::<u32>().unwrap_or(u32::MAX));
+    logical_names.sort_by_key(|name| {
+        name.trim_start_matches("cpu")
+            .parse::<u32>()
+            .unwrap_or(u32::MAX)
+    });
     let logical_core_usage_percent = logical_names
         .iter()
         .map(|name| calculate_sample_usage(first.get(name), second.get(name)))
@@ -641,9 +706,15 @@ fn parse_cpu_detail_output(output: &str) -> Result<CpuDetailMetric, String> {
         load_avg15: load.2,
         total_cores,
         online_cores,
-        avg_clock_ghz: parse_average_clock(cpuinfo)
-            .or_else(|| parse_lscpu_value(lscpu, "CPU MHz").and_then(|value| value.parse::<f64>().ok()).map(|mhz| mhz / 1000.0)),
-        uptime_seconds: sections.get("UPTIME").and_then(|value| value.split_whitespace().next()).and_then(|value| value.parse().ok()),
+        avg_clock_ghz: parse_average_clock(cpuinfo).or_else(|| {
+            parse_lscpu_value(lscpu, "CPU MHz")
+                .and_then(|value| value.parse::<f64>().ok())
+                .map(|mhz| mhz / 1000.0)
+        }),
+        uptime_seconds: sections
+            .get("UPTIME")
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse().ok()),
         logical_core_usage_percent,
         top_processes: sections
             .get("PROCESSES")
@@ -743,7 +814,11 @@ struct GpuProcessRow {
 
 fn parse_gpu_process_output(output: &str) -> Result<Vec<GpuProcessRow>, String> {
     let mut rows = Vec::new();
-    for line in output.lines().map(str::trim).filter(|line| !line.is_empty()) {
+    for line in output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
         let fields = line.split(',').map(str::trim).collect::<Vec<_>>();
         if fields.len() < 4 {
             continue;
@@ -767,13 +842,22 @@ fn parse_gpu_detail_output(
     identity: &HashMap<u32, (Option<String>, Option<String>)>,
 ) -> Result<Vec<GpuDetailMetric>, String> {
     let mut metrics = Vec::new();
-    for line in output.lines().map(str::trim).filter(|line| !line.is_empty()) {
+    for line in output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
         let fields = line.split(',').map(str::trim).collect::<Vec<_>>();
         if fields.len() < 18 {
-            return Err(format!("unexpected nvidia-smi GPU detail column count {}", fields.len()));
+            return Err(format!(
+                "unexpected nvidia-smi GPU detail column count {}",
+                fields.len()
+            ));
         }
         metrics.push(GpuDetailMetric {
-            index: fields[0].parse().map_err(|_| "invalid GPU index".to_string())?,
+            index: fields[0]
+                .parse()
+                .map_err(|_| "invalid GPU index".to_string())?,
             name: fields[1].to_string(),
             uuid: fields[2].to_string(),
             driver_version: optional_string(fields[3]),
@@ -824,7 +908,8 @@ fn parse_gpu_detail_output(
         }
     }
     for gpu in &mut metrics {
-        gpu.processes.sort_by_key(|process| std::cmp::Reverse(process.used_memory_mi_b));
+        gpu.processes
+            .sort_by_key(|process| std::cmp::Reverse(process.used_memory_mi_b));
     }
     Ok(metrics)
 }
@@ -853,15 +938,28 @@ fn parse_cpu_samples(output: &str) -> Result<HashMap<String, CpuSample>, String>
     for line in output.lines().filter(|line| line.starts_with("cpu")) {
         let mut fields = line.split_whitespace();
         let Some(name) = fields.next() else { continue };
-        if name != "cpu" && !name.trim_start_matches("cpu").chars().all(|value| value.is_ascii_digit()) {
+        if name != "cpu"
+            && !name
+                .trim_start_matches("cpu")
+                .chars()
+                .all(|value| value.is_ascii_digit())
+        {
             continue;
         }
-        let values = fields.filter_map(|value| value.parse::<u64>().ok()).collect::<Vec<_>>();
+        let values = fields
+            .filter_map(|value| value.parse::<u64>().ok())
+            .collect::<Vec<_>>();
         if values.len() < 4 {
             continue;
         }
         let idle = values.get(3).copied().unwrap_or(0) + values.get(4).copied().unwrap_or(0);
-        samples.insert(name.to_string(), CpuSample { idle, total: values.iter().sum() });
+        samples.insert(
+            name.to_string(),
+            CpuSample {
+                idle,
+                total: values.iter().sum(),
+            },
+        );
     }
     if !samples.contains_key("cpu") {
         return Err("missing aggregate CPU sample".to_string());
@@ -869,12 +967,16 @@ fn parse_cpu_samples(output: &str) -> Result<HashMap<String, CpuSample>, String>
     Ok(samples)
 }
 
-fn calculate_sample_usage(previous: Option<&CpuSample>, current: Option<&CpuSample>) -> Option<f64> {
+fn calculate_sample_usage(
+    previous: Option<&CpuSample>,
+    current: Option<&CpuSample>,
+) -> Option<f64> {
     let previous = previous?;
     let current = current?;
     let total = current.total.checked_sub(previous.total)?;
     let idle = current.idle.checked_sub(previous.idle)?;
-    (total > 0).then_some(((total.saturating_sub(idle)) as f64 / total as f64 * 100.0).clamp(0.0, 100.0))
+    (total > 0)
+        .then_some(((total.saturating_sub(idle)) as f64 / total as f64 * 100.0).clamp(0.0, 100.0))
 }
 
 #[cfg(test)]
@@ -883,7 +985,8 @@ mod tests {
 
     #[test]
     fn parses_cpu_process_output() {
-        let rows = parse_cpu_processes("42 root 87.5 1.2 01:20 python3\n7 user 12.0 0.5 00:10 worker\n");
+        let rows =
+            parse_cpu_processes("42 root 87.5 1.2 01:20 python3\n7 user 12.0 0.5 00:10 worker\n");
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].pid, 42);
         assert_eq!(rows[0].cpu_percent, Some(87.5));
@@ -917,13 +1020,17 @@ mod tests {
         let metrics = parse_gpu_detail_output(gpu_output, processes, &identity).unwrap();
         assert_eq!(metrics[0].processes.len(), 1);
         assert_eq!(metrics[0].processes[0].user.as_deref(), Some("alice"));
-        assert_eq!(metrics[0].processes[0].command.as_deref(), Some("python train.py --epochs 10"));
+        assert_eq!(
+            metrics[0].processes[0].command.as_deref(),
+            Some("python train.py --epochs 10")
+        );
     }
 
     #[test]
     fn joins_gpu_processes_with_windows_process_identity() {
         let gpu_output = "0, NVIDIA RTX 4090, GPU-win, 560.94, 300, 450, 60, 90, 40, 24564, 12000, 12564, 55, 2520, 10501, 00000000:01:00.0, N/A, N/A\n";
-        let processes = parse_gpu_process_output("GPU-win, 4242, C:\\Python\\python.exe, 8192\n").unwrap();
+        let processes =
+            parse_gpu_process_output("GPU-win, 4242, C:\\Python\\python.exe, 8192\n").unwrap();
         let identity = parse_windows_process_identity(
             "{\"ProcessId\":4242,\"Name\":\"python.exe\",\"CommandLine\":\"python train.py\"}",
         );
@@ -931,7 +1038,10 @@ mod tests {
         assert_eq!(metrics[0].processes.len(), 1);
         // Win32_Process exposes no owner without elevation.
         assert_eq!(metrics[0].processes[0].user, None);
-        assert_eq!(metrics[0].processes[0].command.as_deref(), Some("python train.py"));
+        assert_eq!(
+            metrics[0].processes[0].command.as_deref(),
+            Some("python train.py")
+        );
         assert_eq!(metrics[0].processes[0].used_memory_mi_b, Some(8192));
     }
 
@@ -947,7 +1057,10 @@ mod tests {
             "__PROC_2__\n[{\"Id\":4242,\"Name\":\"python\",\"CpuSeconds\":11.0,\"WorkingSet64\":536870912},{\"Id\":7,\"Name\":\"idleapp\",\"CpuSeconds\":5.0,\"WorkingSet64\":1048576}]\n",
         );
         let detail = parse_windows_cpu_detail_output(output).unwrap();
-        assert_eq!(detail.model_name.as_deref(), Some("Intel(R) Core(TM) i7-13700K"));
+        assert_eq!(
+            detail.model_name.as_deref(),
+            Some("Intel(R) Core(TM) i7-13700K")
+        );
         assert_eq!(detail.total_cores, Some(24));
         assert_eq!(detail.uptime_seconds, Some(86400.0));
         assert_eq!(detail.load_avg1, None);

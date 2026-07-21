@@ -1,4 +1,4 @@
-use crate::ssh::credentials::{CredentialStore, MemoryCredentialStore};
+use crate::ssh::credentials::{CredentialStore, CredentialVaultStatus, SecureCredentialStore};
 use crate::ssh::system_monitor::{RemoteOs, SystemMonitorSettings};
 use crate::ssh::terminal::TerminalHandle;
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+use tauri::State;
 use uuid::Uuid;
 
 /// Shared per-session SSH connections reused for short operations
@@ -22,13 +23,17 @@ use uuid::Uuid;
 /// hence the per-entry mutex.
 pub type OpsSessions = Arc<Mutex<HashMap<String, Arc<Mutex<SshConnection>>>>>;
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Default)]
 pub struct AppState {
     pub terminals: Arc<Mutex<HashMap<String, TerminalHandle>>>,
     pub active_connections: Arc<Mutex<HashMap<String, ActiveConnection>>>,
     pub telemetry_stops: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     pub telemetry_settings: Arc<Mutex<SystemMonitorSettings>>,
-    pub credentials: MemoryCredentialStore,
+    pub credentials: SecureCredentialStore,
     pub ops_sessions: OpsSessions,
     pub transfer_cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
     /// Remote OS per session, detected once by the detail path so popover
@@ -49,6 +54,9 @@ pub struct SessionProfile {
     pub host: String,
     pub port: u16,
     pub username: String,
+    /// Opens a shell on the machine running GpuTerm instead of using SSH.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_local: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_key_path: Option<String>,
     /// Id of another saved profile to tunnel through (ProxyJump).
@@ -65,6 +73,8 @@ pub struct SessionConnectRequest {
     pub port: u16,
     pub username: String,
     #[serde(default)]
+    pub is_local: bool,
+    #[serde(default)]
     pub password: Option<String>,
     #[serde(default)]
     pub private_key_path: Option<String>,
@@ -72,6 +82,9 @@ pub struct SessionConnectRequest {
     pub proxy_jump_id: Option<String>,
     #[serde(default)]
     pub proxy_jump_password: Option<String>,
+    /// Reuses credentials held only in memory for double-click reconnects.
+    #[serde(default)]
+    pub reuse_stored_credentials: bool,
     #[serde(default)]
     pub cols: Option<u32>,
     #[serde(default)]
@@ -84,6 +97,8 @@ pub struct TerminalSessionInfo {
     pub session_id: String,
     pub terminal_id: String,
     pub profile: SessionProfile,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_warning: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -109,26 +124,108 @@ pub fn save_session(profile: SessionProfile) -> Result<Vec<SessionProfile>, Stri
 }
 
 #[tauri::command]
-pub fn delete_session(id: String) -> Result<Vec<SessionProfile>, String> {
-    let mut profiles = read_profiles()?;
-    profiles.retain(|profile| profile.id != id);
-    write_profiles(&profiles)?;
-    Ok(profiles)
+pub async fn delete_session(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<SessionProfile>, String> {
+    let credentials = state.credentials.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut profiles = read_profiles()?;
+        profiles.retain(|profile| profile.id != id);
+        credentials.clear_password(&id)?;
+        write_profiles(&profiles)?;
+        Ok(profiles)
+    })
+    .await
+    .map_err(|error| format!("Session deletion task failed: {}", error))?
+}
+
+/// Reports whether a profile has a password/passphrase in the local vault
+/// without ever returning the secret to the webview.
+#[tauri::command]
+pub async fn has_saved_credential(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<bool, String> {
+    Ok(state.credentials.has_saved_credential(&session_id))
 }
 
 #[tauri::command]
-pub async fn test_ssh_connection(request: SessionConnectRequest) -> Result<String, String> {
+pub fn get_credential_vault_status(state: State<'_, AppState>) -> CredentialVaultStatus {
+    state.credentials.status()
+}
+
+#[tauri::command]
+pub async fn initialize_credential_vault(
+    state: State<'_, AppState>,
+    master_password: String,
+) -> Result<CredentialVaultStatus, String> {
+    let credentials = state.credentials.clone();
+    tauri::async_runtime::spawn_blocking(move || credentials.initialize(master_password))
+        .await
+        .map_err(|error| format!("Credential vault initialization task failed: {}", error))?
+}
+
+#[tauri::command]
+pub async fn unlock_credential_vault(
+    state: State<'_, AppState>,
+    master_password: String,
+) -> Result<CredentialVaultStatus, String> {
+    let credentials = state.credentials.clone();
+    tauri::async_runtime::spawn_blocking(move || credentials.unlock(master_password))
+        .await
+        .map_err(|error| format!("Credential vault unlock task failed: {}", error))?
+}
+
+#[tauri::command]
+pub async fn reset_credential_vault(
+    state: State<'_, AppState>,
+) -> Result<CredentialVaultStatus, String> {
+    let credentials = state.credentials.clone();
+    tauri::async_runtime::spawn_blocking(move || credentials.reset())
+        .await
+        .map_err(|error| format!("Credential vault reset task failed: {}", error))?
+}
+
+#[tauri::command]
+pub async fn test_ssh_connection(
+    state: State<'_, AppState>,
+    request: SessionConnectRequest,
+) -> Result<String, String> {
+    let credentials = state.credentials.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let profile = profile_from_request(&request);
-        let target = target_from_request(&profile, &request)?;
+        if profile.is_local {
+            return Ok("Local terminal is available".to_string());
+        }
+        let mut target = target_from_request(&profile, &request)?;
+        if request.reuse_stored_credentials {
+            restore_stored_credentials(&mut target, &credentials)?;
+        }
         let connection = open_ssh_session(&target)?;
         let _ = connection
             .session
             .disconnect(None, "GpuTerm connection test complete", None);
-        Ok(format!("SSH connection to {}:{} succeeded", profile.host, profile.port))
+        Ok(format!(
+            "SSH connection to {}:{} succeeded",
+            profile.host, profile.port
+        ))
     })
     .await
     .map_err(|error| format!("Connection test task failed: {}", error))?
+}
+
+fn restore_stored_credentials(
+    target: &mut SshTarget,
+    credentials: &impl CredentialStore,
+) -> Result<(), String> {
+    if target.password.is_none() {
+        target.password = credentials.get_password(&target.session_id)?;
+    }
+    if let Some(proxy) = target.proxy.as_mut() {
+        restore_stored_credentials(proxy, credentials)?;
+    }
+    Ok(())
 }
 
 /// Runs `f` against the shared operations connection for `target`'s session,
@@ -204,6 +301,7 @@ pub fn profile_from_request(request: &SessionConnectRequest) -> SessionProfile {
         host: request.host.clone(),
         port: request.port,
         username: request.username.clone(),
+        is_local: request.is_local,
         private_key_path: normalize_optional_string(request.private_key_path.clone()),
         proxy_jump_id: normalize_optional_string(request.proxy_jump_id.clone()),
     })
@@ -213,6 +311,9 @@ pub fn target_from_request(
     profile: &SessionProfile,
     request: &SessionConnectRequest,
 ) -> Result<SshTarget, String> {
+    if profile.is_local {
+        return Err("Local terminal sessions do not use SSH targets".to_string());
+    }
     // The form supplies a single jump-host password, applied to the immediate
     // jump host; deeper hops (rare) fall back to key/agent auth.
     let jump_password = normalize_optional_string(request.proxy_jump_password.clone());
@@ -248,16 +349,20 @@ pub fn target_for_active_session(state: &AppState, session_id: &str) -> Result<S
             .ok_or_else(|| "No active SSH session is available".to_string())?
     };
 
+    if profile.is_local {
+        return Err("This operation is not available for a local terminal".to_string());
+    }
+
     // Jump-host passwords entered at connect time are kept in the credential
     // store keyed by the jump profile id, so reconnects find them here.
-    let password_for = |id: &str| state.credentials.get_password(id);
+    let password_for = |id: &str| state.credentials.get_password(id).ok().flatten();
     let proxy = resolve_proxy_chain(profile.proxy_jump_id.as_deref(), &password_for)?;
     Ok(SshTarget {
         session_id: profile.id.clone(),
         host: profile.host,
         port: profile.port,
         username: profile.username,
-        password: state.credentials.get_password(session_id),
+        password: state.credentials.get_password(session_id).ok().flatten(),
         private_key_path: profile.private_key_path,
         proxy,
     })
@@ -371,10 +476,14 @@ pub fn open_ssh_session(target: &SshTarget) -> Result<SshConnection, String> {
                 .map_err(|error| format!("Network resolution failed for {}: {}", address, error))?
                 .next()
                 .ok_or_else(|| format!("No network address found for {}", address))?;
-            let tcp = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-                .map_err(|error| {
-                    format!("Network timeout or connection failure for {}: {}", address, error)
-                })?;
+            let tcp = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)).map_err(
+                |error| {
+                    format!(
+                        "Network timeout or connection failure for {}: {}",
+                        address, error
+                    )
+                },
+            )?;
             (tcp, None)
         }
         Some(proxy) => open_tunneled_stream(target, proxy)?,
@@ -383,18 +492,25 @@ pub fn open_ssh_session(target: &SshTarget) -> Result<SshConnection, String> {
     let _ = tcp.set_read_timeout(Some(Duration::from_secs(10)));
     let _ = tcp.set_write_timeout(Some(Duration::from_secs(10)));
 
-    let mut session = Session::new().map_err(|error| format!("Failed to create SSH session: {}", error))?;
+    let mut session =
+        Session::new().map_err(|error| format!("Failed to create SSH session: {}", error))?;
     session.set_tcp_stream(tcp);
     session.set_timeout(10_000);
     session.handshake().map_err(|error| {
-        format!("SSH handshake failed for {}:{}: {}", target.host, target.port, error)
+        format!(
+            "SSH handshake failed for {}:{}: {}",
+            target.host, target.port, error
+        )
     })?;
 
     verify_known_host(&session, target)?;
     authenticate(&session, target)?;
 
     if !session.authenticated() {
-        return Err("SSH authentication failed. Check username, password, private key, or SSH agent.".to_string());
+        return Err(
+            "SSH authentication failed. Check username, password, private key, or SSH agent."
+                .to_string(),
+        );
     }
 
     Ok(SshConnection {
@@ -565,7 +681,10 @@ fn authenticate(session: &Session, target: &SshTarget) -> Result<(), String> {
     if let Some(private_key_path) = normalize_optional_string(target.private_key_path.clone()) {
         let private_key = Path::new(&private_key_path);
         if !private_key.exists() {
-            return Err(format!("Private key file was not found: {}", private_key_path));
+            return Err(format!(
+                "Private key file was not found: {}",
+                private_key_path
+            ));
         }
 
         session
@@ -575,20 +694,25 @@ fn authenticate(session: &Session, target: &SshTarget) -> Result<(), String> {
                 private_key,
                 target.password.as_deref(),
             )
-            .map_err(|_| "SSH key authentication failed. Check username, private key, and passphrase.".to_string())?;
+            .map_err(|_| {
+                "SSH key authentication failed. Check username, private key, and passphrase."
+                    .to_string()
+            })?;
         return Ok(());
     }
 
     if let Some(password) = normalize_optional_string(target.password.clone()) {
         session
             .userauth_password(&target.username, &password)
-            .map_err(|_| "SSH password authentication failed. Check username and password.".to_string())?;
+            .map_err(|_| {
+                "SSH password authentication failed. Check username and password.".to_string()
+            })?;
         return Ok(());
     }
 
-    session
-        .userauth_agent(&target.username)
-        .map_err(|_| "SSH agent authentication failed. Enter a password or private key path.".to_string())
+    session.userauth_agent(&target.username).map_err(|_| {
+        "SSH agent authentication failed. Enter a password or private key path.".to_string()
+    })
 }
 
 /// Prefix of the sentinel error raised when connecting to a host whose key has
@@ -623,7 +747,9 @@ enum HostKeyDecision {
     Trusted,
     /// Legacy flat fingerprint matched; rewrite it under the negotiated key type.
     TrustedMigrateLegacy,
-    Mismatch { expected: String },
+    Mismatch {
+        expected: String,
+    },
     Unknown,
 }
 
@@ -739,11 +865,20 @@ fn normalize_profile(mut profile: SessionProfile) -> SessionProfile {
     };
     profile.host = profile.host.trim().to_string();
     profile.username = profile.username.trim().to_string();
+    if profile.is_local {
+        profile.host = "localhost".to_string();
+        profile.port = 0;
+        profile.username = "local".to_string();
+        profile.private_key_path = None;
+        profile.proxy_jump_id = None;
+    }
     profile.private_key_path = normalize_optional_string(profile.private_key_path);
     profile.proxy_jump_id = normalize_optional_string(profile.proxy_jump_id)
         // A profile cannot be its own jump host.
         .filter(|proxy_id| proxy_id != &profile.id);
-    if profile.name.trim().is_empty() {
+    if profile.name.trim().is_empty() && profile.is_local {
+        profile.name = "Local terminal".to_string();
+    } else if profile.name.trim().is_empty() {
         profile.name = format!("{}@{}", profile.username, profile.host);
     } else {
         profile.name = profile.name.trim().to_string();
@@ -765,20 +900,35 @@ fn read_profiles() -> Result<Vec<SessionProfile>, String> {
 
     let content = fs::read_to_string(&path)
         .map_err(|error| format!("Failed to read sessions file {}: {}", path.display(), error))?;
-    serde_json::from_str(&content)
-        .map_err(|error| format!("Failed to parse sessions file {}: {}", path.display(), error))
+    serde_json::from_str(&content).map_err(|error| {
+        format!(
+            "Failed to parse sessions file {}: {}",
+            path.display(),
+            error
+        )
+    })
 }
 
 fn write_profiles(profiles: &[SessionProfile]) -> Result<(), String> {
     let path = sessions_path();
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("Failed to create config directory {}: {}", parent.display(), error))?;
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "Failed to create config directory {}: {}",
+                parent.display(),
+                error
+            )
+        })?;
     }
     let content = serde_json::to_string_pretty(profiles)
         .map_err(|error| format!("Failed to serialize sessions: {}", error))?;
-    fs::write(&path, content)
-        .map_err(|error| format!("Failed to write sessions file {}: {}", path.display(), error))
+    fs::write(&path, content).map_err(|error| {
+        format!(
+            "Failed to write sessions file {}: {}",
+            path.display(),
+            error
+        )
+    })
 }
 
 fn read_known_hosts() -> Result<KnownHosts, String> {
@@ -787,22 +937,42 @@ fn read_known_hosts() -> Result<KnownHosts, String> {
         return Ok(KnownHosts::new());
     }
 
-    let content = fs::read_to_string(&path)
-        .map_err(|error| format!("Failed to read known_hosts file {}: {}", path.display(), error))?;
-    serde_json::from_str(&content)
-        .map_err(|error| format!("Failed to parse known_hosts file {}: {}", path.display(), error))
+    let content = fs::read_to_string(&path).map_err(|error| {
+        format!(
+            "Failed to read known_hosts file {}: {}",
+            path.display(),
+            error
+        )
+    })?;
+    serde_json::from_str(&content).map_err(|error| {
+        format!(
+            "Failed to parse known_hosts file {}: {}",
+            path.display(),
+            error
+        )
+    })
 }
 
 fn write_known_hosts(known_hosts: &KnownHosts) -> Result<(), String> {
     let path = known_hosts_path();
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("Failed to create config directory {}: {}", parent.display(), error))?;
+        fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "Failed to create config directory {}: {}",
+                parent.display(),
+                error
+            )
+        })?;
     }
     let content = serde_json::to_string_pretty(known_hosts)
         .map_err(|error| format!("Failed to serialize known_hosts: {}", error))?;
-    fs::write(&path, content)
-        .map_err(|error| format!("Failed to write known_hosts file {}: {}", path.display(), error))
+    fs::write(&path, content).map_err(|error| {
+        format!(
+            "Failed to write known_hosts file {}: {}",
+            path.display(),
+            error
+        )
+    })
 }
 
 fn sessions_path() -> PathBuf {
@@ -851,6 +1021,7 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ssh::credentials::MemoryCredentialStore;
 
     fn per_type(pairs: &[(&str, &str)]) -> KnownHostEntry {
         KnownHostEntry::PerType(
@@ -925,9 +1096,29 @@ mod tests {
             host: format!("{}.example", id),
             port: 22,
             username: "user".to_string(),
+            is_local: false,
             private_key_path: None,
             proxy_jump_id: proxy.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn normalizes_local_profiles_without_ssh_credentials() {
+        let mut local = profile("local", Some("jump"));
+        local.name.clear();
+        local.host = "ignored.example".to_string();
+        local.port = 22;
+        local.username = "ignored".to_string();
+        local.is_local = true;
+        local.private_key_path = Some("/tmp/key".to_string());
+
+        let local = normalize_profile(local);
+        assert_eq!(local.name, "Local terminal");
+        assert_eq!(local.host, "localhost");
+        assert_eq!(local.port, 0);
+        assert_eq!(local.username, "local");
+        assert!(local.private_key_path.is_none());
+        assert!(local.proxy_jump_id.is_none());
     }
 
     fn no_password(_id: &str) -> Option<String> {
@@ -941,11 +1132,13 @@ mod tests {
             profile("mid", Some("edge")),
             profile("edge", None),
         ];
-        assert!(build_proxy_target("edge", &profiles, &mut Vec::new(), &no_password)
-            .unwrap()
-            .unwrap()
-            .proxy
-            .is_none());
+        assert!(
+            build_proxy_target("edge", &profiles, &mut Vec::new(), &no_password)
+                .unwrap()
+                .unwrap()
+                .proxy
+                .is_none()
+        );
 
         let chain = build_proxy_target("mid", &profiles, &mut Vec::new(), &no_password)
             .unwrap()
@@ -966,21 +1159,63 @@ mod tests {
     }
 
     #[test]
+    fn restores_saved_credentials_for_connection_tests() {
+        let credentials = MemoryCredentialStore::default();
+        credentials
+            .set_password("target", "target-secret".to_string())
+            .unwrap();
+        credentials
+            .set_password("jump", "jump-secret".to_string())
+            .unwrap();
+        let mut target = SshTarget {
+            session_id: "target".to_string(),
+            host: "target.example".to_string(),
+            port: 22,
+            username: "user".to_string(),
+            password: None,
+            private_key_path: None,
+            proxy: Some(Box::new(SshTarget {
+                session_id: "jump".to_string(),
+                host: "jump.example".to_string(),
+                port: 22,
+                username: "user".to_string(),
+                password: None,
+                private_key_path: None,
+                proxy: None,
+            })),
+        };
+
+        restore_stored_credentials(&mut target, &credentials).unwrap();
+
+        assert_eq!(target.password.as_deref(), Some("target-secret"));
+        assert_eq!(
+            target.proxy.as_ref().unwrap().password.as_deref(),
+            Some("jump-secret")
+        );
+    }
+
+    #[test]
     fn rejects_missing_cycle_and_too_deep_chains() {
         let missing = vec![profile("a", Some("ghost"))];
-        assert!(build_proxy_target("a", &missing, &mut Vec::new(), &no_password)
-            .unwrap_err()
-            .contains("not found"));
+        assert!(
+            build_proxy_target("a", &missing, &mut Vec::new(), &no_password)
+                .unwrap_err()
+                .contains("not found")
+        );
 
         let self_cycle = vec![profile("a", Some("a"))];
-        assert!(build_proxy_target("a", &self_cycle, &mut Vec::new(), &no_password)
-            .unwrap_err()
-            .contains("loop"));
+        assert!(
+            build_proxy_target("a", &self_cycle, &mut Vec::new(), &no_password)
+                .unwrap_err()
+                .contains("loop")
+        );
 
         let mutual = vec![profile("a", Some("b")), profile("b", Some("a"))];
-        assert!(build_proxy_target("a", &mutual, &mut Vec::new(), &no_password)
-            .unwrap_err()
-            .contains("loop"));
+        assert!(
+            build_proxy_target("a", &mutual, &mut Vec::new(), &no_password)
+                .unwrap_err()
+                .contains("loop")
+        );
 
         let deep = vec![
             profile("a", Some("b")),
@@ -988,9 +1223,11 @@ mod tests {
             profile("c", Some("d")),
             profile("d", None),
         ];
-        assert!(build_proxy_target("a", &deep, &mut Vec::new(), &no_password)
-            .unwrap_err()
-            .contains("too deep"));
+        assert!(
+            build_proxy_target("a", &deep, &mut Vec::new(), &no_password)
+                .unwrap_err()
+                .contains("too deep")
+        );
     }
 
     #[test]

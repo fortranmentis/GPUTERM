@@ -49,7 +49,13 @@ type SftpBrowserProps = {
 
 export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
-  const connected = useSessionStore(selectIsActiveConnected);
+  const sessionConnected = useSessionStore(selectIsActiveConnected);
+  const activeSessionIsLocal = useSessionStore((state) =>
+    state.sessions.some(
+      (session) => session.id === state.activeSessionId && session.isLocal,
+    ),
+  );
+  const connected = sessionConnected && !activeSessionIsLocal;
   const setMessage = useSessionStore((state) => state.setMessage);
   const addTask = useTransferStore((state) => state.addTask);
   const updateTask = useTransferStore((state) => state.updateTask);

@@ -69,7 +69,8 @@ type RemoteTelemetryBarProps = {
 
 export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
-  const connected = useSessionStore(selectIsActiveConnected);
+  const sessionConnected = useSessionStore(selectIsActiveConnected);
+  const connected = sessionConnected;
   const telemetry = useSessionStore(selectActiveTelemetry);
   const settings = useSessionStore((state) => state.telemetrySettings);
   const setTelemetrySettings = useSessionStore((state) => state.setTelemetrySettings);
@@ -306,8 +307,8 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
         </label>
       </div>
 
-      {!connected && <div className="telemetry-unavailable">Remote telemetry unavailable</div>}
-      {connected && !telemetry && <div className="telemetry-unavailable">Waiting for remote telemetry</div>}
+      {!connected && <div className="telemetry-unavailable">Telemetry unavailable</div>}
+      {connected && !telemetry && <div className="telemetry-unavailable">Waiting for telemetry</div>}
 
       {connected && telemetry && showSystem && (
         <>

@@ -15,6 +15,7 @@ use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use ssh2::Session;
 use std::io::Read;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -147,6 +148,16 @@ pub(crate) enum RemoteOs {
     Windows,
 }
 
+pub(crate) fn local_os() -> RemoteOs {
+    if cfg!(target_os = "windows") {
+        RemoteOs::Windows
+    } else if cfg!(target_os = "macos") {
+        RemoteOs::MacOs
+    } else {
+        RemoteOs::Linux
+    }
+}
+
 /// Two-stage probe run without the POSIX wrapper, since the remote shell
 /// dialect is unknown until the OS is known.
 pub(crate) fn detect_remote_os(session: &Session) -> Option<RemoteOs> {
@@ -196,9 +207,7 @@ fn classify_uname(name: &str) -> Option<RemoteOs> {
 }
 
 #[tauri::command]
-pub fn get_telemetry_settings(
-    state: State<AppState>,
-) -> Result<SystemMonitorSettings, String> {
+pub fn get_telemetry_settings(state: State<AppState>) -> Result<SystemMonitorSettings, String> {
     state
         .telemetry_settings
         .lock()
@@ -297,6 +306,36 @@ pub fn start(
     });
 }
 
+/// Starts telemetry for a native local PTY. Unlike remote sessions this path
+/// executes collectors directly on the host and never attempts an SSH
+/// connection to localhost.
+pub fn start_local(
+    app: AppHandle,
+    session_id: String,
+    stop: Arc<AtomicBool>,
+    settings: Arc<Mutex<SystemMonitorSettings>>,
+) {
+    thread::spawn(move || {
+        let os = local_os();
+        let mut previous_cpu = None;
+        let mut gpu_probe = (os == RemoteOs::MacOs).then(|| GpuProbe {
+            apple: true,
+            ..GpuProbe::default()
+        });
+
+        while !stop.load(Ordering::SeqCst) {
+            let settings_snapshot = settings
+                .lock()
+                .map(|settings| settings.clone())
+                .unwrap_or_default();
+            let telemetry =
+                collect_local_telemetry(&session_id, os, &mut previous_cpu, &mut gpu_probe);
+            emit_telemetry(&app, telemetry);
+            sleep_with_stop(settings_snapshot.telemetry_interval_secs, &stop);
+        }
+    });
+}
+
 fn emit_connection_error_telemetry(app: &AppHandle, session_id: &str, error: &str) {
     emit_telemetry(
         app,
@@ -348,10 +387,13 @@ fn collect_remote_telemetry(
     }
     let mut errors = TelemetryErrors::default();
 
-    let hostname = run_remote_command(session, "hostname 2>/dev/null || uname -n 2>/dev/null || true")
-        .ok()
-        .map(|hostname| hostname.trim().to_string())
-        .filter(|hostname| !hostname.is_empty());
+    let hostname = run_remote_command(
+        session,
+        "hostname 2>/dev/null || uname -n 2>/dev/null || true",
+    )
+    .ok()
+    .map(|hostname| hostname.trim().to_string())
+    .filter(|hostname| !hostname.is_empty());
 
     let cpu_result = match os {
         RemoteOs::Linux => run_remote_command(session, CPU_COMMAND)
@@ -416,6 +458,139 @@ fn collect_remote_telemetry(
         }
     };
 
+    RemoteTelemetry {
+        session_id: session_id.to_string(),
+        timestamp: timestamp(),
+        hostname,
+        cpu,
+        memory,
+        disks,
+        gpu,
+        users,
+        errors,
+    }
+}
+
+fn collect_local_telemetry(
+    session_id: &str,
+    os: RemoteOs,
+    previous_cpu: &mut Option<CpuStatSample>,
+    gpu_probe: &mut Option<GpuProbe>,
+) -> RemoteTelemetry {
+    if os == RemoteOs::Windows {
+        return collect_local_windows_telemetry(session_id, previous_cpu, gpu_probe);
+    }
+
+    let mut errors = TelemetryErrors::default();
+    let hostname =
+        run_local_command_for(os, "hostname 2>/dev/null || uname -n 2>/dev/null || true")
+            .ok()
+            .map(|hostname| hostname.trim().to_string())
+            .filter(|hostname| !hostname.is_empty());
+
+    let cpu_result = match os {
+        RemoteOs::Linux => run_local_command_for(os, CPU_COMMAND)
+            .and_then(|output| parse_cpu_command_output(&output, previous_cpu)),
+        RemoteOs::MacOs => run_local_command_for(os, macos_monitor::MACOS_CPU_COMMAND)
+            .and_then(|output| macos_monitor::parse_macos_cpu_output(&output)),
+        RemoteOs::Windows => unreachable!("Windows telemetry is collected above"),
+    };
+    let cpu = cpu_result.map_err(|error| errors.cpu = Some(error)).ok();
+
+    let memory_result = match os {
+        RemoteOs::Linux => run_local_command_for(os, "cat /proc/meminfo 2>/dev/null")
+            .and_then(|output| parse_meminfo(&output)),
+        RemoteOs::MacOs => run_local_command_for(os, macos_monitor::MACOS_MEMORY_COMMAND)
+            .and_then(|output| macos_monitor::parse_macos_memory_output(&output)),
+        RemoteOs::Windows => unreachable!("Windows telemetry is collected above"),
+    };
+    let memory = memory_result
+        .map_err(|error| errors.memory = Some(error))
+        .ok();
+
+    let disks_result = match os {
+        RemoteOs::Linux => run_local_command_for(os, "df -P -T -B1 2>/dev/null")
+            .and_then(|output| parse_df_output(&output)),
+        RemoteOs::MacOs => run_local_command_for(os, macos_monitor::MACOS_DISK_COMMAND)
+            .and_then(|output| macos_monitor::parse_macos_disk_output(&output)),
+        RemoteOs::Windows => unreachable!("Windows telemetry is collected above"),
+    };
+    let disks = disks_result
+        .map(sort_disks)
+        .map_err(|error| errors.disk = Some(error))
+        .unwrap_or_default();
+
+    let gpu = collect_local_gpu_metrics(os, gpu_probe)
+        .map_err(|error| errors.gpu = Some(error))
+        .unwrap_or_default();
+    let users = run_local_command_for(os, "LC_ALL=C who 2>/dev/null || true")
+        .map(|output| parse_who_output(&output))
+        .map_err(|error| errors.users = Some(error))
+        .unwrap_or_default();
+
+    RemoteTelemetry {
+        session_id: session_id.to_string(),
+        timestamp: timestamp(),
+        hostname,
+        cpu,
+        memory,
+        disks,
+        gpu,
+        users,
+        errors,
+    }
+}
+
+fn collect_local_windows_telemetry(
+    session_id: &str,
+    previous_cpu: &mut Option<CpuStatSample>,
+    gpu_probe: &mut Option<GpuProbe>,
+) -> RemoteTelemetry {
+    let mut errors = TelemetryErrors::default();
+    let mut hostname = None;
+    let mut cpu = None;
+    let mut memory = None;
+    let mut disks = Vec::new();
+    let mut users = Vec::new();
+
+    match run_local_command_for(
+        RemoteOs::Windows,
+        windows_monitor::WINDOWS_TELEMETRY_COMMAND,
+    ) {
+        Ok(output) => {
+            let sections = split_sections(&output);
+            hostname = sections
+                .get("HOSTNAME")
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            match windows_monitor::parse_windows_cpu_output(&sections, previous_cpu) {
+                Ok(metric) => cpu = Some(metric),
+                Err(error) => errors.cpu = Some(error),
+            }
+            match windows_monitor::parse_windows_memory_output(&sections) {
+                Ok(metric) => memory = Some(metric),
+                Err(error) => errors.memory = Some(error),
+            }
+            match windows_monitor::parse_windows_disk_output(&sections) {
+                Ok(found) => disks = sort_disks(found),
+                Err(error) => errors.disk = Some(error),
+            }
+            users = sections
+                .get("USERS")
+                .map(|value| windows_monitor::parse_quser_output(value))
+                .unwrap_or_default();
+        }
+        Err(error) => {
+            errors.cpu = Some(error.clone());
+            errors.memory = Some(error.clone());
+            errors.disk = Some(error.clone());
+            errors.users = Some(error);
+        }
+    }
+
+    let gpu = collect_local_gpu_metrics(RemoteOs::Windows, gpu_probe)
+        .map_err(|error| errors.gpu = Some(error))
+        .unwrap_or_default();
     RemoteTelemetry {
         session_id: session_id.to_string(),
         timestamp: timestamp(),
@@ -528,6 +703,123 @@ pub(crate) fn collect_gpu_metrics(
     Ok(metrics)
 }
 
+pub(crate) fn collect_local_gpu_metrics(
+    os: RemoteOs,
+    probe: &mut Option<GpuProbe>,
+) -> Result<Vec<GpuMetric>, String> {
+    if probe.is_none() {
+        let detected = if os == RemoteOs::Windows {
+            run_local_command_for(os, windows_monitor::WINDOWS_GPU_PROBE_COMMAND)
+                .map(|output| windows_monitor::parse_windows_gpu_probe(&output))
+                .unwrap_or_default()
+        } else {
+            let mut detected = run_local_command_for(os, GPU_PROBE_COMMAND)
+                .map(|output| parse_gpu_probe(&output))
+                .unwrap_or_default();
+            if detected.xpu_smi {
+                detected.xpu_devices = run_local_command_for(os, XPU_DISCOVERY_COMMAND)
+                    .map(|output| parse_xpu_discovery(&output))
+                    .unwrap_or_default();
+            }
+            detected
+        };
+        *probe = Some(detected);
+    }
+    let probe = probe.as_ref().expect("probe is populated above");
+    if !probe.any() {
+        return Err(
+            "No GPU monitoring source found (nvidia-smi / rocm-smi / xpu-smi / intel_gpu_top / macOS ioreg / Windows GPU counters)"
+                .to_string(),
+        );
+    }
+
+    let mut metrics = Vec::new();
+    let mut errors = Vec::new();
+    if probe.apple {
+        match run_local_command_for(os, macos_monitor::MACOS_GPU_COMMAND)
+            .and_then(|output| macos_monitor::parse_macos_gpu_output(&output))
+        {
+            Ok(mut found) => metrics.append(&mut found),
+            Err(error) => errors.push(error),
+        }
+    }
+    if probe.nvidia {
+        match run_local_command_for(os, NVIDIA_SMI_QUERY)
+            .and_then(|output| parse_nvidia_smi_csv(&output))
+        {
+            Ok(mut found) => metrics.append(&mut found),
+            Err(error) => errors.push(error),
+        }
+    }
+    if probe.rocm_smi {
+        let command = "rocm-smi --showproductname --showuniqueid --showuse --showmemuse --showmeminfo vram --showtemp --showpower --json 2>/dev/null";
+        match run_local_command_for(os, command).and_then(|output| parse_rocm_smi_json(&output)) {
+            Ok(mut found) => metrics.append(&mut found),
+            Err(error) => errors.push(error),
+        }
+    }
+    if probe.xpu_smi && !probe.xpu_devices.is_empty() {
+        match run_local_command_for(os, &xpu_stats_command(&probe.xpu_devices)) {
+            Ok(output) => {
+                let sections = split_sections(&output);
+                for device in &probe.xpu_devices {
+                    if let Some(stats) = sections
+                        .get(&format!("XPU_{}", device.id))
+                        .and_then(|section| parse_xpu_stats(section, device))
+                    {
+                        metrics.push(stats);
+                    }
+                }
+            }
+            Err(error) => errors.push(error),
+        }
+    }
+    if probe.intel_gpu_top {
+        let next_index = metrics
+            .iter()
+            .map(|metric| metric.index + 1)
+            .max()
+            .unwrap_or(0);
+        match run_local_command_for(os, INTEL_GPU_TOP_COMMAND)
+            .and_then(|output| parse_intel_gpu_top_stream(&output, next_index))
+        {
+            Ok(metric) => metrics.push(metric),
+            Err(error) => errors.push(error),
+        }
+    }
+    if os == RemoteOs::Windows {
+        let needs_counters = probe
+            .windows_adapters
+            .iter()
+            .any(|adapter| !(probe.nvidia && adapter.vendor == "nvidia"));
+        if needs_counters {
+            let next_index = metrics
+                .iter()
+                .map(|metric| metric.index + 1)
+                .max()
+                .unwrap_or(0);
+            match run_local_command_for(os, windows_monitor::WINDOWS_GPU_COUNTERS_COMMAND).and_then(
+                |output| {
+                    windows_monitor::parse_windows_gpu_counters(
+                        &output,
+                        &probe.windows_adapters,
+                        probe.nvidia,
+                        next_index,
+                    )
+                },
+            ) {
+                Ok(mut found) => metrics.append(&mut found),
+                Err(error) => errors.push(error),
+            }
+        }
+    }
+
+    if metrics.is_empty() && !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    Ok(metrics)
+}
+
 /// Windows GPU collection: nvidia-smi works identically to Linux (full
 /// fields); adapters it does not cover fall back to the WDDM performance
 /// counters, which expose utilization and dedicated VRAM only.
@@ -552,7 +844,11 @@ fn collect_windows_gpu_metrics(
         .iter()
         .any(|adapter| !(probe.nvidia && adapter.vendor == "nvidia"));
     if needs_counters {
-        let next_index = metrics.iter().map(|metric| metric.index + 1).max().unwrap_or(0);
+        let next_index = metrics
+            .iter()
+            .map(|metric| metric.index + 1)
+            .max()
+            .unwrap_or(0);
         match run_remote_command_for(
             session,
             RemoteOs::Windows,
@@ -668,7 +964,11 @@ pub fn parse_who_output(output: &str) -> Vec<RemoteUserSession> {
                 .last()
                 .filter(|value| value.starts_with('(') && value.ends_with(')'))
                 .map(|value| value[1..value.len() - 1].to_string());
-            let time_end = if from.is_some() { fields.len() - 1 } else { fields.len() };
+            let time_end = if from.is_some() {
+                fields.len() - 1
+            } else {
+                fields.len()
+            };
             Some(RemoteUserSession {
                 user: fields[0].to_string(),
                 tty: fields[1].to_string(),
@@ -715,6 +1015,28 @@ pub(crate) fn run_remote_command_for(
         RemoteOs::Linux | RemoteOs::MacOs => run_remote_command(session, command),
         RemoteOs::Windows => run_windows_remote_command(session, command),
     }
+}
+
+/// Executes one telemetry collector directly on the machine running GpuTerm.
+/// Only stdout crosses into the parser and no shell output is exposed to the
+/// terminal session itself.
+pub(crate) fn run_local_command_for(os: RemoteOs, command: &str) -> Result<String, String> {
+    let output = match os {
+        RemoteOs::Windows => Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-EncodedCommand"])
+            .arg(encode_powershell_script(command))
+            .output(),
+        RemoteOs::Linux | RemoteOs::MacOs => Command::new("sh").args(["-lc", command]).output(),
+    }
+    .map_err(|error| format!("failed to start local telemetry command: {}", error))?;
+
+    if !output.status.success() {
+        return Err(non_zero_exit_error(
+            &String::from_utf8_lossy(&output.stderr),
+            output.status.code().unwrap_or(-1),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Runs a PowerShell script on a Windows remote. `-EncodedCommand` (base64 of
@@ -794,8 +1116,8 @@ pub fn parse_cpu_command_output(
     let sections = split_sections(output);
     let proc_stat = required_section(&sections, "PROC_STAT")?;
     let current_cpu = parse_proc_stat_cpu_sample(proc_stat)?;
-    let usage_percent = previous_cpu
-        .and_then(|previous| calculate_cpu_usage(previous, current_cpu));
+    let usage_percent =
+        previous_cpu.and_then(|previous| calculate_cpu_usage(previous, current_cpu));
     *previous_cpu = Some(current_cpu);
 
     let load = sections
@@ -895,7 +1217,12 @@ pub fn parse_meminfo(output: &str) -> Result<MemoryMetric, String> {
 
 pub fn parse_df_output(output: &str) -> Result<Vec<DiskMetric>, String> {
     let mut disks = Vec::new();
-    for line in output.lines().skip(1).map(str::trim).filter(|line| !line.is_empty()) {
+    for line in output
+        .lines()
+        .skip(1)
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
         let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() < 7 {
             continue;
@@ -931,7 +1258,11 @@ pub fn sort_disks(mut disks: Vec<DiskMetric>) -> Vec<DiskMetric> {
 fn parse_cpuinfo_processor_count(cpuinfo: &str) -> Option<u64> {
     let count = cpuinfo
         .lines()
-        .filter(|line| line.split_once(':').map(|(key, _)| key.trim() == "processor").unwrap_or(false))
+        .filter(|line| {
+            line.split_once(':')
+                .map(|(key, _)| key.trim() == "processor")
+                .unwrap_or(false)
+        })
         .count();
     (count > 0).then_some(count as u64)
 }
@@ -941,8 +1272,7 @@ fn parse_lscpu_cpu_count(lscpu: &str) -> Option<u64> {
 }
 
 fn parse_lscpu_online_count(lscpu: &str) -> Option<u64> {
-    parse_lscpu_value(lscpu, "On-line CPU(s) list")
-        .and_then(|value| parse_cpu_list_count(&value))
+    parse_lscpu_value(lscpu, "On-line CPU(s) list").and_then(|value| parse_cpu_list_count(&value))
 }
 
 fn parse_lscpu_cpu_mhz(lscpu: &str) -> Option<f64> {
@@ -953,7 +1283,11 @@ fn parse_lscpu_cpu_mhz(lscpu: &str) -> Option<f64> {
 
 fn parse_cpu_list_count(value: &str) -> Option<u64> {
     let mut count = 0_u64;
-    for part in value.split(',').map(str::trim).filter(|part| !part.is_empty()) {
+    for part in value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
         if let Some((start, end)) = part.split_once('-') {
             let start = start.trim().parse::<u64>().ok()?;
             let end = end.trim().parse::<u64>().ok()?;
@@ -1094,9 +1428,18 @@ mod tests {
         assert_eq!(classify_uname("Linux"), Some(RemoteOs::Linux));
         assert_eq!(classify_uname("FreeBSD"), Some(RemoteOs::Linux));
         // Git-for-Windows / MSYS / Cygwin run on a physical Windows host.
-        assert_eq!(classify_uname("MINGW64_NT-10.0-19045"), Some(RemoteOs::Windows));
-        assert_eq!(classify_uname("MSYS_NT-10.0-22631"), Some(RemoteOs::Windows));
-        assert_eq!(classify_uname("CYGWIN_NT-10.0-19045"), Some(RemoteOs::Windows));
+        assert_eq!(
+            classify_uname("MINGW64_NT-10.0-19045"),
+            Some(RemoteOs::Windows)
+        );
+        assert_eq!(
+            classify_uname("MSYS_NT-10.0-22631"),
+            Some(RemoteOs::Windows)
+        );
+        assert_eq!(
+            classify_uname("CYGWIN_NT-10.0-19045"),
+            Some(RemoteOs::Windows)
+        );
         // Standalone Windows uname ports on the host PATH must not be
         // mistaken for Linux — they broke telemetry by routing a Windows
         // host to the POSIX command set.
@@ -1125,6 +1468,29 @@ mod tests {
     fn encodes_powershell_script_as_utf16le_base64() {
         // "ab" → UTF-16LE 61 00 62 00 → base64 "YQBiAA==".
         assert_eq!(encode_powershell_script("ab"), "YQBiAA==");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn executes_a_local_collector_without_ssh() {
+        let output = run_local_command_for(local_os(), "printf local-telemetry").unwrap();
+        assert_eq!(output, "local-telemetry");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    #[ignore = "requires host telemetry permissions unavailable in some sandboxes"]
+    fn collects_local_cpu_memory_and_disk_metrics_without_ssh() {
+        let os = local_os();
+        let mut previous_cpu = None;
+        let mut gpu_probe = None;
+        let telemetry =
+            collect_local_telemetry("local-test", os, &mut previous_cpu, &mut gpu_probe);
+
+        assert!(telemetry.hostname.is_some());
+        assert!(telemetry.cpu.is_some(), "{:?}", telemetry.errors.cpu);
+        assert!(telemetry.memory.is_some(), "{:?}", telemetry.errors.memory);
+        assert!(!telemetry.disks.is_empty(), "{:?}", telemetry.errors.disk);
     }
 
     #[test]

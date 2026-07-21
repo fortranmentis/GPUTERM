@@ -6,7 +6,9 @@ use ssh::local_fs::{
 };
 use ssh::resource_details::get_resource_details;
 use ssh::session::{
-    delete_session, load_sessions, save_session, test_ssh_connection, trust_host_key, AppState,
+    delete_session, get_credential_vault_status, has_saved_credential, initialize_credential_vault,
+    load_sessions, reset_credential_vault, save_session, test_ssh_connection, trust_host_key,
+    unlock_credential_vault, AppState,
 };
 use ssh::sftp::{
     cancel_transfer, sftp_delete, sftp_download_file, sftp_list_dir, sftp_mkdir, sftp_path_exists,
@@ -27,6 +29,11 @@ pub fn run() {
             load_sessions,
             save_session,
             delete_session,
+            has_saved_credential,
+            get_credential_vault_status,
+            initialize_credential_vault,
+            unlock_credential_vault,
+            reset_credential_vault,
             load_app_settings,
             update_recent_local_path,
             list_local_dir,

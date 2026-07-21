@@ -144,6 +144,48 @@ p {
   white-space: nowrap;
 }
 
+.session-host-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.session-host-label-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.session-host-label-row > label:first-child {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.local-host-toggle {
+  display: inline-flex;
+  flex: none;
+  flex-direction: row;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+
+.local-host-toggle input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--cyan-strong);
+}
+
+.local-host-toggle span {
+  color: #b8f7dd;
+  font-size: 11px;
+  font-weight: 700;
+}
+
 label,
 .full-label {
   display: flex;
@@ -377,6 +419,12 @@ button:disabled {
 
 .selected-session-actions .primary-button {
   min-width: 0;
+}
+
+.session-credential-hint {
+  color: var(--subtle);
+  font-size: 10px;
+  line-height: 1.35;
 }
 
 .session-list {
@@ -701,6 +749,51 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.terminal-proxy-credentials {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(34, 211, 238, 0.28);
+  border-radius: 7px;
+  background: rgba(34, 211, 238, 0.055);
+}
+
+.terminal-proxy-credentials-title {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  color: var(--cyan);
+}
+
+.terminal-proxy-credentials-title > span {
+  min-width: 0;
+}
+
+.terminal-proxy-credentials-title strong,
+.terminal-proxy-credentials-title small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-proxy-credentials-title strong {
+  color: #c6f7ff;
+  font-size: 11px;
+}
+
+.terminal-proxy-credentials-title small,
+.terminal-proxy-credentials-hint {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.terminal-proxy-credentials-hint {
+  line-height: 1.35;
 }
 
 .terminal-session-picker-heading {
@@ -2121,6 +2214,108 @@ button.telemetry-section:hover {
 .app-modal-actions {
   display: flex;
   justify-content: flex-end;
+}
+
+.credential-vault-backdrop {
+  display: grid;
+  position: fixed;
+  z-index: 70;
+  inset: 0;
+  place-items: center;
+  padding: 24px;
+  background: rgba(3, 7, 12, 0.86);
+  backdrop-filter: blur(8px);
+}
+
+.credential-vault-dialog {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  width: min(520px, calc(100vw - 48px));
+  gap: 14px 16px;
+  padding: 22px;
+  border: 1px solid #274258;
+  border-radius: 12px;
+  background: #0b121a;
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.6);
+}
+
+.credential-vault-icon {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border: 1px solid #155e75;
+  border-radius: 10px;
+  background: rgba(8, 145, 178, 0.12);
+  color: var(--cyan);
+}
+
+.credential-vault-heading h2 {
+  margin: 0 0 6px;
+  color: var(--text);
+  font-size: 17px;
+}
+
+.credential-vault-heading p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.credential-vault-dialog > label,
+.credential-vault-warning,
+.credential-vault-error,
+.credential-vault-loading,
+.credential-vault-actions {
+  grid-column: 1 / -1;
+}
+
+.credential-vault-dialog > label {
+  display: grid;
+  gap: 6px;
+}
+
+.credential-vault-dialog > label span {
+  color: #cbd5e1;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.credential-vault-warning {
+  color: #fbbf24;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.credential-vault-error {
+  padding: 9px 10px;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  border-radius: 7px;
+  background: rgba(127, 29, 29, 0.2);
+  color: #fecaca;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.credential-vault-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.credential-vault-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.credential-vault-actions .danger {
+  margin-right: auto;
 }
 
 .detail-window {

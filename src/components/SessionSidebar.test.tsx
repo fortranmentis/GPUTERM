@@ -35,6 +35,16 @@ const bastionProfile: SessionProfile = {
   privateKeyPath: null,
 };
 
+const localProfile: SessionProfile = {
+  id: "local-1",
+  name: "My Mac",
+  host: "localhost",
+  port: 0,
+  username: "local",
+  isLocal: true,
+  privateKeyPath: null,
+};
+
 describe("SessionSidebar profile form", () => {
   beforeEach(() => {
     mockInvoke.mockReset();
@@ -97,7 +107,148 @@ describe("SessionSidebar profile form", () => {
       );
       const request = (connectCall?.[1] as { request: SessionConnectRequest }).request;
       expect(request.password).toBe("saved-secret");
+      expect(request.reuseStoredCredentials).toBe(true);
     });
+  });
+
+  it("shows a secure mask when the selected host already has a saved credential", async () => {
+    mockInvoke.mockImplementation((command, args) => {
+      if (command === "has_saved_credential") {
+        return Promise.resolve(
+          (args as { sessionId?: string } | undefined)?.sessionId === "profile-1",
+        );
+      }
+      return Promise.resolve([]);
+    });
+
+    render(<SessionSidebar />);
+    fireEvent.click(screen.getByRole("button", { name: /lab-a100/i }));
+
+    const password = screen.getByLabelText(/password \/ key passphrase/i);
+    await waitFor(() =>
+      expect(password).toHaveAttribute(
+        "placeholder",
+        "•••••••• (saved securely)",
+      ),
+    );
+    expect(password).toHaveValue("");
+  });
+
+  it("reports when a successful connection could not persist its password", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "connect_terminal") {
+        return Promise.resolve({
+          sessionId: "profile-1",
+          terminalId: "terminal-1",
+          profile: savedProfile,
+          credentialWarning: "vault locked",
+        });
+      }
+      if (command === "load_sessions") {
+        return Promise.resolve([savedProfile]);
+      }
+      return Promise.resolve([]);
+    });
+
+    render(<SessionSidebar />);
+    fireEvent.click(screen.getByRole("button", { name: /lab-a100/i }));
+    fireEvent.change(screen.getByLabelText(/password \/ key passphrase/i), {
+      target: { value: "saved-secret" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^connect$/i }));
+
+    await waitFor(() => {
+      expect(useSessionStore.getState().message).toMatchObject({
+        kind: "info",
+        text: expect.stringContaining("vault locked"),
+      });
+    });
+  });
+
+  it("connects a saved session immediately on double-click using memory credentials", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "connect_terminal") {
+        return Promise.resolve({
+          sessionId: "profile-1",
+          terminalId: "terminal-1",
+          profile: savedProfile,
+        });
+      }
+      if (command === "load_sessions") {
+        return Promise.resolve([savedProfile]);
+      }
+      return Promise.resolve([]);
+    });
+
+    render(<SessionSidebar />);
+    fireEvent.doubleClick(screen.getByRole("button", { name: /lab-a100/i }));
+
+    await waitFor(() => {
+      const connectCall = mockInvoke.mock.calls.find(
+        ([command]) => command === "connect_terminal",
+      );
+      const request = (connectCall?.[1] as { request: SessionConnectRequest })
+        .request;
+      expect(request).toMatchObject({
+        id: "profile-1",
+        password: null,
+        reuseStoredCredentials: true,
+      });
+    });
+    expect(useSessionStore.getState().activeSessionId).toBe("profile-1");
+  });
+
+  it("opens a native local terminal from the New profile form", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "connect_terminal") {
+        return Promise.resolve({
+          sessionId: localProfile.id,
+          terminalId: "local-terminal-1",
+          profile: localProfile,
+        });
+      }
+      if (command === "load_sessions") {
+        return Promise.resolve([savedProfile, localProfile]);
+      }
+      return Promise.resolve([]);
+    });
+
+    render(<SessionSidebar />);
+    fireEvent.click(screen.getByRole("button", { name: /^new$/i }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /local host/i }));
+
+    expect(screen.getByRole("textbox", { name: "Host" })).toHaveValue(
+      "localhost",
+    );
+    expect(screen.getByRole("textbox", { name: "Host" })).toBeDisabled();
+    expect(screen.queryByPlaceholderText("ubuntu")).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText(/password \/ passphrase/i),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /^test$/i }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^connect$/i }));
+    await waitFor(() => {
+      const connectCall = mockInvoke.mock.calls.find(
+        ([command]) => command === "connect_terminal",
+      );
+      const request = (connectCall?.[1] as { request: SessionConnectRequest })
+        .request;
+      expect(request).toMatchObject({
+        name: "Local terminal",
+        host: "localhost",
+        port: 0,
+        username: "local",
+        isLocal: true,
+        password: null,
+        proxyJumpId: null,
+      });
+    });
+    expect(useSessionStore.getState().terminalIdsBySession[localProfile.id]).toEqual([
+      "local-terminal-1",
+    ]);
   });
 
   it("saves a fresh profile with a new id after New", async () => {

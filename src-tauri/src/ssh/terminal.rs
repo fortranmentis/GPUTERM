@@ -5,9 +5,11 @@ use crate::ssh::session::{
     ActiveConnection, AppState, OpsSessions, SessionConnectRequest, SshTarget, TerminalSessionInfo,
 };
 use crate::ssh::system_monitor;
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use ssh2::{Channel, ExtendedData, Session};
 use std::collections::HashMap;
+use std::env;
 use std::io::{ErrorKind, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -17,10 +19,38 @@ use tauri::{AppHandle, Emitter, State};
 
 pub struct TerminalHandle {
     pub session_id: String,
-    // Holds the connection (and any jump-host tunnel) alive for the session.
-    pub connection: SshConnection,
-    pub channel: Arc<Mutex<Channel>>,
+    backend: TerminalBackend,
     pub stop: Arc<AtomicBool>,
+}
+
+enum TerminalBackend {
+    Remote {
+        // Holds the connection (and any jump-host tunnel) alive for the session.
+        connection: SshConnection,
+        channel: Arc<Mutex<Channel>>,
+    },
+    Local {
+        master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+        writer: Arc<Mutex<Box<dyn Write + Send>>>,
+        child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
+    },
+}
+
+enum TerminalWriter {
+    Remote(Arc<Mutex<Channel>>),
+    Local(Arc<Mutex<Box<dyn Write + Send>>>),
+}
+
+enum TerminalResizer {
+    Remote(Arc<Mutex<Channel>>),
+    Local(Arc<Mutex<Box<dyn MasterPty + Send>>>),
+}
+
+struct OpenLocalTerminal {
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
+    reader: Box<dyn Read + Send>,
 }
 
 #[derive(Clone)]
@@ -75,38 +105,64 @@ pub async fn connect_terminal(
     request: SessionConnectRequest,
 ) -> Result<TerminalSessionInfo, String> {
     let profile = profile_from_request(&request);
-    let target = target_from_request(&profile, &request)?;
-
-    if let Some(password) = target.password.clone() {
-        state.credentials.set_password(&profile.id, password);
-    } else {
-        state.credentials.clear_password(&profile.id);
-    }
-
-    // Persist the jump-host password under the jump profile id so reconnects
-    // (telemetry, SFTP, resource details) can re-resolve the tunnel.
-    if let Some(proxy) = target.proxy.as_ref() {
-        if let Some(proxy_password) = proxy.password.clone() {
-            state.credentials.set_password(&proxy.session_id, proxy_password);
-        }
-    }
-
     let cols = request.cols.unwrap_or(120).max(1);
     let rows = request.rows.unwrap_or(32).max(1);
-    let connect_target = target.clone();
+
+    if profile.is_local {
+        return connect_local_terminal(app, &state, profile, cols, rows).await;
+    }
+
+    let target = target_from_request(&profile, &request)?;
+    let credentials = state.credentials.clone();
+    let reuse_stored_credentials = request.reuse_stored_credentials;
+    let clear_missing_credentials = request.id.is_some() && !reuse_stored_credentials;
     let opened = tauri::async_runtime::spawn_blocking(move || {
-        open_terminal_channel(&connect_target, cols, rows)
+        let mut target = target;
+        let mut credential_warnings = Vec::new();
+        if reuse_stored_credentials {
+            fill_stored_credentials(&mut target, &credentials, &mut credential_warnings);
+        }
+        let (connection, channel) =
+            open_terminal_channel(&target, cols, rows).map_err(|error| {
+                if credential_warnings.is_empty() {
+                    error
+                } else {
+                    format!(
+                        "{} Saved credentials were unavailable: {}",
+                        error,
+                        credential_warnings.join(" ")
+                    )
+                }
+            })?;
+        Ok::<_, String>((connection, channel, target, credential_warnings))
     })
     .await
     .map_err(|error| format!("Terminal connect task failed: {}", error))?;
 
-    let (connection, channel) = match opened {
+    let (connection, channel, target, mut credential_warnings) = match opened {
         Ok(pair) => pair,
-        Err(error) => {
-            state.credentials.clear_password(&profile.id);
-            return Err(error);
-        }
+        Err(error) => return Err(error),
     };
+
+    // Only persist credentials after authentication succeeds. A local vault
+    // write failure must not tear down a working terminal, so return it as a
+    // warning while retaining the password in the in-memory write-through cache.
+    let credentials = state.credentials.clone();
+    let credential_target = target.clone();
+    let storage_warning = match tauri::async_runtime::spawn_blocking(move || {
+        sync_target_credentials(&credential_target, &credentials, clear_missing_credentials)
+    })
+    .await
+    {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(error),
+        Err(error) => Some(format!("Credential storage task failed: {}", error)),
+    };
+    if let Some(warning) = storage_warning {
+        credential_warnings.push(warning);
+    }
+    let credential_warning =
+        (!credential_warnings.is_empty()).then(|| credential_warnings.join(" "));
 
     // Persist before replacing any live pane so a storage failure cannot
     // leave an untracked SSH channel behind.
@@ -119,8 +175,10 @@ pub async fn connect_terminal(
     let reader_session = connection.session.clone();
     let handle = TerminalHandle {
         session_id: profile.id.clone(),
-        connection,
-        channel: Arc::clone(&channel),
+        backend: TerminalBackend::Remote {
+            connection,
+            channel: Arc::clone(&channel),
+        },
         stop: Arc::clone(&stop),
     };
 
@@ -149,7 +207,7 @@ pub async fn connect_terminal(
     }
 
     let reader_state = TerminalReaderState::from_app_state(&state);
-    start_terminal_reader(
+    start_remote_terminal_reader(
         app.clone(),
         profile.id.clone(),
         terminal_id.clone(),
@@ -164,6 +222,77 @@ pub async fn connect_terminal(
         session_id: profile.id.clone(),
         terminal_id,
         profile,
+        credential_warning,
+    })
+}
+
+async fn connect_local_terminal(
+    app: AppHandle,
+    state: &AppState,
+    profile: crate::ssh::session::SessionProfile,
+    cols: u32,
+    rows: u32,
+) -> Result<TerminalSessionInfo, String> {
+    let opened = tauri::async_runtime::spawn_blocking(move || open_local_terminal(cols, rows))
+        .await
+        .map_err(|error| format!("Local terminal task failed: {}", error))??;
+
+    upsert_profile(profile.clone())?;
+    stop_existing_session(state, &profile.id);
+
+    let terminal_id = uuid::Uuid::new_v4().to_string();
+    let stop = Arc::new(AtomicBool::new(false));
+    let OpenLocalTerminal {
+        master,
+        writer,
+        child,
+        reader,
+    } = opened;
+    let handle = TerminalHandle {
+        session_id: profile.id.clone(),
+        backend: TerminalBackend::Local {
+            master,
+            writer,
+            child,
+        },
+        stop: Arc::clone(&stop),
+    };
+
+    {
+        let mut terminals = state
+            .terminals
+            .lock()
+            .map_err(|_| "Terminal state is unavailable".to_string())?;
+        terminals.insert(terminal_id.clone(), handle);
+    }
+    {
+        let mut active = state
+            .active_connections
+            .lock()
+            .map_err(|_| "Active session state is unavailable".to_string())?;
+        active.insert(
+            profile.id.clone(),
+            ActiveConnection {
+                profile: profile.clone(),
+            },
+        );
+    }
+
+    start_local_terminal_reader(
+        app.clone(),
+        profile.id.clone(),
+        terminal_id.clone(),
+        reader,
+        stop,
+        TerminalReaderState::from_app_state(state),
+    );
+    start_local_system_monitor(app, state, profile.id.clone());
+
+    Ok(TerminalSessionInfo {
+        session_id: profile.id.clone(),
+        terminal_id,
+        profile,
+        credential_warning: None,
     })
 }
 
@@ -175,6 +304,64 @@ pub async fn create_terminal_split(
     cols: u32,
     rows: u32,
 ) -> Result<TerminalPaneInfo, String> {
+    let is_local = {
+        let active = state
+            .active_connections
+            .lock()
+            .map_err(|_| "Active session state is unavailable".to_string())?;
+        active
+            .get(&session_id)
+            .map(|connection| connection.profile.is_local)
+            .ok_or_else(|| "No active terminal session is available".to_string())?
+    };
+
+    if is_local {
+        let opened = tauri::async_runtime::spawn_blocking(move || {
+            open_local_terminal(cols.max(1), rows.max(1))
+        })
+        .await
+        .map_err(|error| format!("Local terminal split task failed: {}", error))??;
+        let terminal_id = uuid::Uuid::new_v4().to_string();
+        let stop = Arc::new(AtomicBool::new(false));
+        let OpenLocalTerminal {
+            master,
+            writer,
+            child,
+            reader,
+        } = opened;
+
+        {
+            let mut terminals = state
+                .terminals
+                .lock()
+                .map_err(|_| "Terminal state is unavailable".to_string())?;
+            terminals.insert(
+                terminal_id.clone(),
+                TerminalHandle {
+                    session_id: session_id.clone(),
+                    backend: TerminalBackend::Local {
+                        master,
+                        writer,
+                        child,
+                    },
+                    stop: Arc::clone(&stop),
+                },
+            );
+        }
+        start_local_terminal_reader(
+            app,
+            session_id.clone(),
+            terminal_id.clone(),
+            reader,
+            stop,
+            TerminalReaderState::from_app_state(&state),
+        );
+        return Ok(TerminalPaneInfo {
+            session_id,
+            terminal_id,
+        });
+    }
+
     let target = target_for_active_session(&state, &session_id)?;
     let connect_target = target.clone();
     let opened = tauri::async_runtime::spawn_blocking(move || {
@@ -197,15 +384,17 @@ pub async fn create_terminal_split(
             terminal_id.clone(),
             TerminalHandle {
                 session_id: session_id.clone(),
-                connection,
-                channel: Arc::clone(&channel),
+                backend: TerminalBackend::Remote {
+                    connection,
+                    channel: Arc::clone(&channel),
+                },
                 stop: Arc::clone(&stop),
             },
         );
     }
 
     let reader_state = TerminalReaderState::from_app_state(&state);
-    start_terminal_reader(
+    start_remote_terminal_reader(
         app,
         session_id.clone(),
         terminal_id.clone(),
@@ -227,32 +416,49 @@ pub fn terminal_write(
     terminal_id: String,
     data: String,
 ) -> Result<(), String> {
-    let (channel, stop) = {
+    let (writer, stop) = {
         let terminals = state
             .terminals
             .lock()
             .map_err(|_| "Terminal state is unavailable".to_string())?;
         let Some(handle) = terminals.get(&terminal_id) else {
-            // Input can already be queued in the webview when a remote shell
+            // Input can already be queued in the webview when a shell
             // closes. Treat that normal lifecycle race as a no-op.
             return Ok(());
         };
-        (Arc::clone(&handle.channel), Arc::clone(&handle.stop))
+        let writer = match &handle.backend {
+            TerminalBackend::Remote { channel, .. } => TerminalWriter::Remote(Arc::clone(channel)),
+            TerminalBackend::Local { writer, .. } => TerminalWriter::Local(Arc::clone(writer)),
+        };
+        (writer, Arc::clone(&handle.stop))
     };
     if stop.load(Ordering::SeqCst) {
         return Ok(());
     }
 
-    let mut channel = channel
-        .lock()
-        .map_err(|_| "Terminal channel is unavailable".to_string())?;
-    if channel.eof() {
-        return Ok(());
-    }
-    match write_all_nonblocking(&mut channel, data.as_bytes()) {
-        Ok(()) => Ok(()),
-        Err(error) if is_closed_channel_error(&error) => Ok(()),
-        Err(error) => Err(format!("Failed to write to remote terminal: {}", error)),
+    match writer {
+        TerminalWriter::Remote(channel) => {
+            let mut channel = channel
+                .lock()
+                .map_err(|_| "Terminal channel is unavailable".to_string())?;
+            if channel.eof() {
+                return Ok(());
+            }
+            match write_all_nonblocking(&mut channel, data.as_bytes()) {
+                Ok(()) => Ok(()),
+                Err(error) if is_closed_channel_error(&error) => Ok(()),
+                Err(error) => Err(format!("Failed to write to remote terminal: {}", error)),
+            }
+        }
+        TerminalWriter::Local(writer) => {
+            let mut writer = writer
+                .lock()
+                .map_err(|_| "Local terminal input is unavailable".to_string())?;
+            writer
+                .write_all(data.as_bytes())
+                .and_then(|_| writer.flush())
+                .map_err(|error| format!("Failed to write to local terminal: {}", error))
+        }
     }
 }
 
@@ -263,7 +469,7 @@ pub fn terminal_resize(
     cols: u32,
     rows: u32,
 ) -> Result<(), String> {
-    let channel = {
+    let resizer = {
         let terminals = state
             .terminals
             .lock()
@@ -271,16 +477,28 @@ pub fn terminal_resize(
         let Some(handle) = terminals.get(&terminal_id) else {
             return Ok(());
         };
-        Arc::clone(&handle.channel)
+        match &handle.backend {
+            TerminalBackend::Remote { channel, .. } => TerminalResizer::Remote(Arc::clone(channel)),
+            TerminalBackend::Local { master, .. } => TerminalResizer::Local(Arc::clone(master)),
+        }
     };
 
-    let mut channel = channel
-        .lock()
-        .map_err(|_| "Terminal channel is unavailable".to_string())?;
-    match channel.request_pty_size(cols.max(1), rows.max(1), None, None) {
-        Ok(()) => Ok(()),
-        Err(error) if error.to_string().to_ascii_lowercase().contains("closed") => Ok(()),
-        Err(error) => Err(format!("Failed to resize remote PTY: {}", error)),
+    match resizer {
+        TerminalResizer::Remote(channel) => {
+            let mut channel = channel
+                .lock()
+                .map_err(|_| "Terminal channel is unavailable".to_string())?;
+            match channel.request_pty_size(cols.max(1), rows.max(1), None, None) {
+                Ok(()) => Ok(()),
+                Err(error) if error.to_string().to_ascii_lowercase().contains("closed") => Ok(()),
+                Err(error) => Err(format!("Failed to resize remote PTY: {}", error)),
+            }
+        }
+        TerminalResizer::Local(master) => master
+            .lock()
+            .map_err(|_| "Local PTY is unavailable".to_string())?
+            .resize(pty_size(cols, rows))
+            .map_err(|error| format!("Failed to resize local PTY: {}", error)),
     }
 }
 
@@ -302,7 +520,8 @@ pub fn disconnect_terminal_pane(state: State<AppState>, terminal_id: String) -> 
 #[tauri::command]
 pub fn disconnect_terminal(state: State<AppState>, session_id: String) -> Result<(), String> {
     stop_existing_session(&state, &session_id);
-    state.credentials.clear_password(&session_id);
+    // Passwords remain only in memory until GpuTerm exits so a disconnected
+    // saved profile can reconnect on double-click without writing secrets to disk.
     if let Ok(mut active) = state.active_connections.lock() {
         active.remove(&session_id);
     }
@@ -351,7 +570,7 @@ fn drain_utf8_stream(pending: &mut Vec<u8>, bytes: &[u8]) -> String {
     }
 }
 
-fn start_terminal_reader(
+fn start_remote_terminal_reader(
     app: AppHandle,
     session_id: String,
     terminal_id: String,
@@ -438,38 +657,105 @@ fn start_terminal_reader(
             let _ = channel.close();
         }
 
-        let session_closed = if let Ok(mut registered) = reader_state.terminals.lock() {
-            registered.remove(&terminal_id);
-            !registered
-                .values()
-                .any(|handle| handle.session_id == session_id)
-        } else {
-            false
-        };
-        if session_closed {
-            if let Ok(mut active) = reader_state.active_connections.lock() {
-                active.remove(&session_id);
-            }
-            if let Ok(mut stops) = reader_state.telemetry_stops.lock() {
-                if let Some(monitor_stop) = stops.remove(&session_id) {
-                    monitor_stop.store(true, Ordering::SeqCst);
+        finish_terminal_reader(&app, session_id, terminal_id, close_message, &reader_state);
+    });
+}
+
+fn start_local_terminal_reader(
+    app: AppHandle,
+    session_id: String,
+    terminal_id: String,
+    mut reader: Box<dyn Read + Send>,
+    stop: Arc<AtomicBool>,
+    reader_state: TerminalReaderState,
+) {
+    thread::spawn(move || {
+        let mut buffer = [0_u8; 8192];
+        let mut pending = Vec::new();
+        let mut close_message = None;
+
+        while !stop.load(Ordering::SeqCst) {
+            match reader.read(&mut buffer) {
+                Ok(0) => {
+                    close_message = Some("Local shell closed".to_string());
+                    break;
+                }
+                Ok(bytes_read) => {
+                    let data = drain_utf8_stream(&mut pending, &buffer[..bytes_read]);
+                    if !data.is_empty() {
+                        let _ = app.emit(
+                            "terminal-output",
+                            TerminalOutputPayload {
+                                session_id: session_id.clone(),
+                                terminal_id: terminal_id.clone(),
+                                data,
+                            },
+                        );
+                    }
+                }
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    if !stop.load(Ordering::SeqCst) {
+                        close_message = Some(format!("Local terminal stream failed: {}", error));
+                    }
+                    break;
                 }
             }
-            crate::ssh::session::drop_ops_session(&reader_state.ops_sessions, &session_id);
-            if let Ok(mut cache) = reader_state.remote_os_cache.lock() {
-                cache.remove(&session_id);
+        }
+
+        if !pending.is_empty() {
+            let data = String::from_utf8_lossy(&pending).to_string();
+            let _ = app.emit(
+                "terminal-output",
+                TerminalOutputPayload {
+                    session_id: session_id.clone(),
+                    terminal_id: terminal_id.clone(),
+                    data,
+                },
+            );
+        }
+        finish_terminal_reader(&app, session_id, terminal_id, close_message, &reader_state);
+    });
+}
+
+fn finish_terminal_reader(
+    app: &AppHandle,
+    session_id: String,
+    terminal_id: String,
+    close_message: Option<String>,
+    reader_state: &TerminalReaderState,
+) {
+    let session_closed = if let Ok(mut registered) = reader_state.terminals.lock() {
+        registered.remove(&terminal_id);
+        !registered
+            .values()
+            .any(|handle| handle.session_id == session_id)
+    } else {
+        false
+    };
+    if session_closed {
+        if let Ok(mut active) = reader_state.active_connections.lock() {
+            active.remove(&session_id);
+        }
+        if let Ok(mut stops) = reader_state.telemetry_stops.lock() {
+            if let Some(monitor_stop) = stops.remove(&session_id) {
+                monitor_stop.store(true, Ordering::SeqCst);
             }
         }
-        let _ = app.emit(
-            "terminal-closed",
-            TerminalClosedPayload {
-                session_id,
-                terminal_id,
-                session_closed,
-                message: close_message,
-            },
-        );
-    });
+        crate::ssh::session::drop_ops_session(&reader_state.ops_sessions, &session_id);
+        if let Ok(mut cache) = reader_state.remote_os_cache.lock() {
+            cache.remove(&session_id);
+        }
+    }
+    let _ = app.emit(
+        "terminal-closed",
+        TerminalClosedPayload {
+            session_id,
+            terminal_id,
+            session_closed,
+            message: close_message,
+        },
+    );
 }
 
 fn start_system_monitor(app: AppHandle, state: &AppState, target: crate::ssh::session::SshTarget) {
@@ -481,6 +767,17 @@ fn start_system_monitor(app: AppHandle, state: &AppState, target: crate::ssh::se
         stops.insert(target.session_id.clone(), Arc::clone(&stop));
     }
     system_monitor::start(app, target, stop, Arc::clone(&state.telemetry_settings));
+}
+
+fn start_local_system_monitor(app: AppHandle, state: &AppState, session_id: String) {
+    let stop = Arc::new(AtomicBool::new(false));
+    if let Ok(mut stops) = state.telemetry_stops.lock() {
+        if let Some(previous) = stops.remove(&session_id) {
+            previous.store(true, Ordering::SeqCst);
+        }
+        stops.insert(session_id.clone(), Arc::clone(&stop));
+    }
+    system_monitor::start_local(app, session_id, stop, Arc::clone(&state.telemetry_settings));
 }
 
 fn stop_existing_session(state: &AppState, session_id: &str) {
@@ -516,13 +813,141 @@ fn stop_existing_session(state: &AppState, session_id: &str) {
 
 fn stop_terminal_handle(handle: TerminalHandle) {
     handle.stop.store(true, Ordering::SeqCst);
-    if let Ok(mut channel) = handle.channel.lock() {
-        let _ = channel.close();
+    match handle.backend {
+        TerminalBackend::Remote {
+            connection,
+            channel,
+        } => {
+            if let Ok(mut channel) = channel.lock() {
+                let _ = channel.close();
+            }
+            let _ = connection
+                .session
+                .disconnect(None, "GpuTerm terminal disconnected", None);
+        }
+        TerminalBackend::Local { child, .. } => {
+            if let Ok(mut child) = child.lock() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
     }
-    let _ = handle
-        .connection
-        .session
-        .disconnect(None, "GpuTerm terminal disconnected", None);
+}
+
+fn fill_stored_credentials(
+    target: &mut SshTarget,
+    credentials: &impl CredentialStore,
+    errors: &mut Vec<String>,
+) {
+    if target.password.is_none() {
+        match credentials.get_password(&target.session_id) {
+            Ok(password) => target.password = password,
+            Err(error) => errors.push(error),
+        }
+    }
+    if let Some(proxy) = target.proxy.as_mut() {
+        fill_stored_credentials(proxy, credentials, errors);
+    }
+}
+
+fn sync_target_credentials(
+    target: &SshTarget,
+    credentials: &impl CredentialStore,
+    clear_missing: bool,
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    sync_target_credentials_inner(target, credentials, clear_missing, &mut errors);
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join(" "))
+    }
+}
+
+fn sync_target_credentials_inner(
+    target: &SshTarget,
+    credentials: &impl CredentialStore,
+    clear_missing: bool,
+    errors: &mut Vec<String>,
+) {
+    if let Some(password) = target.password.clone() {
+        if let Err(error) = credentials.set_password(&target.session_id, password) {
+            errors.push(error);
+        }
+    } else if clear_missing {
+        if let Err(error) = credentials.clear_password(&target.session_id) {
+            errors.push(error);
+        }
+    }
+    if let Some(proxy) = target.proxy.as_ref() {
+        sync_target_credentials_inner(proxy, credentials, clear_missing, errors);
+    }
+}
+
+fn pty_size(cols: u32, rows: u32) -> PtySize {
+    PtySize {
+        rows: rows.max(1).min(u16::MAX as u32) as u16,
+        cols: cols.max(1).min(u16::MAX as u32) as u16,
+        pixel_width: 0,
+        pixel_height: 0,
+    }
+}
+
+fn default_local_shell() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+    }
+}
+
+fn open_local_terminal(cols: u32, rows: u32) -> Result<OpenLocalTerminal, String> {
+    open_local_terminal_with_shell(default_local_shell(), cols, rows)
+}
+
+fn open_local_terminal_with_shell(
+    shell: String,
+    cols: u32,
+    rows: u32,
+) -> Result<OpenLocalTerminal, String> {
+    let pair = native_pty_system()
+        .openpty(pty_size(cols, rows))
+        .map_err(|error| format!("Failed to allocate local PTY: {}", error))?;
+    let mut command = CommandBuilder::new(shell);
+    command.env("TERM", "xterm-256color");
+    command.env("COLORTERM", "truecolor");
+    command.env("TERM_PROGRAM", "GpuTerm");
+    if let Some(home) = env::var_os(if cfg!(target_os = "windows") {
+        "USERPROFILE"
+    } else {
+        "HOME"
+    }) {
+        command.cwd(home);
+    }
+
+    let child = pair
+        .slave
+        .spawn_command(command)
+        .map_err(|error| format!("Failed to start local shell: {}", error))?;
+    drop(pair.slave);
+    let reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|error| format!("Failed to open local terminal output: {}", error))?;
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|error| format!("Failed to open local terminal input: {}", error))?;
+
+    Ok(OpenLocalTerminal {
+        master: Arc::new(Mutex::new(pair.master)),
+        writer: Arc::new(Mutex::new(writer)),
+        child: Arc::new(Mutex::new(child)),
+        reader,
+    })
 }
 
 fn open_terminal_channel(
@@ -595,8 +1020,13 @@ fn write_all_nonblocking(channel: &mut Channel, mut bytes: &[u8]) -> std::io::Re
 
 #[cfg(test)]
 mod tests {
-    use super::{drain_utf8_stream, is_closed_channel_error};
-    use std::io::{Error, ErrorKind};
+    use super::{
+        drain_utf8_stream, fill_stored_credentials, is_closed_channel_error,
+        open_local_terminal_with_shell, pty_size,
+    };
+    use crate::ssh::credentials::{CredentialStore, MemoryCredentialStore};
+    use crate::ssh::session::SshTarget;
+    use std::io::{Error, ErrorKind, Read, Write};
 
     #[test]
     fn passes_through_complete_utf8() {
@@ -658,5 +1088,76 @@ mod tests {
         let unrelated = Error::new(ErrorKind::BrokenPipe, "network cable disconnected");
         assert!(is_closed_channel_error(&closed));
         assert!(!is_closed_channel_error(&unrelated));
+    }
+
+    #[test]
+    fn clamps_local_pty_dimensions() {
+        let minimum = pty_size(0, 0);
+        assert_eq!(minimum.cols, 1);
+        assert_eq!(minimum.rows, 1);
+
+        let maximum = pty_size(u32::MAX, u32::MAX);
+        assert_eq!(maximum.cols, u16::MAX);
+        assert_eq!(maximum.rows, u16::MAX);
+    }
+
+    #[test]
+    fn restores_target_and_jump_passwords_from_memory() {
+        let credentials = MemoryCredentialStore::default();
+        credentials
+            .set_password("target", "target-secret".to_string())
+            .unwrap();
+        credentials
+            .set_password("jump", "jump-secret".to_string())
+            .unwrap();
+        let mut target = SshTarget {
+            session_id: "target".to_string(),
+            host: "target.example".to_string(),
+            port: 22,
+            username: "target-user".to_string(),
+            password: None,
+            private_key_path: None,
+            proxy: Some(Box::new(SshTarget {
+                session_id: "jump".to_string(),
+                host: "jump.example".to_string(),
+                port: 22,
+                username: "jump-user".to_string(),
+                password: None,
+                private_key_path: None,
+                proxy: None,
+            })),
+        };
+
+        let mut errors = Vec::new();
+        fill_stored_credentials(&mut target, &credentials, &mut errors);
+        assert!(errors.is_empty());
+        assert_eq!(target.password.as_deref(), Some("target-secret"));
+        assert_eq!(
+            target.proxy.as_ref().unwrap().password.as_deref(),
+            Some("jump-secret")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exchanges_data_with_a_local_shell_pty() {
+        let opened = open_local_terminal_with_shell("/bin/sh".to_string(), 80, 24).unwrap();
+        {
+            let mut writer = opened.writer.lock().unwrap();
+            writer
+                .write_all(b"printf '__GPUTERM_LOCAL_PTY_OK__\\n'; exit\\n")
+                .unwrap();
+            writer.flush().unwrap();
+        }
+
+        let mut reader = opened.reader;
+        let mut output = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        while !String::from_utf8_lossy(&output).contains("__GPUTERM_LOCAL_PTY_OK__") {
+            let count = reader.read(&mut buffer).unwrap();
+            assert!(count > 0, "local shell closed before emitting the marker");
+            output.extend_from_slice(&buffer[..count]);
+        }
+        assert!(String::from_utf8_lossy(&output).contains("__GPUTERM_LOCAL_PTY_OK__"));
     }
 }

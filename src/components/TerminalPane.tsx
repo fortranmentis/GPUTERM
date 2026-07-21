@@ -14,6 +14,8 @@ import { Terminal, type IDisposable } from "@xterm/xterm";
 import {
   ArrowLeft,
   Columns2,
+  KeyRound,
+  Laptop,
   LoaderCircle,
   PanelBottom,
   PanelLeft,
@@ -222,6 +224,10 @@ export function TerminalPane() {
   >(null);
   const [otherSessionPassword, setOtherSessionPassword] = useState("");
   const [otherProxyPassword, setOtherProxyPassword] = useState("");
+  const [otherSessionCredentialStored, setOtherSessionCredentialStored] =
+    useState(false);
+  const [otherProxyCredentialStored, setOtherProxyCredentialStored] =
+    useState(false);
   const [addingSession, setAddingSession] = useState(false);
 
   const activeProfile =
@@ -264,6 +270,10 @@ export function TerminalPane() {
     connectedSessionIds.includes(focusedSessionId);
   const selectedOtherProfile =
     sessions.find((session) => session.id === selectedOtherSessionId) ?? null;
+  const selectedOtherProxyProfile =
+    sessions.find(
+      (session) => session.id === selectedOtherProfile?.proxyJumpId,
+    ) ?? null;
   const otherSessions = sessions.filter(
     (session) => !visibleSessionIds.has(session.id),
   );
@@ -275,6 +285,36 @@ export function TerminalPane() {
   ];
 
   activePaneIdsRef.current = visiblePaneIds;
+
+  useEffect(() => {
+    let disposed = false;
+    setOtherSessionCredentialStored(false);
+    setOtherProxyCredentialStored(false);
+
+    const check = async (sessionId: string | undefined) => {
+      if (!sessionId) return false;
+      try {
+        return (
+          (await invoke<boolean>("has_saved_credential", { sessionId })) === true
+        );
+      } catch {
+        return false;
+      }
+    };
+
+    void Promise.all([
+      check(selectedOtherProfile?.isLocal ? undefined : selectedOtherProfile?.id),
+      check(selectedOtherProxyProfile?.id),
+    ]).then(([targetStored, proxyStored]) => {
+      if (!disposed) {
+        setOtherSessionCredentialStored(targetStored);
+        setOtherProxyCredentialStored(proxyStored);
+      }
+    });
+    return () => {
+      disposed = true;
+    };
+  }, [selectedOtherProfile?.id, selectedOtherProfile?.isLocal, selectedOtherProxyProfile?.id]);
 
   useEffect(() => {
     if (
@@ -732,10 +772,20 @@ export function TerminalPane() {
       host: selectedOtherProfile.host,
       port: selectedOtherProfile.port,
       username: selectedOtherProfile.username,
-      password: otherSessionPassword || null,
-      privateKeyPath: selectedOtherProfile.privateKeyPath ?? null,
-      proxyJumpId: selectedOtherProfile.proxyJumpId ?? null,
-      proxyJumpPassword: otherProxyPassword || null,
+      isLocal: selectedOtherProfile.isLocal ?? false,
+      password: selectedOtherProfile.isLocal
+        ? null
+        : otherSessionPassword || null,
+      privateKeyPath: selectedOtherProfile.isLocal
+        ? null
+        : selectedOtherProfile.privateKeyPath ?? null,
+      proxyJumpId: selectedOtherProfile.isLocal
+        ? null
+        : selectedOtherProfile.proxyJumpId ?? null,
+      proxyJumpPassword: selectedOtherProfile.isLocal
+        ? null
+        : otherProxyPassword || null,
+      reuseStoredCredentials: true,
       cols: source?.cols ?? 80,
       rows: source?.rows ?? 24,
     };
@@ -751,8 +801,10 @@ export function TerminalPane() {
       focusPane(terminalId, info.sessionId);
       closeSessionPicker();
       setMessage({
-        kind: "success",
-        text: `${info.profile.name} added to the terminal layout`,
+        kind: info.credentialWarning ? "info" : "success",
+        text: info.credentialWarning
+          ? `${info.profile.name} was added, but secure credential storage reported: ${info.credentialWarning}`
+          : `${info.profile.name} added to the terminal layout`,
       });
     } catch (error) {
       setMessage({ kind: "error", text: String(error) });
@@ -866,7 +918,9 @@ export function TerminalPane() {
           <TerminalIcon size={16} />
           <span>
             {activeProfile
-              ? `${activeProfile.name} (${activeProfile.host})`
+              ? activeProfile.isLocal
+                ? `${activeProfile.name} (local)`
+                : `${activeProfile.name} (${activeProfile.host})`
               : "Terminal"}
           </span>
           {visiblePaneIds.length > 1 && (
@@ -985,38 +1039,70 @@ export function TerminalPane() {
                       <span>
                         <strong>{selectedOtherProfile.name}</strong>
                         <small>
-                          {selectedOtherProfile.username}@
-                          {selectedOtherProfile.host}
+                          {selectedOtherProfile.isLocal
+                            ? "Local shell"
+                            : `${selectedOtherProfile.username}@${selectedOtherProfile.host}`}
                         </small>
                       </span>
                     </div>
-                    <label>
-                      <span>Password / key passphrase</span>
-                      <input
-                        autoFocus
-                        type="password"
-                        autoComplete="current-password"
-                        value={otherSessionPassword}
-                        placeholder="Leave blank for key/agent auth"
-                        onChange={(event) =>
-                          setOtherSessionPassword(event.target.value)
-                        }
-                      />
-                    </label>
-                    {selectedOtherProfile.proxyJumpId && (
+                    {!selectedOtherProfile.isLocal && (
                       <label>
-                        <span>Jump host password</span>
+                        <span>Password / key passphrase</span>
                         <input
+                          autoFocus
                           type="password"
-                          autoComplete="off"
-                          value={otherProxyPassword}
-                          placeholder="Leave blank for key/agent auth"
+                          autoComplete="current-password"
+                          value={otherSessionPassword}
+                          placeholder={
+                            otherSessionCredentialStored
+                              ? "•••••••• (saved securely)"
+                              : "Leave blank for key/agent auth"
+                          }
                           onChange={(event) =>
-                            setOtherProxyPassword(event.target.value)
+                            setOtherSessionPassword(event.target.value)
                           }
                         />
                       </label>
                     )}
+                    {!selectedOtherProfile.isLocal &&
+                      selectedOtherProfile.proxyJumpId && (
+                        <section
+                          className="terminal-proxy-credentials"
+                          aria-label="ProxyJump credentials"
+                        >
+                          <div className="terminal-proxy-credentials-title">
+                            <KeyRound size={15} />
+                            <span>
+                              <strong>ProxyJump credentials</strong>
+                              <small>
+                                {selectedOtherProxyProfile
+                                  ? `${selectedOtherProxyProfile.name} (${selectedOtherProxyProfile.username}@${selectedOtherProxyProfile.host})`
+                                  : "Saved jump host"}
+                              </small>
+                            </span>
+                          </div>
+                          <label>
+                            <span>Proxy password / key passphrase</span>
+                            <input
+                              type="password"
+                              autoComplete="off"
+                              value={otherProxyPassword}
+                              placeholder={
+                                otherProxyCredentialStored
+                                  ? "•••••••• (saved securely)"
+                                  : "Leave blank for key/agent auth"
+                              }
+                              onChange={(event) =>
+                                setOtherProxyPassword(event.target.value)
+                              }
+                            />
+                          </label>
+                          <small className="terminal-proxy-credentials-hint">
+                            Enter this when the jump host cannot authenticate
+                            with its saved key or SSH agent.
+                          </small>
+                        </section>
+                      )}
                     <button
                       className="primary-button"
                       type="submit"
@@ -1042,11 +1128,25 @@ export function TerminalPane() {
                           type="button"
                           onClick={() => chooseOtherSession(session)}
                         >
-                          <Server size={15} />
+                          {session.isLocal ? (
+                            <Laptop size={15} />
+                          ) : (
+                            <Server size={15} />
+                          )}
                           <span>
                             <strong>{session.name}</strong>
                             <small>
-                              {session.username}@{session.host}
+                              {session.isLocal
+                                ? "Local shell"
+                                : `${session.username}@${session.host}`}
+                              {!session.isLocal &&
+                                session.proxyJumpId &&
+                                ` · via ${
+                                  sessions.find(
+                                    (candidate) =>
+                                      candidate.id === session.proxyJumpId,
+                                  )?.name ?? "jump host"
+                                }`}
                             </small>
                           </span>
                           {connectedSessionIds.includes(session.id) && (

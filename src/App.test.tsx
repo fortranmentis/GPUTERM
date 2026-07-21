@@ -48,6 +48,10 @@ vi.mock("./components/AppMessage", () => ({
   AppMessageOverlay: () => null,
 }));
 
+vi.mock("./components/CredentialVaultGate", () => ({
+  CredentialVaultGate: () => null,
+}));
+
 vi.mock("./components/SessionSidebar", () => ({
   SessionSidebar: () => <aside>Host selector</aside>,
 }));

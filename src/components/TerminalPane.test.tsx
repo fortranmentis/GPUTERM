@@ -85,6 +85,25 @@ const beta: SessionProfile = {
   privateKeyPath: null,
 };
 
+const bastion: SessionProfile = {
+  id: "bastion",
+  name: "Bastion",
+  host: "10.0.0.10",
+  port: 22,
+  username: "jump-user",
+  privateKeyPath: null,
+};
+
+const local: SessionProfile = {
+  id: "local",
+  name: "Local terminal",
+  host: "localhost",
+  port: 0,
+  username: "local",
+  isLocal: true,
+  privateKeyPath: null,
+};
+
 describe("TerminalPane multi-session split", () => {
   beforeEach(() => {
     mockInvoke.mockReset();
@@ -271,6 +290,140 @@ describe("TerminalPane multi-session split", () => {
       "alpha",
       "beta",
     ]);
+  });
+
+  it("asks for ProxyJump credentials and sends them when adding a saved session", async () => {
+    const proxiedBeta = { ...beta, proxyJumpId: bastion.id };
+    useSessionStore.setState({ sessions: [alpha, proxiedBeta, bastion] });
+    mockInvoke.mockImplementation((command) => {
+      if (command === "connect_terminal") {
+        return Promise.resolve({
+          sessionId: "beta",
+          terminalId: "terminal-beta",
+          profile: proxiedBeta,
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<TerminalPane />);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Add another session" }),
+    );
+    const picker = screen.getByRole("dialog", { name: "Add another session" });
+    expect(within(picker).getByText(/via Bastion/i)).toBeInTheDocument();
+    fireEvent.click(within(picker).getByRole("button", { name: /Beta/i }));
+
+    const proxyCredentials = screen.getByRole("region", {
+      name: "ProxyJump credentials",
+    });
+    expect(
+      within(proxyCredentials).getByText(/jump-user@10\.0\.0\.10/i),
+    ).toBeInTheDocument();
+    fireEvent.change(
+      within(proxyCredentials).getByLabelText(
+        "Proxy password / key passphrase",
+      ),
+      { target: { value: "jump-secret" } },
+    );
+    fireEvent.change(screen.getByLabelText("Password / key passphrase"), {
+      target: { value: "beta-secret" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add pane" }));
+
+    await waitFor(() => {
+      const connectCall = mockInvoke.mock.calls.find(
+        ([command]) => command === "connect_terminal",
+      );
+      const request = (connectCall?.[1] as { request: SessionConnectRequest })
+        .request;
+      expect(request).toMatchObject({
+        id: "beta",
+        password: "beta-secret",
+        proxyJumpId: "bastion",
+        proxyJumpPassword: "jump-secret",
+        reuseStoredCredentials: true,
+      });
+    });
+  });
+
+  it("shows secure masks for saved target and ProxyJump credentials", async () => {
+    const proxiedBeta = { ...beta, proxyJumpId: bastion.id };
+    useSessionStore.setState({ sessions: [alpha, proxiedBeta, bastion] });
+    mockInvoke.mockImplementation((command, args) => {
+      if (command === "has_saved_credential") {
+        const id = (args as { sessionId?: string } | undefined)?.sessionId;
+        return Promise.resolve(id === "beta" || id === "bastion");
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<TerminalPane />);
+    fireEvent.click(screen.getByRole("button", { name: "Add another session" }));
+    fireEvent.click(
+      within(screen.getByRole("dialog", { name: "Add another session" })).getByRole(
+        "button",
+        { name: /Beta/i },
+      ),
+    );
+
+    const targetPassword = screen.getByLabelText("Password / key passphrase");
+    const proxyPassword = screen.getByLabelText("Proxy password / key passphrase");
+    await waitFor(() => {
+      expect(targetPassword).toHaveAttribute(
+        "placeholder",
+        "•••••••• (saved securely)",
+      );
+      expect(proxyPassword).toHaveAttribute(
+        "placeholder",
+        "•••••••• (saved securely)",
+      );
+    });
+    expect(targetPassword).toHaveValue("");
+    expect(proxyPassword).toHaveValue("");
+  });
+
+  it("adds a saved local terminal without showing SSH credentials", async () => {
+    useSessionStore.setState({ sessions: [alpha, local] });
+    mockInvoke.mockImplementation((command) => {
+      if (command === "connect_terminal") {
+        return Promise.resolve({
+          sessionId: local.id,
+          terminalId: "terminal-local",
+          profile: local,
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<TerminalPane />);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Add another session" }),
+    );
+    const picker = screen.getByRole("dialog", { name: "Add another session" });
+    fireEvent.click(
+      within(picker).getByRole("button", { name: /Local terminal/i }),
+    );
+    expect(
+      screen.queryByLabelText("Password / key passphrase"),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Add pane" }));
+
+    await waitFor(() => {
+      const connectCall = mockInvoke.mock.calls.find(
+        ([command]) => command === "connect_terminal",
+      );
+      const request = (connectCall?.[1] as { request: SessionConnectRequest })
+        .request;
+      expect(request).toMatchObject({
+        id: "local",
+        host: "localhost",
+        port: 0,
+        isLocal: true,
+        password: null,
+        proxyJumpId: null,
+      });
+    });
   });
 
   it("places a new split below the focused pane with the selected size", async () => {

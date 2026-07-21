@@ -49,6 +49,7 @@ Nothing is ever installed on your servers: every metric comes from one-shot stan
 - **Up to four flexible terminal cells** — place a new shell or another saved session to the left, right, top, or bottom of the focused pane; choose its initial ratio and drag dividers to resize nested layouts
 - **Collapsible host selector** — hide the sidebar for more workspace and reopen it from the top-left button; full profile fields appear only for **New**, while saved profiles show a connect-time credential prompt
 - **ProxyJump** — tunnel through a saved profile as a bastion (per-key-type host verification along the way)
+- **Native local terminal** — open the current machine without SSH and use the same terminal splits and monitoring UI
 - Password, private key (with passphrase), and SSH agent authentication
 - UTF-8 safe streaming — multibyte characters (한글, 日本語, emoji) survive chunked reads
 - **CJK input works correctly** — Korean IME composition in the terminal is handled with the same backspace-rewrite protocol native terminals use, fixing the jamo-splitting bug in WebKit-based webviews
@@ -65,19 +66,23 @@ Nothing is ever installed on your servers: every metric comes from one-shot stan
 - **Collapsible SFTP panel** — close it with the directional panel button and restore it from the top-right; the terminal immediately expands into the freed width
 
 ### 📊 Live Telemetry
-- Bottom status bar polling CPU, RAM, disk, logged-in users, and GPUs every 1–10 s — on **Linux, macOS, and Windows remotes**
+- Bottom status bar polling CPU, RAM, disk, logged-in users, and GPUs every 1–10 s — on **local or remote Linux, macOS, and Windows hosts**
 - **Collapsible monitoring bar** — close it independently and restore it from the bottom-right; visibility is remembered across launches
 - **NVIDIA, AMD, Intel, and Apple Silicon** GPUs are auto-detected per host; every card carries a vendor tag
 - **Hybrid iGPU + dGPU hosts show both cards** — on Windows, counters are attributed to adapters by their DirectX LUID, so the integrated GPU is never mistaken for the discrete one
 - Click any section for a **draggable, resizable detail popover** whose tables expand with the window: per-core CPU usage, top processes, VRAM/power/temperature per GPU, full mount list
 - **Pop any detail view out into its own OS window** — it refreshes independently and closes with its session
-- Telemetry runs on a dedicated SSH connection (per session) with automatic reconnect and exponential backoff
+- Remote telemetry runs on a dedicated SSH connection with automatic reconnect; local telemetry executes collectors directly without SSH
 - Hosts without any GPU gracefully fall back to system-only metrics
 
 ### 🔐 Security by default
-- Passwords live in memory only — never written to disk
+- Passwords and key passphrases are stored only in the local `credentials.enc` vault: Argon2id derives a 256-bit key from your GpuTerm master password, and AES-256-GCM encrypts and authenticates the complete credential payload
+- The master password and derived key are kept in memory only for the current app run; secrets are never written in plaintext or included in `sessions.json`
+- Saved-session password fields show a secure mask while keeping the actual secret out of the webview; leaving the field blank reuses the vault entry
 - Trust-on-first-use host key prompt with SHA-256 fingerprint; mismatches block the connection
 - Restrictive Tauri Content Security Policy in production and development
+
+> **Upgrading to 1.1.2-beta:** GpuTerm no longer accesses macOS Keychain, Windows Credential Manager, or Linux Secret Service/libsecret. Existing OS-vault entries are left untouched but are not imported; create a GpuTerm master password and enter each SSH password again after upgrading.
 
 ## What you can monitor
 
@@ -169,10 +174,11 @@ npm run tauri:build
 
 ## Usage
 
-1. **Create a profile** — enter host, port, username, and a password or private key path in the sidebar. Press **New** to start a fresh profile, **Save** to keep it. To route through a bastion, pick any saved profile as the **Jump host**.
-2. **Connect** — on first contact GpuTerm shows the server's SHA-256 host key fingerprint and asks for confirmation before trusting it. Connect as many servers as you like; connected profiles show a green dot, and clicking one switches the whole view to that session.
-3. **Split terminals** — use the columns button to open another shell for the focused session, or the **+** button to add a different saved session. Choose left/right/top/bottom placement and the new pane's initial size before adding it.
-4. **Work** — type in the terminal, drag or paste files into the remote SFTP panel, and watch live metrics in the bottom bar. Click CPU / RAM / Disk / GPU / Users for detail popovers you can drag around, resize, or pop out into separate windows with the ↗ button.
+1. **Unlock the local vault** — choose a GpuTerm master password on first launch; on later launches enter it once to unlock saved credentials for that app run.
+2. **Create a profile** — enter host, port, username, and a password or private key path in the sidebar. Press **New** to start a fresh profile, **Save** to keep it. To route through a bastion, pick any saved profile as the **Jump host**.
+3. **Connect** — on first contact GpuTerm shows the server's SHA-256 host key fingerprint and asks for confirmation before trusting it. Connect as many servers as you like; connected profiles show a green dot, and clicking one switches the whole view to that session.
+4. **Split terminals** — use the columns button to open another shell for the focused session, or the **+** button to add a different saved session. Choose left/right/top/bottom placement and the new pane's initial size before adding it.
+5. **Work** — type in the terminal, drag or paste files into the remote SFTP panel, and watch live metrics in the bottom bar. Click CPU / RAM / Disk / GPU / Users for detail popovers you can drag around, resize, or pop out into separate windows with the ↗ button.
 
 <details>
 <summary>Terminal split controls</summary>
@@ -254,13 +260,15 @@ Long-running work is isolated: blocking SSH I/O runs on `spawn_blocking` threads
 
 **Data locations** (`%APPDATA%\GpuTerm` on Windows, `~/Library/Application Support/GpuTerm` on macOS, `~/.config/GpuTerm` on Linux):
 
-| File | Contents |
+| Location | Contents |
 | --- | --- |
 | `sessions.json` | Session profiles — host, port, username, key *path* only |
 | `known_hosts.json` | Approved SHA-256 host key fingerprints |
 | `app_settings.json` | UI preferences such as the last local SFTP directory |
+| `credentials.enc` | Versioned Argon2id parameters plus an AES-256-GCM encrypted and authenticated credential payload |
+| `credential_index.json` | Non-secret session ids used only to show which profiles have a saved vault entry |
 
-Passwords and private key contents are **never** written to any of these files.
+Passwords and key passphrases are **never written in plaintext**. Private key contents are never copied into GpuTerm's configuration files.
 
 ## Development
 
@@ -309,7 +317,9 @@ No. Every metric is collected by running one-shot, read-only standard commands o
 <details>
 <summary><b>Where are my passwords stored?</b></summary>
 
-Nowhere. Passwords (and key passphrases) are held in memory for the lifetime of the app and never written to disk. Saved profiles keep only the host, port, username, and the *path* to a private key. See the [data locations](#architecture) table.
+Passwords and key passphrases are stored in `credentials.enc`. GpuTerm derives a 256-bit key from your master password with Argon2id (64 MiB, 3 iterations) and encrypts the complete payload with AES-256-GCM and a fresh random nonce on every write. The master password and key are kept only in memory for the current run; `sessions.json` contains host metadata and the *path* to a private key, never a secret. Deleting a profile also deletes its vault entry.
+
+Older Keychain/Credential Manager/Secret Service entries are not imported or accessed. After upgrading, enter each SSH password again. If you forget the master password, reset the vault; profiles remain, but saved passwords must be entered again. See the [data locations](#architecture) table.
 
 </details>
 
@@ -349,6 +359,7 @@ GpuTerm is free for personal and noncommercial use under [PolyForm Noncommercial
 | `tauri:dev` fails on Windows | VS Build Tools 2022 (C++ workload) + WebView2 Runtime installed, then restart the terminal |
 | `cargo` not found | Install via [rustup](https://rustup.rs), reopen the terminal (`%USERPROFILE%\.cargo\bin` on PATH) |
 | SSH auth fails | Verify host/port/user/credentials; confirm the server allows the auth method |
+| Master password is rejected or forgotten | Check the password, or choose **Reset vault**. Profiles are kept, but all saved SSH passwords are deleted and must be entered again |
 | Host key mismatch | Verify the server fingerprint out-of-band, then remove the stale entry from `known_hosts.json` |
 | GPU shows unavailable | Confirm a GPU tool is installed (`nvidia-smi`, `rocm-smi`, `xpu-smi`, or `intel_gpu_top`); other metrics still work regardless |
 | Windows remote shows “The system cannot find the path specified” | Fixed in v1.0.9-beta — older builds misdetected Windows hosts that have a `uname` port on PATH as Linux; update the app |
@@ -359,7 +370,7 @@ GpuTerm is free for personal and noncommercial use under [PolyForm Noncommercial
 - Keyboard-interactive SSH authentication is not implemented
 - Recursive directory upload/download and transfer resume are not implemented
 - `known_hosts.json` uses SHA-256 fingerprints, not the OpenSSH known_hosts format
-- Telemetry supports Linux, macOS (Apple Silicon included), and Windows remotes; Apple GPU power/temperature and per-core CPU usage need root `powermetrics` and are not shown
+- Telemetry supports local and remote Linux, macOS (Apple Silicon included), and Windows hosts; Apple GPU power/temperature and per-core CPU usage need root `powermetrics` and are not shown
 - GPU monitoring uses `nvidia-smi`, `rocm-smi`, `xpu-smi`, `intel_gpu_top`, macOS `ioreg`, or Windows WDDM performance counters (AMD support on Linux currently targets `rocm-smi`)
 - Windows remotes: requires Windows PowerShell 5.1+ (preinstalled); load averages don't exist and show as n/a; AMD/Intel GPUs report utilization and dedicated VRAM only (no power/temperature, needs Windows 10 1709+ with a WDDM 2.x driver); process owners and GPU process command lines need elevation and fall back to n/a / process names; `quser` is missing on Home editions, so the Users section stays empty there; hybrid iGPU+dGPU hosts show both cards (counters are attributed by adapter LUID from the DirectX registry, falling back to a positional heuristic if that key is unavailable)
 - macOS installer currently targets Apple Silicon only (Intel Macs: build from source)

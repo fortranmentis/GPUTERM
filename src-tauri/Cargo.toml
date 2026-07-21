@@ -1,6 +1,6 @@
 [package]
 name = "gputerm"
-version = "1.1.1-beta"
+version = "1.1.2-beta"
 description = "GpuTerm desktop SSH/SFTP client with GPU monitoring"
 authors = ["GpuTerm"]
 license = "PolyForm-Noncommercial-1.0.0"
@@ -19,7 +19,11 @@ tauri-build = { version = "2", features = [] }
 # Encodes PowerShell scripts for -EncodedCommand so Windows telemetry commands
 # survive whichever default shell (cmd.exe or PowerShell) the OpenSSH server uses.
 base64 = "0.22"
+aes-gcm = "0.10"
+argon2 = "0.5"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+portable-pty = "0.8"
+rand_core = { version = "0.6", features = ["getrandom"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # openssl-on-win32 + vendored-openssl build libssh2 against OpenSSL instead of
@@ -30,3 +34,4 @@ ssh2 = { version = "0.9", features = ["vendored-openssl", "openssl-on-win32"] }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
+zeroize = "1.8"

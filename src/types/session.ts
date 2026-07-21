@@ -4,6 +4,7 @@ export type SessionProfile = {
   host: string;
   port: number;
   username: string;
+  isLocal?: boolean;
   privateKeyPath?: string | null;
   proxyJumpId?: string | null;
 };
@@ -14,10 +15,12 @@ export type SessionConnectRequest = {
   host: string;
   port: number;
   username: string;
+  isLocal?: boolean;
   password?: string | null;
   privateKeyPath?: string | null;
   proxyJumpId?: string | null;
   proxyJumpPassword?: string | null;
+  reuseStoredCredentials?: boolean;
   cols?: number;
   rows?: number;
 };
@@ -26,6 +29,7 @@ export type TerminalSessionInfo = {
   sessionId: string;
   terminalId: string;
   profile: SessionProfile;
+  credentialWarning?: string | null;
 };
 
 export type TerminalPaneInfo = {

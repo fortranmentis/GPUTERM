@@ -157,6 +157,30 @@ describe("RemoteTelemetryBar disk summary", () => {
     expect(screen.queryByText("/mnt/storage")).not.toBeInTheDocument();
   });
 
+  it("renders telemetry for a connected local terminal", () => {
+    const localTelemetry = telemetry([], "local-1");
+    useSessionStore.setState({
+      sessions: [
+        {
+          id: "local-1",
+          name: "My computer",
+          host: "localhost",
+          port: 0,
+          username: "local",
+          isLocal: true,
+        },
+      ],
+      activeSessionId: "local-1",
+      connectedSessionIds: ["local-1"],
+      telemetryBySession: { "local-1": localTelemetry },
+    });
+
+    render(<RemoteTelemetryBar />);
+
+    expect(screen.getByText("lab")).toBeInTheDocument();
+    expect(screen.queryByText("Telemetry unavailable")).not.toBeInTheDocument();
+  });
+
   it("renders ? when usage percent is null", () => {
     setTelemetry(telemetry([disk("/", null)]));
 
