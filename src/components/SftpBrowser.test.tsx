@@ -17,6 +17,9 @@ const nativeDropMock = vi.hoisted(() => ({
       }) => void)
     | null,
 }));
+const nativeFileDragMock = vi.hoisted(() => ({
+  start: vi.fn(),
+}));
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -38,6 +41,10 @@ vi.mock("@tauri-apps/api/webview", () => ({
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   confirm: vi.fn(),
   open: vi.fn(),
+}));
+
+vi.mock("../utils/nativeFileDrag", () => ({
+  startNativeFileDrag: nativeFileDragMock.start,
 }));
 
 const mockInvoke = vi.mocked(invoke);
@@ -105,6 +112,8 @@ describe("SftpBrowser local path browse", () => {
     mockOpen.mockReset();
     mockConfirm.mockReset();
     mockConfirm.mockResolvedValue(true);
+    nativeFileDragMock.start.mockReset();
+    nativeFileDragMock.start.mockResolvedValue(undefined);
     nativeDropMock.handler = null;
     localEntries = [];
     remoteEntries = [];
@@ -138,6 +147,15 @@ describe("SftpBrowser local path browse", () => {
       }
       if (command === "describe_local_paths") {
         return Promise.resolve(localEntries);
+      }
+      if (command === "sftp_create_drag_out_paths") {
+        const remotePaths = (args as { remotePaths: string[] }).remotePaths;
+        return Promise.resolve(
+          remotePaths.map((remotePath) => ({
+            remotePath,
+            localPath: `/tmp/gputerm/drag-out/${remotePath.split("/").at(-1)}`,
+          })),
+        );
       }
       if (command === "sftp_upload_file" || command === "sftp_download_file") {
         return Promise.resolve(undefined);
@@ -454,6 +472,45 @@ describe("SftpBrowser local path browse", () => {
           localPath: "C:\\Users\\me\\pointer-download.log",
         }),
       }),
+    );
+  });
+
+  it("materializes remote files and starts a native drag at the window edge", async () => {
+    remoteEntries = [remoteFile("desktop-export.log")];
+    render(<SftpBrowser />);
+
+    const remoteFileButton = await screen.findByRole("button", {
+      name: /desktop-export\.log/i,
+    });
+    fireEvent(remoteFileButton, pointerEvent("pointerdown", {
+      button: 0,
+      pointerId: 9,
+      clientX: 300,
+      clientY: 300,
+    }));
+    fireEvent(document, pointerEvent("pointermove", {
+      pointerId: 9,
+      clientX: 2,
+      clientY: 300,
+    }));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("sftp_create_drag_out_paths", {
+        remotePaths: ["/srv/desktop-export.log"],
+      }),
+    );
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("sftp_download_file", {
+        request: expect.objectContaining({
+          remotePath: "/srv/desktop-export.log",
+          localPath: "/tmp/gputerm/drag-out/desktop-export.log",
+        }),
+      }),
+    );
+    await waitFor(() =>
+      expect(nativeFileDragMock.start).toHaveBeenCalledWith([
+        "/tmp/gputerm/drag-out/desktop-export.log",
+      ]),
     );
   });
 

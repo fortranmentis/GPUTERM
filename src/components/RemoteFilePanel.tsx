@@ -85,7 +85,7 @@ export function RemoteFilePanel({
       className={`sftp-subpanel remote-drop-zone ${dropActive ? "drop-active" : ""}`}
       data-testid="remote-drop-zone"
       tabIndex={0}
-      title="Drop files or folders here, or paste items copied from the system file manager"
+      title="Drop or paste local items here. Drag remote items outside GpuTerm to export them."
       onDrop={onDropLocalFiles}
       onDragOver={onDragOverLocalFiles}
       onDragLeave={onDragLeaveLocalFiles}

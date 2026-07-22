@@ -17,6 +17,7 @@ import { RemoteFilePanel } from "./RemoteFilePanel";
 import { TransferQueue } from "./TransferQueue";
 import { selectIsActiveConnected, useSessionStore } from "../stores/sessionStore";
 import { useTransferStore } from "../stores/transferStore";
+import { startNativeFileDrag } from "../utils/nativeFileDrag";
 import type {
   AppSettings,
   LocalEntry,
@@ -43,10 +44,20 @@ type PointerTransferDrag =
 
 type PointerDragState = {
   pointerId: number;
+  captureTarget: HTMLButtonElement;
   startX: number;
   startY: number;
   moved: boolean;
   drag: PointerTransferDrag;
+  externalIntent: boolean;
+  externalStarted: boolean;
+  externalPreparation?: Promise<string[]>;
+  externalPaths?: string[];
+};
+
+type SftpDragOutPath = {
+  remotePath: string;
+  localPath: string;
 };
 
 type SftpTransferRequest = {
@@ -94,12 +105,16 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
   const storageSplitRef = useRef<HTMLDivElement>(null);
   const storageSplitPointerRef = useRef<number | null>(null);
   const pointerDragRef = useRef<PointerDragState | null>(null);
+  const dragOutCacheRef = useRef<Map<string, Promise<string[]>>>(new Map());
   const suppressPointerClickRef = useRef(false);
   const enqueueUploadsRef = useRef<
     ((files: LocalDragFile[], targetDirectory: string) => Promise<void>) | null
   >(null);
   const enqueueDownloadsRef = useRef<
     ((files: RemoteDragFile[]) => Promise<void>) | null
+  >(null);
+  const prepareRemoteDragOutRef = useRef<
+    ((files: RemoteDragFile[]) => Promise<string[]>) | null
   >(null);
 
   const selectedEntry = useMemo(
@@ -525,6 +540,17 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
 
   useEffect(() => {
     const clearPointerDrag = () => {
+      const state = pointerDragRef.current;
+      if (state) {
+        try {
+          if (state.captureTarget.hasPointerCapture?.(state.pointerId)) {
+            state.captureTarget.releasePointerCapture?.(state.pointerId);
+          }
+        } catch {
+          // The browser may already have released capture while crossing the
+          // native window boundary.
+        }
+      }
       pointerDragRef.current = null;
       clearActiveDrag();
       setRemoteDropActive(false);
@@ -547,6 +573,13 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
 
       event.preventDefault();
       document.body.classList.add("sftp-pointer-dragging");
+      const overLocal =
+        state.drag.kind === "remote" &&
+        isClientPositionInsideElement(
+          event.clientX,
+          event.clientY,
+          localDropZoneRef.current,
+        );
       setRemoteDropActive(
         state.drag.kind === "local" &&
           isClientPositionInsideElement(
@@ -555,14 +588,79 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
             remoteDropZoneRef.current,
           ),
       );
-      setLocalDropActive(
-        state.drag.kind === "remote" &&
-          isClientPositionInsideElement(
-            event.clientX,
-            event.clientY,
-            localDropZoneRef.current,
-          ),
-      );
+      setLocalDropActive(overLocal);
+
+      if (state.drag.kind !== "remote") {
+        return;
+      }
+
+      state.externalIntent =
+        !overLocal && isNearViewportEdge(event.clientX, event.clientY);
+      if (!state.externalIntent || state.externalStarted) {
+        return;
+      }
+
+      const launchNativeDrag = (paths: string[]) => {
+        if (
+          pointerDragRef.current !== state ||
+          !state.externalIntent ||
+          state.externalStarted
+        ) {
+          return;
+        }
+        state.externalStarted = true;
+        suppressPointerClickRef.current = true;
+        globalThis.setTimeout(() => {
+          suppressPointerClickRef.current = false;
+        }, 0);
+        clearPointerDrag();
+        setMessage({
+          kind: "info",
+          text: "Drop the prepared items in Finder, Explorer, or Files",
+        });
+        void startNativeFileDrag(paths).catch((error) => {
+          setMessage({
+            kind: "error",
+            text: `Failed to start desktop file drag: ${String(error)}`,
+          });
+        });
+      };
+
+      if (state.externalPaths) {
+        launchNativeDrag(state.externalPaths);
+        return;
+      }
+      if (state.externalPreparation) {
+        return;
+      }
+
+      const prepare = prepareRemoteDragOutRef.current;
+      if (!prepare) {
+        return;
+      }
+      setMessage({
+        kind: "info",
+        text: "Preparing remote items for desktop drag. Keep holding while they download.",
+      });
+      const preparation = prepare(state.drag.files);
+      state.externalPreparation = preparation;
+      void preparation
+        .then((paths) => {
+          state.externalPaths = paths;
+          if (pointerDragRef.current === state && state.externalIntent) {
+            launchNativeDrag(paths);
+          } else if (state.externalIntent) {
+            setMessage({
+              kind: "info",
+              text: "Remote items are ready. Drag them outside GpuTerm again.",
+            });
+          }
+        })
+        .catch((error) => {
+          if (state.externalIntent) {
+            setMessage({ kind: "error", text: String(error) });
+          }
+        });
     };
 
     const onPointerUp = (event: PointerEvent) => {
@@ -612,7 +710,7 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
       clearActiveDrag();
       document.body.classList.remove("sftp-pointer-dragging");
     };
-  }, [clearActiveDrag, path]);
+  }, [clearActiveDrag, path, setMessage]);
 
   const confirmOverwrite = async (
     command: "sftp_path_exists" | "local_path_exists",
@@ -635,7 +733,7 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
     command: "sftp_upload_file" | "sftp_download_file",
     task: TransferTask,
     request: SftpTransferRequest,
-  ) => {
+  ): Promise<boolean> => {
     updateTask(task.id, { status: "running" });
     try {
       await invoke(command, { request });
@@ -649,14 +747,90 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
           totalBytes ?? currentTask?.transferredBytes ?? task.transferredBytes,
         progressPercent: 100,
       });
+      return true;
     } catch (error) {
       updateTask(task.id, {
         status: "failed",
         error: String(error),
       });
       setMessage({ kind: "error", text: String(error) });
+      return false;
     }
   };
+
+  const prepareRemoteDragOut = (files: RemoteDragFile[]) => {
+    const sessionId = activeSessionId;
+    if (!sessionId) {
+      return Promise.reject(new Error("No active SFTP session"));
+    }
+    const downloadable = files.filter(
+      (file) => file.type === "file" || file.type === "directory",
+    );
+    if (downloadable.length === 0) {
+      return Promise.reject(new Error("No downloadable remote items selected"));
+    }
+
+    const cacheKey = JSON.stringify({
+      sessionId,
+      files: downloadable.map((file) => [file.path, file.type, file.size]),
+    });
+    const cached = dragOutCacheRef.current.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
+    const preparation = invoke<SftpDragOutPath[]>("sftp_create_drag_out_paths", {
+      remotePaths: downloadable.map((file) => file.path),
+    }).then(async (reservedPaths) => {
+      const results = await Promise.all(
+        reservedPaths.map(async (reservedPath) => {
+          const file = downloadable.find(
+            (candidate) => candidate.path === reservedPath.remotePath,
+          );
+          if (!file) {
+            return false;
+          }
+          const task = createTransferTask(
+            "download",
+            file.name,
+            file.path,
+            reservedPath.localPath,
+            file.type === "file" ? file.size : null,
+            sessionId,
+          );
+          addTask(task);
+          return runTransfer("sftp_download_file", task, {
+            sessionId,
+            remotePath: file.path,
+            localPath: reservedPath.localPath,
+            transferId: task.id,
+          });
+        }),
+      );
+      if (results.some((succeeded) => !succeeded)) {
+        throw new Error("Failed to prepare one or more remote items for desktop drag");
+      }
+      return reservedPaths.map((reservedPath) => reservedPath.localPath);
+    });
+
+    dragOutCacheRef.current.set(cacheKey, preparation);
+    void preparation
+      .then(() => {
+        globalThis.setTimeout(() => {
+          if (dragOutCacheRef.current.get(cacheKey) === preparation) {
+            dragOutCacheRef.current.delete(cacheKey);
+          }
+        }, 5 * 60 * 1000);
+      })
+      .catch(() => {
+        if (dragOutCacheRef.current.get(cacheKey) === preparation) {
+          dragOutCacheRef.current.delete(cacheKey);
+        }
+      });
+    return preparation;
+  };
+
+  prepareRemoteDragOutRef.current = prepareRemoteDragOut;
 
   const selectRemoteEntry = (entry: SftpEntry, additive: boolean) => {
     setSelectedRemotePaths((current) =>
@@ -684,10 +858,13 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
     event.currentTarget.setPointerCapture?.(event.pointerId);
     pointerDragRef.current = {
       pointerId: event.pointerId,
+      captureTarget: event.currentTarget,
       startX: event.clientX,
       startY: event.clientY,
       moved: false,
       drag,
+      externalIntent: false,
+      externalStarted: false,
     };
     setActiveDrag(drag);
   };
@@ -1088,6 +1265,18 @@ function isClientPositionInsideElement(
     clientX <= rect.right &&
     clientY >= rect.top &&
     clientY <= rect.bottom
+  );
+}
+
+function isNearViewportEdge(clientX: number, clientY: number) {
+  const edgeThreshold = 32;
+  const width = globalThis.innerWidth || document.documentElement.clientWidth;
+  const height = globalThis.innerHeight || document.documentElement.clientHeight;
+  return (
+    clientX <= edgeThreshold ||
+    clientY <= edgeThreshold ||
+    clientX >= width - edgeThreshold ||
+    clientY >= height - edgeThreshold
   );
 }
 

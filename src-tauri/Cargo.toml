@@ -33,5 +33,6 @@ serde_json = "1"
 ssh2 = { version = "0.9", features = ["vendored-openssl", "openssl-on-win32"] }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+tauri-plugin-drag = "2.1.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = "1.8"

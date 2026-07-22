@@ -62,6 +62,7 @@ Nothing is ever installed on your servers: every metric comes from one-shot stan
 - Side-by-side remote/local panels with a draggable divider for adjusting their vertical ratio
 - Drag-and-drop upload & download for **files and complete directory trees**, with aggregate folder progress and cancellation
 - **Native desktop drops and paste uploads** — drag files/folders from Explorer, Finder, or Nautilus, or paste URI-list items into the remote pane
+- **Native desktop drag-out** — drag remote files, complete folders, or multi-selections from GpuTerm into Finder, Explorer, or a Linux file manager
 - Streaming 1 MiB chunked transfers with a progress queue and **per-item cancellation**
 - Downloaded files are written to temporary files and atomically renamed — no partial files are exposed
 - Replace/merge confirmation, delete, contextual mkdir beside Open, and a native OS folder picker
@@ -209,6 +210,7 @@ npm run tauri:build
 - Running transfers can be canceled individually from the queue.
 - If the target exists, GpuTerm asks before replacing a file or merging into an existing folder.
 - Files and folders dragged from Explorer, Finder, or Nautilus use the native desktop path payload; items copied in Nautilus and compatible file managers can also be pasted into the focused remote pane.
+- To export remote items to another application, drag them toward a GpuTerm window edge. GpuTerm materializes them in a temporary local export and then starts a native OS copy drag. Large items may finish preparing after the pointer is released; drag them again once the transfer queue reports completion.
 - Click a local folder once to select it for transfer and double-click it to open it. The divider between the remote and local lists can be dragged or adjusted with the arrow keys.
 - Symbolic links are rejected during recursive transfer to prevent cycles and unexpected traversal outside the selected tree.
 - The last local directory is remembered across launches.

@@ -3,15 +3,18 @@ use crate::ssh::session::{
 };
 use serde::{Deserialize, Serialize};
 use ssh2::{FileStat, Sftp};
+use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 use tauri::{AppHandle, Emitter, State};
 
 const OPS_TIMEOUT_MS: u32 = 10_000;
 const DOWNLOAD_PART_SUFFIX: &str = ".gputerm-part";
+const DRAG_OUT_CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,6 +48,13 @@ pub struct SftpTransferRequest {
 pub struct SftpPathRequest {
     session_id: String,
     remote_path: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SftpDragOutPath {
+    remote_path: String,
+    local_path: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -108,6 +118,47 @@ pub async fn sftp_list_dir(
     })
     .await
     .map_err(|error| format!("SFTP list task failed: {}", error))?
+}
+
+/// Reserves absolute, application-owned temporary paths for native OS drag-out.
+///
+/// Finder, Explorer and Linux file managers can only receive real local paths;
+/// remote SFTP paths are materialized into these paths before the native drag
+/// operation starts. Old exports are retained long enough for file managers to
+/// finish copying and are pruned on later exports.
+#[tauri::command]
+pub fn sftp_create_drag_out_paths(
+    remote_paths: Vec<String>,
+) -> Result<Vec<SftpDragOutPath>, String> {
+    if remote_paths.is_empty() {
+        return Err("Select at least one remote item to drag".to_string());
+    }
+    if remote_paths.len() > 256 {
+        return Err("Too many remote items selected for one drag".to_string());
+    }
+
+    let cache_root = std::env::temp_dir().join("gputerm").join("drag-out");
+    fs::create_dir_all(&cache_root).map_err(|error| {
+        format!(
+            "Failed to create SFTP drag cache {}: {}",
+            cache_root.display(),
+            error
+        )
+    })?;
+    cleanup_drag_out_cache(&cache_root);
+
+    let export_dir = cache_root.join(uuid::Uuid::new_v4().to_string());
+    fs::create_dir(&export_dir).map_err(|error| {
+        format!(
+            "Failed to create SFTP drag export {}: {}",
+            export_dir.display(),
+            error
+        )
+    })?;
+
+    reserve_drag_out_paths(&export_dir, remote_paths).inspect_err(|_| {
+        let _ = fs::remove_dir_all(&export_dir);
+    })
 }
 
 #[tauri::command]
@@ -797,6 +848,129 @@ fn remove_local_entry_if_exists(path: &Path) -> Result<(), String> {
     }
 }
 
+fn reserve_drag_out_paths(
+    export_dir: &Path,
+    remote_paths: Vec<String>,
+) -> Result<Vec<SftpDragOutPath>, String> {
+    let mut reserved_names = HashSet::new();
+    remote_paths
+        .into_iter()
+        .map(|remote_path| {
+            let trimmed_path = remote_path.trim_end_matches('/');
+            let source_name = Path::new(trimmed_path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty() && *name != "." && *name != "..")
+                .ok_or_else(|| format!("Remote path has no usable file name: {}", remote_path))?;
+            let safe_name =
+                unique_drag_out_name(&sanitize_drag_out_name(source_name), &mut reserved_names);
+            let local_path = export_dir.join(safe_name);
+            if !local_path.is_absolute() {
+                return Err(format!(
+                    "SFTP drag export path is not absolute: {}",
+                    local_path.display()
+                ));
+            }
+            Ok(SftpDragOutPath {
+                remote_path,
+                local_path: local_path.to_string_lossy().to_string(),
+            })
+        })
+        .collect()
+}
+
+fn sanitize_drag_out_name(name: &str) -> String {
+    let mut sanitized = name
+        .chars()
+        .map(|character| {
+            if character.is_control()
+                || matches!(
+                    character,
+                    '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+                )
+            {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    sanitized = sanitized.trim_end_matches([' ', '.']).to_string();
+    if sanitized.is_empty() {
+        sanitized.push_str("remote-item");
+    }
+
+    let stem = sanitized
+        .split_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(&sanitized)
+        .to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || stem
+            .strip_prefix("COM")
+            .or_else(|| stem.strip_prefix("LPT"))
+            .and_then(|suffix| suffix.parse::<u8>().ok())
+            .is_some_and(|number| (1..=9).contains(&number));
+    if reserved {
+        sanitized.insert(0, '_');
+    }
+    sanitized
+}
+
+fn unique_drag_out_name(name: &str, reserved_names: &mut HashSet<String>) -> String {
+    if reserved_names.insert(name.to_lowercase()) {
+        return name.to_string();
+    }
+
+    let path = Path::new(name);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(name);
+    let extension = path.extension().and_then(|value| value.to_str());
+    for copy_number in 2_u32.. {
+        let candidate = match extension {
+            Some(extension) if !extension.is_empty() => {
+                format!("{} ({}).{}", stem, copy_number, extension)
+            }
+            _ => format!("{} ({})", stem, copy_number),
+        };
+        if reserved_names.insert(candidate.to_lowercase()) {
+            return candidate;
+        }
+    }
+    unreachable!("drag-out copy number range is unbounded")
+}
+
+fn cleanup_drag_out_cache(cache_root: &Path) {
+    let Ok(entries) = fs::read_dir(cache_root) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|metadata| metadata.modified()) else {
+            continue;
+        };
+        let Ok(age) = now.duration_since(modified) else {
+            continue;
+        };
+        if age <= DRAG_OUT_CACHE_MAX_AGE {
+            continue;
+        }
+        if file_type.is_dir() {
+            let _ = fs::remove_dir_all(entry.path());
+        } else {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
 fn emit_progress(
     app: &AppHandle,
     request: &SftpTransferRequest,
@@ -853,7 +1027,7 @@ fn file_type(stat: &FileStat) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{local_entry_size, remote_child_path};
+    use super::{local_entry_size, remote_child_path, reserve_drag_out_paths};
     use std::fs;
     use std::path::Path;
 
@@ -880,5 +1054,31 @@ mod tests {
             remote_child_path(Path::new("/"), std::ffi::OsStr::new("child.txt")),
             Path::new("/child.txt")
         );
+    }
+
+    #[test]
+    fn drag_out_paths_are_absolute_safe_and_unique() {
+        let root =
+            std::env::temp_dir().join(format!("gputerm-sftp-drag-paths-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create drag path test directory");
+
+        let paths = reserve_drag_out_paths(
+            &root,
+            vec![
+                "/srv/report?.txt".to_string(),
+                "/archive/report*.txt".to_string(),
+                "/srv/CON".to_string(),
+            ],
+        )
+        .expect("reserve drag-out paths");
+
+        assert!(paths
+            .iter()
+            .all(|path| Path::new(&path.local_path).is_absolute()));
+        assert!(paths[0].local_path.ends_with("report_.txt"));
+        assert!(paths[1].local_path.ends_with("report_ (2).txt"));
+        assert!(paths[2].local_path.ends_with("_CON"));
+
+        fs::remove_dir_all(root).expect("remove drag path test directory");
     }
 }

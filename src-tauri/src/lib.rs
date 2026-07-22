@@ -11,8 +11,8 @@ use ssh::session::{
     unlock_credential_vault, AppState,
 };
 use ssh::sftp::{
-    cancel_transfer, sftp_delete, sftp_download_file, sftp_list_dir, sftp_mkdir, sftp_path_exists,
-    sftp_upload_file,
+    cancel_transfer, sftp_create_drag_out_paths, sftp_delete, sftp_download_file, sftp_list_dir,
+    sftp_mkdir, sftp_path_exists, sftp_upload_file,
 };
 use ssh::system_monitor::{get_telemetry_settings, update_telemetry_settings};
 use ssh::terminal::{
@@ -25,6 +25,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_drag::init())
         .invoke_handler(tauri::generate_handler![
             load_sessions,
             save_session,
@@ -51,6 +52,7 @@ pub fn run() {
             update_telemetry_settings,
             get_resource_details,
             sftp_list_dir,
+            sftp_create_drag_out_paths,
             sftp_download_file,
             sftp_upload_file,
             sftp_path_exists,
