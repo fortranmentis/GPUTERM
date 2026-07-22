@@ -54,7 +54,8 @@
 - UTF-8 안전 스트리밍 — 청크 경계에 걸린 멀티바이트 문자(한글, 日本語, 이모지)가 깨지지 않음
 - **한글 입력 정상 동작** — WebKit 계열 웹뷰의 자모 분리 버그를 네이티브 터미널과 같은 백스페이스-재작성 방식으로 해결해, 터미널에서 한글 IME 조합이 올바르게 처리됩니다
 - MOTD를 포함한 접속 초기 출력을 버퍼링 후 재생 — 연결 타이밍에 유실되지 않음
-- 원격 PTY 크기 자동 동기화 및 SSH keepalive
+- 연속 입력 직렬화와 완전한 SSH/TCP 비차단 전송으로 동시 키 입력·조합키·키 반복 중에도 터미널 읽기와 충돌 없이 반응
+- ProxyJump 터널을 포함한 원격 PTY 크기 자동 동기화 및 SSH keepalive
 
 ### 📁 SFTP 브라우저
 - 원격/로컬 패널을 나란히 두고 드래그 앤 드롭으로 업로드·다운로드
@@ -359,6 +360,7 @@ GpuTerm은 [PolyForm Noncommercial 1.0.0](./LICENSE)에 따라 개인·비상업
 | Windows에서 `tauri:dev` 실패 | VS Build Tools 2022(C++ 워크로드)와 WebView2 Runtime 설치 후 터미널 재시작 |
 | `cargo`를 찾을 수 없음 | [rustup](https://rustup.rs)으로 설치 후 터미널 재시작 (`%USERPROFILE%\.cargo\bin`이 PATH에 있어야 함) |
 | SSH 인증 실패 | host/port/user/자격증명 확인; 서버가 해당 인증 방식을 허용하는지 확인 |
+| 여러 키를 누르면 `Terminal stream failed: transport read` 표시 | 직접 연결과 ProxyJump 터미널의 libssh2/TCP 비차단 모드를 동기화해 v1.1.3-beta에서 수정 — 앱을 업데이트하세요 |
 | 마스터 비밀번호가 틀렸거나 기억나지 않음 | 비밀번호를 확인하거나 **Reset vault**를 선택하세요. 프로필은 유지되지만 저장된 SSH 비밀번호는 모두 삭제되어 다시 입력해야 합니다 |
 | 호스트 키 불일치 | 다른 경로로 서버 지문을 검증한 뒤 `known_hosts.json`에서 이전 항목 제거 |
 | GPU가 '사용 불가'로 표시 | GPU 도구(`nvidia-smi`, `rocm-smi`, `xpu-smi`, `intel_gpu_top`) 설치 확인 — 다른 지표는 무관하게 정상 동작 |

@@ -439,16 +439,34 @@ pub fn upsert_profile(profile: SessionProfile) -> Result<Vec<SessionProfile>, St
 /// An open SSH session plus, when the target is reached through a jump host,
 /// the tunnel keeping the bastion connection and its forwarder thread alive.
 ///
-/// Field order matters: `session` is dropped before `_tunnel` so libssh2's
-/// disconnect packet still travels through a live tunnel. Do not reorder.
+/// Field order matters: `session` is dropped before `_transport` and `_tunnel`
+/// so libssh2's disconnect packet still travels through a live socket/tunnel.
+/// Do not reorder.
 pub struct SshConnection {
     pub session: Session,
+    // A clone of the socket owned by `Session`. Besides keeping the transport
+    // alive through `Session` teardown, this lets terminal users switch the OS
+    // socket itself to nonblocking mode. `Session::set_blocking(false)` only
+    // changes libssh2's API mode; it does not update the socket flags.
+    _transport: TcpStream,
     _tunnel: Option<SshTunnel>,
 }
 
 impl SshConnection {
     pub fn session(&self) -> &Session {
         &self.session
+    }
+
+    /// Changes both the libssh2 API mode and the underlying TCP socket mode.
+    /// They must stay in sync: a nonblocking libssh2 session backed by a
+    /// blocking socket can hold the channel lock until SO_RCVTIMEO expires and
+    /// surface that timeout as the fatal `transport read` error.
+    pub fn set_blocking(&self, blocking: bool) -> Result<(), String> {
+        self._transport
+            .set_nonblocking(!blocking)
+            .map_err(|error| format!("Failed to configure SSH transport mode: {}", error))?;
+        self.session.set_blocking(blocking);
+        Ok(())
     }
 }
 
@@ -491,6 +509,9 @@ pub fn open_ssh_session(target: &SshTarget) -> Result<SshConnection, String> {
 
     let _ = tcp.set_read_timeout(Some(Duration::from_secs(10)));
     let _ = tcp.set_write_timeout(Some(Duration::from_secs(10)));
+    let transport = tcp
+        .try_clone()
+        .map_err(|error| format!("Failed to retain SSH transport: {}", error))?;
 
     let mut session =
         Session::new().map_err(|error| format!("Failed to create SSH session: {}", error))?;
@@ -515,6 +536,7 @@ pub fn open_ssh_session(target: &SshTarget) -> Result<SshConnection, String> {
 
     Ok(SshConnection {
         session,
+        _transport: transport,
         _tunnel: tunnel,
     })
 }
@@ -556,7 +578,7 @@ fn open_tunneled_stream(
         .map_err(|error| format!("Failed to configure local tunnel socket: {}", error))?;
 
     bastion.session.set_keepalive(true, 15);
-    bastion.session.set_blocking(false);
+    bastion.set_blocking(false)?;
 
     let stop = Arc::new(AtomicBool::new(false));
     let forwarder_stop = Arc::clone(&stop);
@@ -622,7 +644,8 @@ fn run_tunnel_forwarder(listener: TcpListener, mut channel: Channel, stop: Arc<A
                     to_channel.extend_from_slice(&buffer[..count]);
                     progressed = true;
                 }
-                Err(ref error) if error.kind() == ErrorKind::WouldBlock => {}
+                Err(ref error)
+                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
                 Err(_) => break,
             }
         }
@@ -633,7 +656,8 @@ fn run_tunnel_forwarder(listener: TcpListener, mut channel: Channel, stop: Arc<A
                     to_channel.drain(..count);
                     progressed = true;
                 }
-                Err(ref error) if error.kind() == ErrorKind::WouldBlock => {}
+                Err(ref error)
+                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
                 Err(_) => break,
             }
         }
@@ -650,7 +674,8 @@ fn run_tunnel_forwarder(listener: TcpListener, mut channel: Channel, stop: Arc<A
                     to_socket.extend_from_slice(&buffer[..count]);
                     progressed = true;
                 }
-                Err(ref error) if error.kind() == ErrorKind::WouldBlock => {}
+                Err(ref error)
+                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
                 Err(_) => break,
             }
         }
@@ -661,7 +686,8 @@ fn run_tunnel_forwarder(listener: TcpListener, mut channel: Channel, stop: Arc<A
                     to_socket.drain(..count);
                     progressed = true;
                 }
-                Err(ref error) if error.kind() == ErrorKind::WouldBlock => {}
+                Err(ref error)
+                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
                 Err(_) => break,
             }
         }

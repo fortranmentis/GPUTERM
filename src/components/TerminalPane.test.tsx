@@ -9,6 +9,7 @@ const terminalMocks = vi.hoisted(() => ({
   open: vi.fn(),
   refresh: vi.fn(),
   write: vi.fn(),
+  dataHandlers: [] as Array<(data: string) => void>,
 }));
 const eventHandlers = vi.hoisted(
   () => new Map<string, (event: { payload: unknown }) => void>(),
@@ -59,8 +60,16 @@ vi.mock("@xterm/xterm", () => ({
     dispose() {}
     focus() {}
     input() {}
-    onData() {
-      return { dispose() {} };
+    onData(handler: (data: string) => void) {
+      terminalMocks.dataHandlers.push(handler);
+      return {
+        dispose() {
+          const index = terminalMocks.dataHandlers.indexOf(handler);
+          if (index >= 0) {
+            terminalMocks.dataHandlers.splice(index, 1);
+          }
+        },
+      };
     }
   },
 }));
@@ -111,6 +120,7 @@ describe("TerminalPane multi-session split", () => {
     terminalMocks.open.mockReset();
     terminalMocks.refresh.mockReset();
     terminalMocks.write.mockReset();
+    terminalMocks.dataHandlers.length = 0;
     eventHandlers.clear();
     vi.stubGlobal(
       "ResizeObserver",
@@ -127,6 +137,44 @@ describe("TerminalPane multi-session split", () => {
       terminalIdsBySession: { alpha: ["terminal-alpha"] },
       message: null,
     });
+  });
+
+  it("serializes simultaneous key input before invoking the SSH writer", async () => {
+    let releaseFirstWrite: (() => void) | undefined;
+    const firstWrite = new Promise<void>((resolve) => {
+      releaseFirstWrite = resolve;
+    });
+    let terminalWriteCount = 0;
+    mockInvoke.mockImplementation((command) => {
+      if (command !== "terminal_write") {
+        return Promise.resolve(undefined);
+      }
+      terminalWriteCount += 1;
+      return terminalWriteCount === 1 ? firstWrite : Promise.resolve(undefined);
+    });
+
+    render(<TerminalPane />);
+    await waitFor(() => expect(terminalMocks.dataHandlers).toHaveLength(1));
+
+    act(() => {
+      terminalMocks.dataHandlers[0]("a");
+      terminalMocks.dataHandlers[0]("s");
+    });
+
+    const terminalWriteCalls = () =>
+      mockInvoke.mock.calls.filter(([command]) => command === "terminal_write");
+    expect(terminalWriteCalls()).toHaveLength(1);
+    expect(terminalWriteCalls()[0]).toEqual([
+      "terminal_write",
+      { terminalId: "terminal-alpha", data: "a" },
+    ]);
+
+    releaseFirstWrite?.();
+    await waitFor(() => expect(terminalWriteCalls()).toHaveLength(2));
+    expect(terminalWriteCalls()[1]).toEqual([
+      "terminal_write",
+      { terminalId: "terminal-alpha", data: "s" },
+    ]);
   });
 
   it("mounts a newly connected terminal in the visible pane and replays early output", async () => {

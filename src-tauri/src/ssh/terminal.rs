@@ -632,7 +632,7 @@ fn start_remote_terminal_reader(
             };
 
             if idle {
-                if last_keepalive.elapsed() >= Duration::from_secs(1) {
+                if last_keepalive.elapsed() >= Duration::from_secs(KEEPALIVE_INTERVAL_SECS.into()) {
                     let _ = session.keepalive_send();
                     last_keepalive = Instant::now();
                 }
@@ -976,7 +976,11 @@ fn open_terminal_channel(
     channel
         .shell()
         .map_err(|error| format!("Failed to start remote shell: {}", error))?;
-    connection.session.set_blocking(false);
+    // libssh2's API flag and the actual TCP socket must both be nonblocking.
+    // Leaving the socket blocking makes the reader hold the channel mutex
+    // until its receive timeout and can turn key bursts into `transport read`
+    // disconnects, especially on Windows and through ProxyJump tunnels.
+    connection.set_blocking(false)?;
     Ok((connection, channel))
 }
 
