@@ -1,9 +1,10 @@
 import { FolderOpen } from "lucide-react";
-import type { DragEvent, KeyboardEvent } from "react";
+import type { DragEvent, KeyboardEvent, PointerEvent, Ref } from "react";
 import type { LocalEntry } from "../types/session";
 import { formatBytes } from "../utils/formatBytes";
 
 type LocalFilePanelProps = {
+  containerRef?: Ref<HTMLElement>;
   localPath: string;
   entries: LocalEntry[];
   selectedPaths: string[];
@@ -13,14 +14,18 @@ type LocalFilePanelProps = {
   onBrowse: () => void;
   onSelectEntry: (entry: LocalEntry, additive: boolean) => void;
   onOpenDirectory: (path: string) => void;
-  onDragStart: (entry: LocalEntry, event: DragEvent<HTMLButtonElement>) => void;
-  onDragEnd: () => void;
+  onPointerDragStart: (
+    entry: LocalEntry,
+    event: PointerEvent<HTMLButtonElement>,
+  ) => void;
+  onConsumePointerDragClick: () => boolean;
   onDropRemoteFiles: (event: DragEvent<HTMLDivElement>) => void;
   onDragOverRemoteFiles: (event: DragEvent<HTMLDivElement>) => void;
   onDragLeaveRemoteFiles: () => void;
 };
 
 export function LocalFilePanel({
+  containerRef,
   localPath,
   entries,
   selectedPaths,
@@ -30,8 +35,8 @@ export function LocalFilePanel({
   onBrowse,
   onSelectEntry,
   onOpenDirectory,
-  onDragStart,
-  onDragEnd,
+  onPointerDragStart,
+  onConsumePointerDragClick,
   onDropRemoteFiles,
   onDragOverRemoteFiles,
   onDragLeaveRemoteFiles,
@@ -44,6 +49,7 @@ export function LocalFilePanel({
 
   return (
     <section
+      ref={containerRef}
       className={`sftp-subpanel local-drop-zone ${dropActive ? "drop-active" : ""}`}
       data-testid="local-drop-zone"
       onDrop={onDropRemoteFiles}
@@ -76,18 +82,22 @@ export function LocalFilePanel({
             className={`local-file-item ${
               selectedPaths.includes(entry.path) ? "selected" : ""
             }`}
-            draggable={entry.entryType === "file"}
+            draggable={false}
             key={entry.path}
             type="button"
             onClick={(event) => {
+              if (onConsumePointerDragClick()) {
+                event.preventDefault();
+                return;
+              }
+              onSelectEntry(entry, event.ctrlKey || event.metaKey);
+            }}
+            onDoubleClick={() => {
               if (entry.entryType === "directory") {
                 onOpenDirectory(entry.path);
-              } else {
-                onSelectEntry(entry, event.ctrlKey || event.metaKey);
               }
             }}
-            onDragStart={(event) => onDragStart(entry, event)}
-            onDragEnd={onDragEnd}
+            onPointerDown={(event) => onPointerDragStart(entry, event)}
           >
             <span>{entry.entryType === "directory" ? "dir" : "file"}</span>
             <strong>{entry.name}</strong>

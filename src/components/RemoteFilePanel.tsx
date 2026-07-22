@@ -1,16 +1,20 @@
 import {
   ArrowUp,
+  Check,
   Folder,
   FolderOpen,
+  FolderPlus,
   PanelRightClose,
   RefreshCw,
+  X,
 } from "lucide-react";
-import type { ClipboardEvent, DragEvent } from "react";
+import type { ClipboardEvent, DragEvent, PointerEvent, Ref } from "react";
 import type { SftpEntry } from "../types/session";
 import { formatBytes } from "../utils/formatBytes";
 
 type RemoteFilePanelProps = {
   onClose?: () => void;
+  containerRef?: Ref<HTMLElement>;
   connected: boolean;
   loading: boolean;
   path: string;
@@ -18,14 +22,19 @@ type RemoteFilePanelProps = {
   entries: SftpEntry[];
   selectedPaths: string[];
   dropActive: boolean;
+  creatingFolder: boolean;
+  newFolderName: string;
   onPathDraftChange: (path: string) => void;
   onOpenPath: (path: string) => void;
   onRefresh: () => void;
   onGoUp: () => void;
   onSelectEntry: (entry: SftpEntry, additive: boolean) => void;
   onOpenDirectory: (path: string) => void;
-  onDragStart: (entry: SftpEntry, event: DragEvent<HTMLButtonElement>) => void;
-  onDragEnd: () => void;
+  onPointerDragStart: (
+    entry: SftpEntry,
+    event: PointerEvent<HTMLButtonElement>,
+  ) => void;
+  onConsumePointerDragClick: () => boolean;
   onDropLocalFiles: (event: DragEvent<HTMLDivElement>) => void;
   onDragOverLocalFiles: (event: DragEvent<HTMLDivElement>) => void;
   onDragLeaveLocalFiles: () => void;
@@ -34,10 +43,15 @@ type RemoteFilePanelProps = {
     event: DragEvent<HTMLButtonElement>,
   ) => void;
   onPasteLocalFiles: (event: ClipboardEvent<HTMLElement>) => void;
+  onBeginCreateFolder: () => void;
+  onNewFolderNameChange: (name: string) => void;
+  onCreateFolder: () => void;
+  onCancelCreateFolder: () => void;
 };
 
 export function RemoteFilePanel({
   onClose,
+  containerRef,
   connected,
   loading,
   path,
@@ -45,26 +59,33 @@ export function RemoteFilePanel({
   entries,
   selectedPaths,
   dropActive,
+  creatingFolder,
+  newFolderName,
   onPathDraftChange,
   onOpenPath,
   onRefresh,
   onGoUp,
   onSelectEntry,
   onOpenDirectory,
-  onDragStart,
-  onDragEnd,
+  onPointerDragStart,
+  onConsumePointerDragClick,
   onDropLocalFiles,
   onDragOverLocalFiles,
   onDragLeaveLocalFiles,
   onDropRemoteOnDirectory,
   onPasteLocalFiles,
+  onBeginCreateFolder,
+  onNewFolderNameChange,
+  onCreateFolder,
+  onCancelCreateFolder,
 }: RemoteFilePanelProps) {
   return (
     <section
+      ref={containerRef}
       className={`sftp-subpanel remote-drop-zone ${dropActive ? "drop-active" : ""}`}
       data-testid="remote-drop-zone"
       tabIndex={0}
-      title="Drop files here or paste files copied from the system file manager"
+      title="Drop files or folders here, or paste items copied from the system file manager"
       onDrop={onDropLocalFiles}
       onDragOver={onDragOverLocalFiles}
       onDragLeave={onDragLeaveLocalFiles}
@@ -122,15 +143,68 @@ export function RemoteFilePanel({
           }}
         />
         <button
-          className="secondary-button compact"
+          className="icon-button"
           type="button"
           disabled={!connected || loading}
+          aria-label="Open remote path"
+          title="Open remote path"
           onClick={() => onOpenPath(pathDraft)}
         >
           <FolderOpen size={16} />
-          Open
+        </button>
+        <button
+          className="icon-button"
+          type="button"
+          disabled={!connected || loading}
+          aria-label="Create remote folder"
+          title="Create remote folder"
+          onClick={onBeginCreateFolder}
+        >
+          <FolderPlus size={16} />
         </button>
       </div>
+
+      {creatingFolder && (
+        <form
+          className="new-folder-row"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onCreateFolder();
+          }}
+        >
+          <input
+            autoFocus
+            value={newFolderName}
+            placeholder="Folder name"
+            aria-label="New remote folder name"
+            onChange={(event) => onNewFolderNameChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                onCancelCreateFolder();
+              }
+            }}
+          />
+          <button
+            className="icon-button"
+            type="submit"
+            disabled={loading || !newFolderName.trim()}
+            aria-label="Confirm new folder"
+            title="Create folder"
+          >
+            <Check size={16} />
+          </button>
+          <button
+            className="icon-button ghost"
+            type="button"
+            aria-label="Cancel new folder"
+            title="Cancel"
+            onClick={onCancelCreateFolder}
+          >
+            <X size={16} />
+          </button>
+        </form>
+      )}
 
       <div className="file-table">
         <div className="file-row file-head">
@@ -145,15 +219,20 @@ export function RemoteFilePanel({
               key={entry.path}
               type="button"
               className={`file-row ${selectedPaths.includes(entry.path) ? "selected" : ""}`}
-              draggable={entry.type === "file" || entry.type === "directory"}
-              onClick={(event) => onSelectEntry(entry, event.ctrlKey || event.metaKey)}
+              draggable={false}
+              onClick={(event) => {
+                if (onConsumePointerDragClick()) {
+                  event.preventDefault();
+                  return;
+                }
+                onSelectEntry(entry, event.ctrlKey || event.metaKey);
+              }}
               onDoubleClick={() => {
                 if (entry.type === "directory") {
                   onOpenDirectory(entry.path);
                 }
               }}
-              onDragStart={(event) => onDragStart(entry, event)}
-              onDragEnd={onDragEnd}
+              onPointerDown={(event) => onPointerDragStart(entry, event)}
               onDrop={(event) => {
                 if (entry.type === "directory") {
                   onDropRemoteOnDirectory(entry, event);

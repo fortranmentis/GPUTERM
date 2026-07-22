@@ -41,7 +41,9 @@ export const useTransferStore = create<TransferStore>((set) => ({
         }
         const totalBytes = payload.totalBytes ?? task.totalBytes;
         const progressPercent =
-          totalBytes && totalBytes > 0
+          payload.done && !payload.error
+            ? 100
+            : totalBytes && totalBytes > 0
             ? Math.min(
                 100,
                 Math.round((payload.transferredBytes / totalBytes) * 100),

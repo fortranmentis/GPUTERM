@@ -5,11 +5,13 @@ import {
   useState,
   type ClipboardEvent as ReactClipboardEvent,
   type DragEvent,
+  type PointerEvent as ReactPointerEvent,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { confirm as confirmDialog, open } from "@tauri-apps/plugin-dialog";
-import { Download, FolderPlus, Trash2, Upload } from "lucide-react";
+import { Download, Trash2, Upload } from "lucide-react";
 import { LocalFilePanel } from "./LocalFilePanel";
 import { RemoteFilePanel } from "./RemoteFilePanel";
 import { TransferQueue } from "./TransferQueue";
@@ -35,6 +37,17 @@ const REMOTE_DRAG_TYPE = "application/x-gputerm-remote-files";
 
 type LocalDragFile = LocalTransferDragFile;
 type RemoteDragFile = RemoteTransferDragFile;
+type PointerTransferDrag =
+  | { kind: "local"; files: LocalDragFile[] }
+  | { kind: "remote"; files: RemoteDragFile[] };
+
+type PointerDragState = {
+  pointerId: number;
+  startX: number;
+  startY: number;
+  moved: boolean;
+  drag: PointerTransferDrag;
+};
 
 type SftpTransferRequest = {
   sessionId: string;
@@ -70,27 +83,44 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
   const [localEntries, setLocalEntries] = useState<LocalEntry[]>([]);
   const [selectedLocalPaths, setSelectedLocalPaths] = useState<string[]>([]);
   const [newFolderName, setNewFolderName] = useState("");
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [storageSplitPercent, setStorageSplitPercent] = useState(58);
   const [loading, setLoading] = useState(false);
   const [remoteDropActive, setRemoteDropActive] = useState(false);
   const [localDropActive, setLocalDropActive] = useState(false);
   const pathBySessionRef = useRef<Map<string, string>>(new Map());
+  const remoteDropZoneRef = useRef<HTMLElement>(null);
+  const localDropZoneRef = useRef<HTMLElement>(null);
+  const storageSplitRef = useRef<HTMLDivElement>(null);
+  const storageSplitPointerRef = useRef<number | null>(null);
+  const pointerDragRef = useRef<PointerDragState | null>(null);
+  const suppressPointerClickRef = useRef(false);
+  const enqueueUploadsRef = useRef<
+    ((files: LocalDragFile[], targetDirectory: string) => Promise<void>) | null
+  >(null);
+  const enqueueDownloadsRef = useRef<
+    ((files: RemoteDragFile[]) => Promise<void>) | null
+  >(null);
 
   const selectedEntry = useMemo(
     () => entries.find((entry) => selectedRemotePaths.includes(entry.path)) ?? null,
     [entries, selectedRemotePaths],
   );
-  const selectedRemoteFiles = useMemo(
+  const selectedRemoteEntries = useMemo(
     () =>
       entries.filter(
-        (entry) => selectedRemotePaths.includes(entry.path) && entry.type === "file",
+        (entry) =>
+          selectedRemotePaths.includes(entry.path) &&
+          (entry.type === "file" || entry.type === "directory"),
       ),
     [entries, selectedRemotePaths],
   );
-  const selectedLocalFiles = useMemo(
+  const selectedLocalEntries = useMemo(
     () =>
       localEntries.filter(
         (entry) =>
-          selectedLocalPaths.includes(entry.path) && entry.entryType === "file",
+          selectedLocalPaths.includes(entry.path) &&
+          (entry.entryType === "file" || entry.entryType === "directory"),
       ),
     [localEntries, selectedLocalPaths],
   );
@@ -121,6 +151,8 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
     } else {
       setEntries([]);
       setSelectedRemotePaths([]);
+      setCreatingFolder(false);
+      setNewFolderName("");
     }
   }, [activeSessionId, connected]);
 
@@ -254,6 +286,7 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
         },
       });
       setNewFolderName("");
+      setCreatingFolder(false);
       await loadDirectory(path);
       setMessage({ kind: "success", text: "Remote folder created" });
     } catch (error) {
@@ -264,19 +297,19 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
   };
 
   const downloadSelected = () => {
-    if (selectedRemoteFiles.length === 0 || !localPath.trim()) {
-      setMessage({ kind: "error", text: "Select remote files and a local folder" });
+    if (selectedRemoteEntries.length === 0 || !localPath.trim()) {
+      setMessage({ kind: "error", text: "Select remote items and a local folder" });
       return;
     }
-    enqueueDownloads(selectedRemoteFiles.map(remoteEntryToDragFile));
+    enqueueDownloads(selectedRemoteEntries.map(remoteEntryToDragFile));
   };
 
   const uploadLocalFile = () => {
-    if (selectedLocalFiles.length === 0) {
-      setMessage({ kind: "error", text: "Select local files to upload" });
+    if (selectedLocalEntries.length === 0) {
+      setMessage({ kind: "error", text: "Select local items to upload" });
       return;
     }
-    enqueueUploads(selectedLocalFiles.map(localEntryToDragFile), path);
+    enqueueUploads(selectedLocalEntries.map(localEntryToDragFile), path);
   };
 
   const enqueueUploads = async (
@@ -287,11 +320,13 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
       setMessage({ kind: "error", text: "No active SFTP session" });
       return;
     }
-    const uploadable = files.filter((file) => file.entryType === "file");
-    if (files.some((file) => file.entryType === "directory")) {
+    const uploadable = files.filter(
+      (file) => file.entryType === "file" || file.entryType === "directory",
+    );
+    if (uploadable.length !== files.length) {
       setMessage({
         kind: "error",
-        text: "Directory upload is not supported yet",
+        text: "Unsupported local items were skipped",
       });
     }
 
@@ -306,7 +341,7 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
           file.name,
           file.path,
           remotePath,
-          file.size,
+          file.entryType === "file" ? file.size : null,
           sessionId,
         );
         addTask(task);
@@ -332,7 +367,7 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
         if (!shouldTransfer) {
           updateTask(task.id, {
             status: "canceled",
-            error: "Skipped because target file already exists",
+            error: "Skipped because target item already exists",
           });
           return;
         }
@@ -355,11 +390,13 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
       setMessage({ kind: "error", text: "Select a local folder before download" });
       return;
     }
-    const downloadable = files.filter((file) => file.type === "file");
-    if (files.some((file) => file.type === "directory")) {
+    const downloadable = files.filter(
+      (file) => file.type === "file" || file.type === "directory",
+    );
+    if (downloadable.length !== files.length) {
       setMessage({
         kind: "error",
-        text: "Directory drag-and-drop is not supported yet",
+        text: "Unsupported remote items were skipped",
       });
     }
 
@@ -372,7 +409,7 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
           file.name,
           file.path,
           targetLocalPath,
-          file.size,
+          file.type === "file" ? file.size : null,
           sessionId,
         );
         addTask(task);
@@ -393,7 +430,7 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
         if (!shouldTransfer) {
           updateTask(task.id, {
             status: "canceled",
-            error: "Skipped because target file already exists",
+            error: "Skipped because target item already exists",
           });
           return;
         }
@@ -407,6 +444,176 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
     );
   };
 
+  enqueueUploadsRef.current = enqueueUploads;
+  enqueueDownloadsRef.current = enqueueDownloads;
+
+  const describeAndEnqueueLocalPaths = async (
+    paths: string[],
+    targetDirectory: string,
+  ) => {
+    if (paths.length === 0) {
+      return;
+    }
+    try {
+      const droppedEntries = await invoke<LocalEntry[]>("describe_local_paths", {
+        paths,
+      });
+      await enqueueUploads(
+        droppedEntries.map(localEntryToDragFile),
+        targetDirectory,
+      );
+    } catch (error) {
+      setMessage({ kind: "error", text: String(error) });
+    }
+  };
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    // Browser File objects intentionally do not expose absolute paths on
+    // WebView2/WKWebView, and WebKitGTK may omit the file payload entirely.
+    // Tauri's native drop event is the cross-platform source of real paths.
+    const registerNativeDrop = async () => {
+      try {
+        const nextUnlisten = await getCurrentWebview().onDragDropEvent((event) => {
+          const payload = event.payload;
+          if (payload.type === "leave") {
+            setRemoteDropActive(false);
+            return;
+          }
+
+          const overRemote =
+            connected &&
+            isPhysicalPositionInsideElement(
+              payload.position,
+              remoteDropZoneRef.current,
+              globalThis.devicePixelRatio || 1,
+            );
+
+          if (payload.type === "enter" || payload.type === "over") {
+            setRemoteDropActive(overRemote);
+            return;
+          }
+
+          setRemoteDropActive(false);
+          if (overRemote && payload.paths.length > 0) {
+            void describeAndEnqueueLocalPaths(payload.paths, path);
+          }
+        });
+        if (disposed) {
+          nextUnlisten();
+        } else {
+          unlisten = nextUnlisten;
+        }
+      } catch (error) {
+        if (!disposed) {
+          setMessage({
+            kind: "error",
+            text: `Failed to initialize native file drop: ${String(error)}`,
+          });
+        }
+      }
+    };
+    void registerNativeDrop();
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [activeSessionId, connected, path, setMessage]);
+
+  useEffect(() => {
+    const clearPointerDrag = () => {
+      pointerDragRef.current = null;
+      clearActiveDrag();
+      setRemoteDropActive(false);
+      setLocalDropActive(false);
+      document.body.classList.remove("sftp-pointer-dragging");
+    };
+
+    const onPointerMove = (event: PointerEvent) => {
+      const state = pointerDragRef.current;
+      if (!state || event.pointerId !== state.pointerId) {
+        return;
+      }
+      if (!state.moved) {
+        state.moved =
+          Math.hypot(event.clientX - state.startX, event.clientY - state.startY) >= 5;
+      }
+      if (!state.moved) {
+        return;
+      }
+
+      event.preventDefault();
+      document.body.classList.add("sftp-pointer-dragging");
+      setRemoteDropActive(
+        state.drag.kind === "local" &&
+          isClientPositionInsideElement(
+            event.clientX,
+            event.clientY,
+            remoteDropZoneRef.current,
+          ),
+      );
+      setLocalDropActive(
+        state.drag.kind === "remote" &&
+          isClientPositionInsideElement(
+            event.clientX,
+            event.clientY,
+            localDropZoneRef.current,
+          ),
+      );
+    };
+
+    const onPointerUp = (event: PointerEvent) => {
+      const state = pointerDragRef.current;
+      if (!state || event.pointerId !== state.pointerId) {
+        return;
+      }
+
+      if (state.moved) {
+        event.preventDefault();
+        suppressPointerClickRef.current = true;
+        globalThis.setTimeout(() => {
+          suppressPointerClickRef.current = false;
+        }, 0);
+
+        if (
+          state.drag.kind === "local" &&
+          isClientPositionInsideElement(
+            event.clientX,
+            event.clientY,
+            remoteDropZoneRef.current,
+          )
+        ) {
+          void enqueueUploadsRef.current?.(state.drag.files, path);
+        } else if (
+          state.drag.kind === "remote" &&
+          isClientPositionInsideElement(
+            event.clientX,
+            event.clientY,
+            localDropZoneRef.current,
+          )
+        ) {
+          void enqueueDownloadsRef.current?.(state.drag.files);
+        }
+      }
+      clearPointerDrag();
+    };
+
+    document.addEventListener("pointermove", onPointerMove, { passive: false });
+    document.addEventListener("pointerup", onPointerUp, { passive: false });
+    document.addEventListener("pointercancel", clearPointerDrag);
+    return () => {
+      document.removeEventListener("pointermove", onPointerMove);
+      document.removeEventListener("pointerup", onPointerUp);
+      document.removeEventListener("pointercancel", clearPointerDrag);
+      pointerDragRef.current = null;
+      clearActiveDrag();
+      document.body.classList.remove("sftp-pointer-dragging");
+    };
+  }, [clearActiveDrag, path]);
+
   const confirmOverwrite = async (
     command: "sftp_path_exists" | "local_path_exists",
     args: Record<string, unknown>,
@@ -416,10 +623,10 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
     if (!exists) {
       return true;
     }
-    return confirmDialog(`Overwrite existing file?\n${targetPath}`, {
-      title: "Confirm overwrite",
+    return confirmDialog(`Replace or merge the existing item?\n${targetPath}`, {
+      title: "Confirm replacement",
       kind: "warning",
-      okLabel: "Overwrite",
+      okLabel: "Replace / Merge",
       cancelLabel: "Skip",
     });
   };
@@ -432,10 +639,15 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
     updateTask(task.id, { status: "running" });
     try {
       await invoke(command, { request });
+      const currentTask = useTransferStore
+        .getState()
+        .tasks.find((candidate) => candidate.id === task.id);
+      const totalBytes = currentTask?.totalBytes ?? task.totalBytes;
       updateTask(task.id, {
         status: "done",
-        transferredBytes: task.totalBytes ?? task.transferredBytes,
-        progressPercent: task.totalBytes == null ? null : 100,
+        transferredBytes:
+          totalBytes ?? currentTask?.transferredBytes ?? task.transferredBytes,
+        progressPercent: 100,
       });
     } catch (error) {
       updateTask(task.id, {
@@ -462,45 +674,61 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
     );
   };
 
-  const dragLocalEntry = (
+  const startPointerDrag = (
+    drag: PointerTransferDrag,
+    event: ReactPointerEvent<HTMLButtonElement>,
+  ) => {
+    if (event.button !== 0) {
+      return;
+    }
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    pointerDragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      moved: false,
+      drag,
+    };
+    setActiveDrag(drag);
+  };
+
+  const pointerDragLocalEntry = (
     entry: LocalEntry,
-    event: DragEvent<HTMLButtonElement>,
+    event: ReactPointerEvent<HTMLButtonElement>,
   ) => {
     const entriesToDrag =
-      selectedLocalPaths.includes(entry.path) && selectedLocalFiles.length > 0
-        ? selectedLocalFiles
+      selectedLocalPaths.includes(entry.path) && selectedLocalEntries.length > 0
+        ? selectedLocalEntries
         : [entry];
-    event.dataTransfer.effectAllowed = "copy";
-    setActiveDrag({
-      kind: "local",
-      files: entriesToDrag.map(localEntryToDragFile),
-    });
-    event.dataTransfer.setData(
-      LOCAL_DRAG_TYPE,
-      JSON.stringify(entriesToDrag.map(localEntryToDragFile)),
+    startPointerDrag(
+      { kind: "local", files: entriesToDrag.map(localEntryToDragFile) },
+      event,
     );
   };
 
-  const dragRemoteEntry = (
+  const pointerDragRemoteEntry = (
     entry: SftpEntry,
-    event: DragEvent<HTMLButtonElement>,
+    event: ReactPointerEvent<HTMLButtonElement>,
   ) => {
     const entriesToDrag =
       selectedRemotePaths.includes(entry.path) && selectedRemotePaths.length > 1
         ? entries.filter((candidate) => selectedRemotePaths.includes(candidate.path))
         : [entry];
-    event.dataTransfer.effectAllowed = "copy";
-    setActiveDrag({
-      kind: "remote",
-      files: entriesToDrag.map(remoteEntryToDragFile),
-    });
-    event.dataTransfer.setData(
-      REMOTE_DRAG_TYPE,
-      JSON.stringify(entriesToDrag.map(remoteEntryToDragFile)),
+    startPointerDrag(
+      { kind: "remote", files: entriesToDrag.map(remoteEntryToDragFile) },
+      event,
     );
   };
 
-  const dropLocalFilesOnRemote = (event: DragEvent<HTMLDivElement>) => {
+  const consumePointerDragClick = () => {
+    if (!suppressPointerClickRef.current) {
+      return false;
+    }
+    suppressPointerClickRef.current = false;
+    return true;
+  };
+
+  const dropLocalFilesOnRemote = async (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setRemoteDropActive(false);
     const currentDrag = useTransferStore.getState().activeDrag;
@@ -510,9 +738,14 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
         : readLocalDragFiles(event.dataTransfer);
     clearActiveDrag();
     if (files.length === 0) {
+      const paths = readClipboardLocalPaths(event.dataTransfer);
+      if (paths.length > 0) {
+        await describeAndEnqueueLocalPaths(paths, path);
+        return;
+      }
       setMessage({
         kind: "error",
-        text: "No local file payload found. Drag files from the local panel.",
+        text: "The dropped item path was unavailable. Please retry the desktop file drop.",
       });
       return;
     }
@@ -580,67 +813,115 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
     }
   };
 
+  const updateStorageSplitFromClientY = (clientY: number) => {
+    const bounds = storageSplitRef.current?.getBoundingClientRect();
+    if (!bounds || bounds.height <= 0) {
+      return;
+    }
+    setStorageSplitPercent(
+      clampStorageSplit(((clientY - bounds.top) / bounds.height) * 100),
+    );
+  };
+
   return (
     <div className="sftp-browser">
-      <RemoteFilePanel
-        onClose={onClose}
-        connected={connected}
-        loading={loading}
-        path={path}
-        pathDraft={pathDraft}
-        entries={entries}
-        selectedPaths={selectedRemotePaths}
-        dropActive={remoteDropActive}
-        onPathDraftChange={setPathDraft}
-        onOpenPath={(nextPath) =>
-          loadDirectory(nextPath).catch((error) =>
-            setMessage({ kind: "error", text: String(error) }),
-          )
-        }
-        onRefresh={() =>
-          loadDirectory(path).catch((error) =>
-            setMessage({ kind: "error", text: String(error) }),
-          )
-        }
-        onGoUp={goUp}
-        onSelectEntry={selectRemoteEntry}
-        onOpenDirectory={(nextPath) =>
-          loadDirectory(nextPath).catch((error) =>
-            setMessage({ kind: "error", text: String(error) }),
-          )
-        }
-        onDragStart={dragRemoteEntry}
-        onDragEnd={clearActiveDrag}
-        onDropLocalFiles={dropLocalFilesOnRemote}
-        onDragOverLocalFiles={(event) => {
-          event.preventDefault();
-          setRemoteDropActive(true);
+      <div
+        ref={storageSplitRef}
+        className="sftp-storage-split"
+        style={{
+          gridTemplateRows: `minmax(0, ${storageSplitPercent}fr) 7px minmax(0, ${100 - storageSplitPercent}fr)`,
         }}
-        onDragLeaveLocalFiles={() => setRemoteDropActive(false)}
-        onDropRemoteOnDirectory={dropRemoteOnDirectory}
-        onPasteLocalFiles={pasteLocalFilesOnRemote}
-      />
+      >
+        <RemoteFilePanel
+          onClose={onClose}
+          containerRef={remoteDropZoneRef}
+          connected={connected}
+          loading={loading}
+          path={path}
+          pathDraft={pathDraft}
+          entries={entries}
+          selectedPaths={selectedRemotePaths}
+          dropActive={remoteDropActive}
+          creatingFolder={creatingFolder}
+          newFolderName={newFolderName}
+          onPathDraftChange={setPathDraft}
+          onOpenPath={(nextPath) =>
+            loadDirectory(nextPath).catch((error) =>
+              setMessage({ kind: "error", text: String(error) }),
+            )
+          }
+          onRefresh={() =>
+            loadDirectory(path).catch((error) =>
+              setMessage({ kind: "error", text: String(error) }),
+            )
+          }
+          onGoUp={goUp}
+          onSelectEntry={selectRemoteEntry}
+          onOpenDirectory={(nextPath) =>
+            loadDirectory(nextPath).catch((error) =>
+              setMessage({ kind: "error", text: String(error) }),
+            )
+          }
+          onPointerDragStart={pointerDragRemoteEntry}
+          onConsumePointerDragClick={consumePointerDragClick}
+          onDropLocalFiles={dropLocalFilesOnRemote}
+          onDragOverLocalFiles={(event) => {
+            event.preventDefault();
+            setRemoteDropActive(true);
+          }}
+          onDragLeaveLocalFiles={() => setRemoteDropActive(false)}
+          onDropRemoteOnDirectory={dropRemoteOnDirectory}
+          onPasteLocalFiles={pasteLocalFilesOnRemote}
+          onBeginCreateFolder={() => setCreatingFolder(true)}
+          onNewFolderNameChange={setNewFolderName}
+          onCreateFolder={createFolder}
+          onCancelCreateFolder={() => {
+            setNewFolderName("");
+            setCreatingFolder(false);
+          }}
+        />
 
-      <div className="sftp-actions">
-        <div className="path-row">
-          <input
-            value={newFolderName}
-            disabled={!connected}
-            placeholder="new-folder"
-            onChange={(event) => setNewFolderName(event.target.value)}
-          />
-          <button
-            className="secondary-button compact"
-            type="button"
-            disabled={!connected || loading || !newFolderName.trim()}
-            onClick={createFolder}
-          >
-            <FolderPlus size={16} />
-            Mkdir
-          </button>
-        </div>
+        <div
+          className="sftp-storage-splitter"
+          role="separator"
+          aria-label="Resize remote and local file panels"
+          aria-orientation="horizontal"
+          aria-valuemin={25}
+          aria-valuemax={75}
+          aria-valuenow={Math.round(storageSplitPercent)}
+          tabIndex={0}
+          onPointerDown={(event) => {
+            storageSplitPointerRef.current = event.pointerId;
+            event.currentTarget.setPointerCapture?.(event.pointerId);
+            updateStorageSplitFromClientY(event.clientY);
+          }}
+          onPointerMove={(event) => {
+            if (storageSplitPointerRef.current === event.pointerId) {
+              updateStorageSplitFromClientY(event.clientY);
+            }
+          }}
+          onPointerUp={(event) => {
+            if (storageSplitPointerRef.current === event.pointerId) {
+              storageSplitPointerRef.current = null;
+              event.currentTarget.releasePointerCapture?.(event.pointerId);
+            }
+          }}
+          onPointerCancel={() => {
+            storageSplitPointerRef.current = null;
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+              event.preventDefault();
+              const delta = event.key === "ArrowUp" ? -5 : 5;
+              setStorageSplitPercent((current) =>
+                clampStorageSplit(current + delta),
+              );
+            }
+          }}
+        />
 
         <LocalFilePanel
+          containerRef={localDropZoneRef}
           localPath={localPath}
           entries={localEntries}
           selectedPaths={selectedLocalPaths}
@@ -658,8 +939,8 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
               setMessage({ kind: "error", text: String(error) }),
             )
           }
-          onDragStart={dragLocalEntry}
-          onDragEnd={clearActiveDrag}
+          onPointerDragStart={pointerDragLocalEntry}
+          onConsumePointerDragClick={consumePointerDragClick}
           onDropRemoteFiles={dropRemoteFilesOnLocal}
           onDragOverRemoteFiles={(event) => {
             event.preventDefault();
@@ -667,12 +948,14 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
           }}
           onDragLeaveRemoteFiles={() => setLocalDropActive(false)}
         />
+      </div>
 
+      <div className="sftp-actions">
         <div className="button-row">
           <button
             className="secondary-button"
             type="button"
-            disabled={!connected || loading || selectedRemoteFiles.length === 0}
+            disabled={!connected || loading || selectedRemoteEntries.length === 0}
             onClick={downloadSelected}
           >
             <Download size={16} />
@@ -681,7 +964,7 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
           <button
             className="secondary-button"
             type="button"
-            disabled={!connected || loading || selectedLocalFiles.length === 0}
+            disabled={!connected || loading || selectedLocalEntries.length === 0}
             onClick={uploadLocalFile}
           >
             <Upload size={16} />
@@ -702,6 +985,10 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
       </div>
     </div>
   );
+}
+
+function clampStorageSplit(value: number) {
+  return Math.min(75, Math.max(25, value));
 }
 
 function createTransferTask(
@@ -759,17 +1046,49 @@ function readLocalDragFiles(dataTransfer: DataTransfer): LocalDragFile[] {
   if (encoded) {
     return safeParseDragFiles<LocalDragFile>(encoded);
   }
-  return Array.from(dataTransfer.files ?? [])
-    .map((file) => {
-      const path = (file as File & { path?: string }).path ?? file.name;
-      return {
-        name: file.name,
-        path,
-        entryType: "file" as const,
-        size: file.size,
-      };
-    })
-    .filter((file) => Boolean(file.path));
+  return Array.from(dataTransfer.files ?? []).flatMap((file) => {
+    const path = (file as File & { path?: string }).path;
+    return path
+      ? [
+          {
+            name: file.name,
+            path,
+            entryType: "file" as const,
+            size: file.size,
+          },
+        ]
+      : [];
+  });
+}
+
+function isPhysicalPositionInsideElement(
+  position: { x: number; y: number },
+  element: HTMLElement | null,
+  scaleFactor: number,
+) {
+  const safeScaleFactor = scaleFactor > 0 ? scaleFactor : 1;
+  return isClientPositionInsideElement(
+    position.x / safeScaleFactor,
+    position.y / safeScaleFactor,
+    element,
+  );
+}
+
+function isClientPositionInsideElement(
+  clientX: number,
+  clientY: number,
+  element: HTMLElement | null,
+) {
+  if (!element) {
+    return false;
+  }
+  const rect = element.getBoundingClientRect();
+  return (
+    clientX >= rect.left &&
+    clientX <= rect.right &&
+    clientY >= rect.top &&
+    clientY <= rect.bottom
+  );
 }
 
 function readRemoteDragFiles(dataTransfer: DataTransfer): RemoteDragFile[] {

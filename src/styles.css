@@ -318,14 +318,32 @@ select:disabled {
   text-align: left;
 }
 
-.local-file-item:hover,
-.local-file-item.selected {
+.local-file-item:hover {
   border-color: var(--line);
   background: #121d29;
 }
 
-.local-file-item[draggable="true"] {
+.local-file-item.selected {
+  border-color: rgba(34, 211, 238, 0.78);
+  background: rgba(34, 211, 238, 0.2);
+  box-shadow: inset 3px 0 0 var(--cyan-strong);
+  color: #f5fbff;
+}
+
+.local-file-item.selected span,
+.local-file-item.selected small {
+  color: #b9ecf7;
+}
+
+.local-file-item,
+.file-list > .file-row:not(.file-head) {
   cursor: grab;
+}
+
+body.sftp-pointer-dragging,
+body.sftp-pointer-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
 }
 
 .local-file-item span,
@@ -1122,6 +1140,43 @@ button:disabled {
   gap: 10px;
 }
 
+.sftp-storage-split {
+  display: grid;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.sftp-storage-splitter {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  min-height: 7px;
+  place-items: center;
+  outline: none;
+  cursor: row-resize;
+  touch-action: none;
+}
+
+.sftp-storage-splitter::before {
+  width: 44px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--line);
+  content: "";
+  transition:
+    width 120ms ease,
+    background 120ms ease;
+}
+
+.sftp-storage-splitter:hover::before,
+.sftp-storage-splitter:focus-visible::before,
+.sftp-storage-splitter:active::before {
+  width: 70px;
+  background: var(--cyan-strong);
+}
+
 .sftp-subpanel {
   display: flex;
   flex-direction: column;
@@ -1144,10 +1199,28 @@ button:disabled {
 }
 
 .local-drop-zone {
-  flex: 0 0 auto;
+  min-height: 0;
+  overflow: hidden;
   padding: 6px;
   border-color: var(--line-soft);
   background: #090f16;
+}
+
+.sftp-storage-split .local-file-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+}
+
+.new-folder-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.new-folder-row input {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .drop-active {
@@ -1225,9 +1298,14 @@ button.file-row {
   cursor: pointer;
 }
 
-button.file-row:hover,
-button.file-row.selected {
+button.file-row:hover {
   background: #121d29;
+}
+
+button.file-row.selected {
+  background: rgba(34, 211, 238, 0.2);
+  box-shadow: inset 3px 0 0 var(--cyan-strong);
+  color: #f5fbff;
 }
 
 .file-name {

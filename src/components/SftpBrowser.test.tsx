@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
@@ -7,12 +7,32 @@ import { useSessionStore } from "../stores/sessionStore";
 import { useTransferStore } from "../stores/transferStore";
 import type { LocalEntry, SftpEntry } from "../types/session";
 
+const nativeDropMock = vi.hoisted(() => ({
+  handler: null as
+    | ((event: {
+        payload:
+          | { type: "enter" | "drop"; paths: string[]; position: { x: number; y: number } }
+          | { type: "over"; position: { x: number; y: number } }
+          | { type: "leave" };
+      }) => void)
+    | null,
+}));
+
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(() => Promise.resolve(() => undefined)),
+}));
+
+vi.mock("@tauri-apps/api/webview", () => ({
+  getCurrentWebview: () => ({
+    onDragDropEvent: vi.fn((handler) => {
+      nativeDropMock.handler = handler;
+      return Promise.resolve(() => undefined);
+    }),
+  }),
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
@@ -46,6 +66,26 @@ function remoteFile(name: string): SftpEntry {
   };
 }
 
+function localDirectory(name: string): LocalEntry {
+  return {
+    name,
+    path: `C:\\Users\\me\\${name}`,
+    entryType: "directory",
+    size: null,
+    modifiedTime: null,
+  };
+}
+
+function remoteDirectory(name: string): SftpEntry {
+  return {
+    name,
+    path: `/srv/${name}`,
+    type: "directory",
+    size: null,
+    modifiedTime: null,
+  };
+}
+
 function dragData(type: string, payload: unknown[]) {
   return {
     getData: (requestedType: string) =>
@@ -65,6 +105,7 @@ describe("SftpBrowser local path browse", () => {
     mockOpen.mockReset();
     mockConfirm.mockReset();
     mockConfirm.mockResolvedValue(true);
+    nativeDropMock.handler = null;
     localEntries = [];
     remoteEntries = [];
     useTransferStore.setState({ tasks: [], activeDrag: null });
@@ -160,6 +201,31 @@ describe("SftpBrowser local path browse", () => {
     });
   });
 
+  it("shows the folder-name editor only after the icon-only mkdir button", async () => {
+    render(<SftpBrowser />);
+
+    await screen.findByText("/srv");
+    expect(screen.getByRole("button", { name: "Open remote path" })).toBeVisible();
+    expect(
+      screen.queryByRole("textbox", { name: "New remote folder name" }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Create remote folder" }));
+    const input = screen.getByRole("textbox", { name: "New remote folder name" });
+    fireEvent.change(input, { target: { value: "reports" } });
+    fireEvent.click(screen.getByRole("button", { name: "Confirm new folder" }));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("sftp_mkdir", {
+        request: {
+          sessionId: "session-1",
+          remotePath: "/srv/reports",
+        },
+      }),
+    );
+    await waitFor(() => expect(input).not.toBeInTheDocument());
+  });
+
   it("keeps local path when folder selection is cancelled", async () => {
     mockOpen.mockResolvedValue(null);
     render(<SftpBrowser />);
@@ -192,6 +258,114 @@ describe("SftpBrowser local path browse", () => {
     );
     expect(screen.getAllByText("alpha.txt").length).toBeGreaterThan(1);
     expect(screen.getByText("upload")).toBeInTheDocument();
+  });
+
+  it("uploads native desktop drops with absolute Debian, Windows, and macOS paths", async () => {
+    const paths = [
+      "/home/me/debian.png",
+      "C:\\Users\\me\\windows.png",
+      "/Users/me/macos.png",
+    ];
+    localEntries = paths.map((entryPath) => ({
+      name: entryPath.split(/[\\/]/).at(-1) ?? entryPath,
+      path: entryPath,
+      entryType: "file",
+      size: 10,
+      modifiedTime: null,
+    }));
+    render(<SftpBrowser />);
+
+    await waitFor(() => expect(nativeDropMock.handler).not.toBeNull());
+    const remoteDropZone = screen.getByTestId("remote-drop-zone");
+    vi.spyOn(remoteDropZone, "getBoundingClientRect").mockReturnValue(
+      domRect(0, 0, 500, 500),
+    );
+
+    await act(async () => {
+      nativeDropMock.handler?.({
+        payload: {
+          type: "drop",
+          paths,
+          position: { x: 100, y: 100 },
+        },
+      });
+    });
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("describe_local_paths", { paths }),
+    );
+    await waitFor(() =>
+      expect(
+        mockInvoke.mock.calls.filter(([command]) => command === "sftp_upload_file"),
+      ).toHaveLength(3),
+    );
+    expect(
+      mockInvoke.mock.calls
+        .filter(([command]) => command === "sftp_upload_file")
+        .map(([, args]) =>
+          (args as { request: { localPath: string } }).request.localPath,
+        ),
+    ).toEqual(paths);
+  });
+
+  it("never submits a browser file name as though it were an absolute path", async () => {
+    render(<SftpBrowser />);
+
+    await screen.findByText("/srv");
+    fireEvent.drop(screen.getByTestId("remote-drop-zone"), {
+      dataTransfer: {
+        files: [new File(["image"], "wind.png", { type: "image/png" })],
+        getData: () => "",
+      },
+    });
+
+    await waitFor(() =>
+      expect(useSessionStore.getState().message?.text).toBe(
+        "The dropped item path was unavailable. Please retry the desktop file drop.",
+      ),
+    );
+    expect(
+      mockInvoke.mock.calls.some(([command]) => command === "sftp_upload_file"),
+    ).toBe(false);
+  });
+
+  it("keeps local-to-remote drag working with pointer events", async () => {
+    localEntries = [localFile("pointer-upload.txt")];
+    render(<SftpBrowser />);
+
+    const remoteDropZone = await screen.findByTestId("remote-drop-zone");
+    vi.spyOn(remoteDropZone, "getBoundingClientRect").mockReturnValue(
+      domRect(0, 0, 500, 500),
+    );
+    const localFileButton = await screen.findByRole("button", {
+      name: /pointer-upload\.txt/i,
+    });
+
+    fireEvent(localFileButton, pointerEvent("pointerdown", {
+      button: 0,
+      pointerId: 7,
+      clientX: 700,
+      clientY: 700,
+    }));
+    fireEvent(document, pointerEvent("pointermove", {
+      pointerId: 7,
+      clientX: 100,
+      clientY: 100,
+    }));
+    fireEvent(document, pointerEvent("pointerup", {
+      pointerId: 7,
+      clientX: 100,
+      clientY: 100,
+    }));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("sftp_upload_file", {
+        request: expect.objectContaining({
+          localPath: "C:\\Users\\me\\pointer-upload.txt",
+          remotePath: "/srv/pointer-upload.txt",
+        }),
+      }),
+    );
   });
 
   it("uploads files pasted from Nautilus on the remote panel", async () => {
@@ -244,6 +418,45 @@ describe("SftpBrowser local path browse", () => {
     expect(screen.getByText("download")).toBeInTheDocument();
   });
 
+  it("keeps remote-to-local drag working with pointer events", async () => {
+    remoteEntries = [remoteFile("pointer-download.log")];
+    render(<SftpBrowser />);
+
+    const localDropZone = await screen.findByTestId("local-drop-zone");
+    vi.spyOn(localDropZone, "getBoundingClientRect").mockReturnValue(
+      domRect(500, 0, 500, 500),
+    );
+    const remoteFileButton = await screen.findByRole("button", {
+      name: /pointer-download\.log/i,
+    });
+
+    fireEvent(remoteFileButton, pointerEvent("pointerdown", {
+      button: 0,
+      pointerId: 8,
+      clientX: 100,
+      clientY: 700,
+    }));
+    fireEvent(document, pointerEvent("pointermove", {
+      pointerId: 8,
+      clientX: 600,
+      clientY: 100,
+    }));
+    fireEvent(document, pointerEvent("pointerup", {
+      pointerId: 8,
+      clientX: 600,
+      clientY: 100,
+    }));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("sftp_download_file", {
+        request: expect.objectContaining({
+          remotePath: "/srv/pointer-download.log",
+          localPath: "C:\\Users\\me\\pointer-download.log",
+        }),
+      }),
+    );
+  });
+
   it("creates multiple transfer tasks when multiple files are dropped", async () => {
     const files = [localFile("one.txt"), localFile("two.txt")];
     render(<SftpBrowser />);
@@ -262,14 +475,8 @@ describe("SftpBrowser local path browse", () => {
     expect(screen.getByText("two.txt")).toBeInTheDocument();
   });
 
-  it("skips directories in a mixed drop with a single message and uploads only files", async () => {
-    const directoryEntry: LocalEntry = {
-      name: "logs",
-      path: "C:\\Users\\me\\logs",
-      entryType: "directory",
-      size: null,
-      modifiedTime: null,
-    };
+  it("uploads folders and files from a mixed drop", async () => {
+    const directoryEntry = localDirectory("logs");
     const otherDirectoryEntry: LocalEntry = {
       ...directoryEntry,
       name: "cache",
@@ -293,10 +500,70 @@ describe("SftpBrowser local path browse", () => {
     );
     expect(
       mockInvoke.mock.calls.filter(([command]) => command === "sftp_upload_file"),
-    ).toHaveLength(1);
+    ).toHaveLength(3);
     expect(
-      useSessionStore.getState().message?.text,
-    ).toBe("Directory upload is not supported yet");
+      mockInvoke.mock.calls
+        .filter(([command]) => command === "sftp_upload_file")
+        .map(([, args]) =>
+          (args as { request: { remotePath: string } }).request.remotePath,
+        ),
+    ).toEqual(expect.arrayContaining(["/srv/logs", "/srv/cache", "/srv/kept.txt"]));
+  });
+
+  it("selects a local folder on one click and uploads it", async () => {
+    localEntries = [localDirectory("models")];
+    render(<SftpBrowser />);
+
+    const folder = await screen.findByRole("button", { name: /models/i });
+    fireEvent.click(folder);
+    expect(folder).toHaveClass("selected");
+    expect(mockInvoke).not.toHaveBeenCalledWith("list_local_dir", {
+      path: "C:\\Users\\me\\models",
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^upload$/i }));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("sftp_upload_file", {
+        request: expect.objectContaining({
+          localPath: "C:\\Users\\me\\models",
+          remotePath: "/srv/models",
+        }),
+      }),
+    );
+  });
+
+  it("downloads a selected remote folder recursively", async () => {
+    remoteEntries = [remoteDirectory("results")];
+    render(<SftpBrowser />);
+
+    const folder = await screen.findByRole("button", { name: /results/i });
+    fireEvent.click(folder);
+    expect(folder).toHaveClass("selected");
+    fireEvent.click(screen.getByRole("button", { name: /^download$/i }));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("sftp_download_file", {
+        request: expect.objectContaining({
+          remotePath: "/srv/results",
+          localPath: "C:\\Users\\me\\results",
+        }),
+      }),
+    );
+  });
+
+  it("resizes the remote/local storage ratio with the accessible separator", async () => {
+    render(<SftpBrowser />);
+
+    await screen.findByText("/srv");
+    const separator = screen.getByRole("separator", {
+      name: "Resize remote and local file panels",
+    });
+    expect(separator).toHaveAttribute("aria-valuenow", "58");
+
+    fireEvent.keyDown(separator, { key: "ArrowDown" });
+    expect(separator).toHaveAttribute("aria-valuenow", "63");
+    fireEvent.keyDown(separator, { key: "ArrowUp" });
+    expect(separator).toHaveAttribute("aria-valuenow", "58");
   });
 
   it("asks for overwrite confirmation and skips when rejected", async () => {
@@ -394,3 +661,26 @@ describe("Nautilus clipboard parsing", () => {
     ]);
   });
 });
+
+function domRect(left: number, top: number, width: number, height: number): DOMRect {
+  return {
+    x: left,
+    y: top,
+    left,
+    top,
+    width,
+    height,
+    right: left + width,
+    bottom: top + height,
+    toJSON: () => ({}),
+  };
+}
+
+function pointerEvent(
+  type: "pointerdown" | "pointermove" | "pointerup",
+  init: MouseEventInit & { pointerId: number },
+) {
+  const event = new MouseEvent(type, { bubbles: true, cancelable: true, ...init });
+  Object.defineProperty(event, "pointerId", { value: init.pointerId });
+  return event;
+}

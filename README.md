@@ -59,11 +59,12 @@ Nothing is ever installed on your servers: every metric comes from one-shot stan
 - Automatic remote PTY resize and SSH keepalive, including ProxyJump tunnels
 
 ### 📁 SFTP Browser
-- Side-by-side remote/local panels with drag-and-drop upload & download
-- **Paste uploads from desktop file managers** — copy local files in Nautilus or another URI-list-aware file manager, focus the remote pane, and paste
-- Streaming 1 MiB chunked transfers with a progress queue and **per-file cancellation**
-- Downloads are written to a temporary file and atomically renamed — no partial files ever
-- Overwrite confirmation, delete, mkdir, and a native OS folder picker
+- Side-by-side remote/local panels with a draggable divider for adjusting their vertical ratio
+- Drag-and-drop upload & download for **files and complete directory trees**, with aggregate folder progress and cancellation
+- **Native desktop drops and paste uploads** — drag files/folders from Explorer, Finder, or Nautilus, or paste URI-list items into the remote pane
+- Streaming 1 MiB chunked transfers with a progress queue and **per-item cancellation**
+- Downloaded files are written to temporary files and atomically renamed — no partial files are exposed
+- Replace/merge confirmation, delete, contextual mkdir beside Open, and a native OS folder picker
 - Resizable split between terminal and SFTP panes (persisted across launches)
 - **Collapsible SFTP panel** — close it with the directional panel button and restore it from the top-right; the terminal immediately expands into the freed width
 
@@ -204,12 +205,13 @@ npm run tauri:build
 <details>
 <summary>SFTP transfer details</summary>
 
-- Drop multiple files at once; each becomes an independent queue item with progress, status, and error reporting.
+- Drop multiple files or folders at once; each top-level item becomes an independent queue item with progress, status, and error reporting. Folder contents are transferred recursively.
 - Running transfers can be canceled individually from the queue.
-- If the target file exists, GpuTerm asks before overwriting.
-- Files copied in Nautilus and compatible desktop file managers can be pasted into the focused remote pane to enqueue uploads.
+- If the target exists, GpuTerm asks before replacing a file or merging into an existing folder.
+- Files and folders dragged from Explorer, Finder, or Nautilus use the native desktop path payload; items copied in Nautilus and compatible file managers can also be pasted into the focused remote pane.
+- Click a local folder once to select it for transfer and double-click it to open it. The divider between the remote and local lists can be dragged or adjusted with the arrow keys.
+- Symbolic links are rejected during recursive transfer to prevent cycles and unexpected traversal outside the selected tree.
 - The last local directory is remembered across launches.
-- Directory drag-and-drop is detected but not yet transferred (see [Roadmap](#roadmap--known-limitations)).
 
 </details>
 
@@ -254,7 +256,7 @@ Commands run with a 3-second timeout on a dedicated SSH connection (10 s on Wind
 │    • Terminal      – PTY shell, dedicated connection per terminal cell │
 │    • Telemetry     – own connection, auto-reconnect with backoff       │
 │    • SFTP ops      – pooled per-session "operations" connection        │
-│    • Bulk transfer – dedicated connection per file, cancellable        │
+│    • Bulk transfer – dedicated connection per item, recursive/cancellable│
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -371,7 +373,7 @@ GpuTerm is free for personal and noncommercial use under [PolyForm Noncommercial
 ## Roadmap / Known limitations
 
 - Keyboard-interactive SSH authentication is not implemented
-- Recursive directory upload/download and transfer resume are not implemented
+- Interrupted transfer resume is not implemented
 - `known_hosts.json` uses SHA-256 fingerprints, not the OpenSSH known_hosts format
 - Telemetry supports local and remote Linux, macOS (Apple Silicon included), and Windows hosts; Apple GPU power/temperature and per-core CPU usage need root `powermetrics` and are not shown
 - GPU monitoring uses `nvidia-smi`, `rocm-smi`, `xpu-smi`, `intel_gpu_top`, macOS `ioreg`, or Windows WDDM performance counters (AMD support on Linux currently targets `rocm-smi`)
