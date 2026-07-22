@@ -2,7 +2,11 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
-import { readClipboardLocalPaths, SftpBrowser } from "./SftpBrowser";
+import {
+  nativeDropCoordinateScale,
+  readClipboardLocalPaths,
+  SftpBrowser,
+} from "./SftpBrowser";
 import { useSessionStore } from "../stores/sessionStore";
 import { useTransferStore } from "../stores/transferStore";
 import type { LocalEntry, SftpEntry } from "../types/session";
@@ -716,6 +720,24 @@ describe("Nautilus clipboard parsing", () => {
       "/home/me/alpha one.txt",
       "/tmp/beta.log",
     ]);
+  });
+});
+
+describe("native drop coordinate scaling", () => {
+  it("keeps Retina macOS and GTK positions in logical coordinates", () => {
+    expect(nativeDropCoordinateScale("Mozilla/5.0 (Macintosh)", 2)).toBe(1);
+    expect(nativeDropCoordinateScale("Mozilla/5.0 (X11; Linux x86_64)", 2)).toBe(
+      1,
+    );
+  });
+
+  it("converts Windows physical pixels to DOM coordinates", () => {
+    expect(nativeDropCoordinateScale("Mozilla/5.0 (Windows NT 10.0)", 2)).toBe(
+      2,
+    );
+    expect(nativeDropCoordinateScale("Mozilla/5.0 (Windows NT 10.0)", 0)).toBe(
+      1,
+    );
   });
 });
 

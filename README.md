@@ -63,11 +63,13 @@ Nothing is ever installed on your servers: every metric comes from one-shot stan
 - Drag-and-drop upload & download for **files and complete directory trees**, with aggregate folder progress and cancellation
 - **Native desktop drops and paste uploads** — drag files/folders from Explorer, Finder, or Nautilus, or paste URI-list items into the remote pane
 - **Native desktop drag-out** — drag remote files, complete folders, or multi-selections from GpuTerm into Finder, Explorer, or a Linux file manager
+- **Platform-aware drag interop** — GTK file URIs remain available until Linux file managers finish reading them, while native macOS/Linux and Windows drop coordinates are normalized correctly on scaled displays
 - Streaming 1 MiB chunked transfers with a progress queue and **per-item cancellation**
 - Downloaded files are written to temporary files and atomically renamed — no partial files are exposed
 - Replace/merge confirmation, delete, contextual mkdir beside Open, and a native OS folder picker
 - Resizable split between terminal and SFTP panes (persisted across launches)
 - **Collapsible SFTP panel** — close it with the directional panel button and restore it from the top-right; the terminal immediately expands into the freed width
+- **Responsive narrow layout** — metadata columns collapse progressively and transfer controls remain accessible when the SFTP pane is resized to its minimum width
 
 ### 📊 Live Telemetry
 - Bottom status bar polling CPU, RAM, disk, logged-in users, and GPUs every 1–10 s — on **local or remote Linux, macOS, and Windows hosts**
@@ -211,7 +213,9 @@ npm run tauri:build
 - If the target exists, GpuTerm asks before replacing a file or merging into an existing folder.
 - Files and folders dragged from Explorer, Finder, or Nautilus use the native desktop path payload; items copied in Nautilus and compatible file managers can also be pasted into the focused remote pane.
 - To export remote items to another application, drag them toward a GpuTerm window edge. GpuTerm materializes them in a temporary local export and then starts a native OS copy drag. Large items may finish preparing after the pointer is released; drag them again once the transfer queue reports completion.
+- On Linux, GpuTerm keeps the GTK `text/uri-list` provider alive until the native drag has ended so Nautilus and other file managers can complete their asynchronous file request. On Retina/scaled displays, native drop coordinates are converted per platform before the remote pane is selected.
 - Click a local folder once to select it for transfer and double-click it to open it. The divider between the remote and local lists can be dragged or adjusted with the arrow keys.
+- At narrow SFTP widths, Modified and then Type are hidden automatically; Browse and transfer actions switch to icon-only controls with accessible labels rather than overflowing the pane.
 - Symbolic links are rejected during recursive transfer to prevent cycles and unexpected traversal outside the selected tree.
 - The last local directory is remembered across launches.
 

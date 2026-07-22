@@ -1,10 +1,5 @@
-import { Channel, invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import gtLogoUrl from "../assets/gt-logo.png";
-
-type NativeDragCallback = {
-  result: unknown;
-  cursorPos: { x: number; y: number };
-};
 
 let dragIconPromise: Promise<string> | null = null;
 
@@ -14,13 +9,9 @@ export async function startNativeFileDrag(paths: string[]) {
     throw new Error("No prepared local files are available to drag");
   }
 
-  const onEvent = new Channel<NativeDragCallback>();
-  onEvent.onmessage = () => undefined;
-  await invoke("plugin:drag|start_drag", {
-    item: paths,
+  await invoke("start_native_file_drag", {
+    paths,
     image: await loadDragIcon(),
-    options: { mode: "copy" },
-    onEvent,
   });
 }
 

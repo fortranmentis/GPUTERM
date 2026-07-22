@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to build and attach installers to (e.g. v1.1.4-beta)"
+        description: "Release tag to build and attach installers to (e.g. v1.1.5-beta)"
         required: true
   push:
     tags: ["v*"]

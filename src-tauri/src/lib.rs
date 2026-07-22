@@ -1,4 +1,7 @@
+mod native_drag;
 mod ssh;
+
+use native_drag::start_native_file_drag;
 
 use ssh::local_fs::{
     describe_local_paths, list_local_dir, load_app_settings, local_path_exists,
@@ -25,8 +28,8 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_drag::init())
         .invoke_handler(tauri::generate_handler![
+            start_native_file_drag,
             load_sessions,
             save_session,
             delete_session,

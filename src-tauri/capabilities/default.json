@@ -6,7 +6,6 @@
   "permissions": [
     "core:default",
     "dialog:default",
-    "drag:default",
     "core:webview:allow-create-webview-window",
     "core:window:allow-set-focus",
     "core:window:allow-close",

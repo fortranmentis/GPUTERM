@@ -70,9 +70,15 @@ export function LocalFilePanel({
             }}
             onKeyDown={applyPathFromKeyboard}
           />
-          <button className="secondary-button compact" type="button" onClick={onBrowse}>
+          <button
+            className="secondary-button compact"
+            type="button"
+            aria-label="Browse local folder"
+            title="Browse local folder"
+            onClick={onBrowse}
+          >
             <FolderOpen size={16} />
-            Browse
+            <span className="button-label">Browse</span>
           </button>
         </div>
       </label>

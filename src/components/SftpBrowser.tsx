@@ -503,7 +503,10 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
             isPhysicalPositionInsideElement(
               payload.position,
               remoteDropZoneRef.current,
-              globalThis.devicePixelRatio || 1,
+              nativeDropCoordinateScale(
+                globalThis.navigator?.userAgent ?? "",
+                globalThis.devicePixelRatio || 1,
+              ),
             );
 
           if (payload.type === "enter" || payload.type === "over") {
@@ -1132,29 +1135,35 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
           <button
             className="secondary-button"
             type="button"
+            aria-label="Download"
+            title="Download selected remote items"
             disabled={!connected || loading || selectedRemoteEntries.length === 0}
             onClick={downloadSelected}
           >
             <Download size={16} />
-            Download
+            <span className="button-label">Download</span>
           </button>
           <button
             className="secondary-button"
             type="button"
+            aria-label="Upload"
+            title="Upload selected local items"
             disabled={!connected || loading || selectedLocalEntries.length === 0}
             onClick={uploadLocalFile}
           >
             <Upload size={16} />
-            Upload
+            <span className="button-label">Upload</span>
           </button>
           <button
             className="secondary-button danger"
             type="button"
+            aria-label="Delete"
+            title="Delete selected remote item"
             disabled={!connected || loading || !selectedEntry}
             onClick={deleteSelected}
           >
             <Trash2 size={16} />
-            Delete
+            <span className="button-label">Delete</span>
           </button>
         </div>
 
@@ -1249,6 +1258,18 @@ function isPhysicalPositionInsideElement(
     position.y / safeScaleFactor,
     element,
   );
+}
+
+/**
+ * Wry reports native drop positions in AppKit/GTK logical coordinates, while
+ * WebView2 reports physical pixels. Only Windows therefore needs DPI scaling
+ * before comparing the native event with a DOMClientRect.
+ */
+export function nativeDropCoordinateScale(userAgent: string, deviceScale: number) {
+  if (!/Windows/i.test(userAgent)) {
+    return 1;
+  }
+  return deviceScale > 0 ? deviceScale : 1;
 }
 
 function isClientPositionInsideElement(

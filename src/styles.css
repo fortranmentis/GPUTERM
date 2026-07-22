@@ -637,6 +637,11 @@ button:disabled {
   overflow: hidden;
 }
 
+.sftp-region {
+  container-name: sftp;
+  container-type: inline-size;
+}
+
 .terminal-pane,
 .sftp-browser {
   display: flex;
@@ -1181,6 +1186,7 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-width: 0;
   min-height: 0;
   border: 1px solid transparent;
   border-radius: 8px;
@@ -1241,6 +1247,16 @@ button:disabled {
   font-size: 15px;
 }
 
+.panel-title-row > div:first-child {
+  min-width: 0;
+}
+
+.panel-title-row > div:first-child p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .panel-title-actions {
   display: flex;
   flex: none;
@@ -1291,7 +1307,8 @@ button:disabled {
 .file-list {
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 button.file-row {
@@ -1345,6 +1362,16 @@ button.file-row.selected {
   flex: 0 0 auto;
   flex-direction: column;
   gap: 8px;
+  min-width: 0;
+}
+
+.sftp-actions > .button-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.sftp-actions > .button-row .secondary-button {
+  min-width: 0;
 }
 
 .transfer-progress {
@@ -1361,6 +1388,7 @@ button.file-row.selected {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  min-width: 0;
   min-height: 0;
   border: 1px solid var(--line-soft);
   border-radius: 8px;
@@ -1404,6 +1432,85 @@ button.file-row.selected {
   border: 1px solid var(--line-soft);
   border-radius: 7px;
   background: #0d141d;
+}
+
+@container sftp (max-width: 430px) {
+  .file-row {
+    grid-template-columns: minmax(0, 1fr) 64px 72px;
+    gap: 6px;
+    padding-inline: 8px;
+  }
+
+  .file-row > span:nth-child(4) {
+    display: none;
+  }
+
+  .transfer-task {
+    grid-template-columns: minmax(0, 1fr) 106px;
+    gap: 6px;
+  }
+}
+
+@container sftp (max-width: 340px) {
+  .sftp-browser {
+    padding: 8px;
+    gap: 8px;
+  }
+
+  .panel-title-row {
+    gap: 6px;
+  }
+
+  .path-row,
+  .local-path-row,
+  .new-folder-row {
+    gap: 6px;
+  }
+
+  .file-row {
+    grid-template-columns: minmax(0, 1fr) 64px;
+  }
+
+  .file-row > span:nth-child(2),
+  .file-row > span:nth-child(4) {
+    display: none;
+  }
+
+  .local-file-item {
+    grid-template-columns: minmax(0, 1fr) 52px;
+    gap: 6px;
+  }
+
+  .local-file-item > span:first-child {
+    display: none;
+  }
+
+  .sftp-actions > .button-row {
+    gap: 6px;
+  }
+
+  .sftp-actions > .button-row .secondary-button,
+  .local-path-row .secondary-button {
+    padding-inline: 6px;
+  }
+
+  .sftp-actions > .button-row .button-label,
+  .local-path-row .button-label {
+    display: none;
+  }
+
+  .transfer-queue-title {
+    gap: 4px;
+    padding-inline: 6px;
+  }
+
+  .transfer-queue-title .secondary-button {
+    padding-inline: 6px;
+  }
+
+  .transfer-task {
+    grid-template-columns: minmax(0, 1fr) 88px;
+  }
 }
 
 .transfer-task.done {
