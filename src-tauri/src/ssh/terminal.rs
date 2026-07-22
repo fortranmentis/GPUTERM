@@ -444,7 +444,7 @@ pub fn terminal_write(
             if channel.eof() {
                 return Ok(());
             }
-            match write_all_nonblocking(&mut channel, data.as_bytes()) {
+            match write_all_nonblocking(&mut *channel, data.as_bytes()) {
                 Ok(()) => Ok(()),
                 Err(error) if is_closed_channel_error(&error) => Ok(()),
                 Err(error) => Err(format!("Failed to write to remote terminal: {}", error)),
@@ -488,7 +488,7 @@ pub fn terminal_resize(
             let mut channel = channel
                 .lock()
                 .map_err(|_| "Terminal channel is unavailable".to_string())?;
-            match channel.request_pty_size(cols.max(1), rows.max(1), None, None) {
+            match resize_remote_pty_nonblocking(&mut channel, cols.max(1), rows.max(1)) {
                 Ok(()) => Ok(()),
                 Err(error) if error.to_string().to_ascii_lowercase().contains("closed") => Ok(()),
                 Err(error) => Err(format!("Failed to resize remote PTY: {}", error)),
@@ -531,6 +531,9 @@ pub fn disconnect_terminal(state: State<AppState>, session_id: String) -> Result
 const KEEPALIVE_INTERVAL_SECS: u32 = 30;
 const MIN_IDLE_SLEEP: Duration = Duration::from_millis(2);
 const MAX_IDLE_SLEEP: Duration = Duration::from_millis(30);
+const NONBLOCKING_RETRY_SLEEP: Duration = Duration::from_millis(8);
+const NONBLOCKING_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
+const LIBSSH2_ERROR_EAGAIN: i32 = -37;
 
 /// Appends `bytes` to `pending`, drains everything decodable into a String
 /// (invalid sequences become U+FFFD), and leaves at most 3 trailing bytes of a
@@ -633,7 +636,24 @@ fn start_remote_terminal_reader(
 
             if idle {
                 if last_keepalive.elapsed() >= Duration::from_secs(KEEPALIVE_INTERVAL_SECS.into()) {
-                    let _ = session.keepalive_send();
+                    // A libssh2 send that returns EAGAIN must be retried with
+                    // the same operation before another packet is submitted.
+                    // Hold the channel mutex so terminal input/resize cannot
+                    // interleave with a partially sent keepalive packet.
+                    let keepalive_result = {
+                        let _channel_guard = match channel.lock() {
+                            Ok(channel) => channel,
+                            Err(_) => {
+                                close_message = Some("Terminal channel is unavailable".to_string());
+                                break;
+                            }
+                        };
+                        send_keepalive_nonblocking(&session)
+                    };
+                    if let Err(error) = keepalive_result {
+                        close_message = Some(format!("SSH keepalive failed: {}", error));
+                        break;
+                    }
                     last_keepalive = Instant::now();
                 }
                 thread::sleep(idle_sleep);
@@ -991,46 +1011,117 @@ fn is_closed_channel_error(error: &std::io::Error) -> bool {
         || message.contains("channel is not open")
 }
 
-fn write_all_nonblocking(channel: &mut Channel, mut bytes: &[u8]) -> std::io::Result<()> {
+fn write_all_nonblocking(writer: &mut impl Write, mut bytes: &[u8]) -> std::io::Result<()> {
     let started = Instant::now();
     while !bytes.is_empty() {
-        match channel.write(bytes) {
+        match writer.write(bytes) {
             Ok(0) => {
-                if started.elapsed() > Duration::from_secs(5) {
+                if started.elapsed() > NONBLOCKING_OPERATION_TIMEOUT {
                     return Err(std::io::Error::new(
                         ErrorKind::TimedOut,
                         "terminal write timed out",
                     ));
                 }
-                thread::sleep(Duration::from_millis(8));
+                thread::sleep(NONBLOCKING_RETRY_SLEEP);
             }
             Ok(count) => bytes = &bytes[count..],
             Err(error)
                 if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) =>
             {
-                if started.elapsed() > Duration::from_secs(5) {
+                if started.elapsed() > NONBLOCKING_OPERATION_TIMEOUT {
                     return Err(std::io::Error::new(
                         ErrorKind::TimedOut,
                         "terminal write timed out",
                     ));
                 }
-                thread::sleep(Duration::from_millis(8));
+                thread::sleep(NONBLOCKING_RETRY_SLEEP);
             }
             Err(error) => return Err(error),
         }
     }
-    channel.flush()
+    // Do not call `Channel::flush()` here. In libssh2 that API discards
+    // queued incoming channel data and adjusts the receive window; it is not
+    // an outgoing socket flush. Calling it after each key can throw away the
+    // remote echo and collide with the reader's nonblocking state machine.
+    Ok(())
+}
+
+fn is_ssh_would_block(error: &ssh2::Error) -> bool {
+    matches!(
+        error.code(),
+        ssh2::ErrorCode::Session(code) if code == LIBSSH2_ERROR_EAGAIN
+    )
+}
+
+fn send_keepalive_nonblocking(session: &Session) -> Result<(), ssh2::Error> {
+    let started = Instant::now();
+    loop {
+        match session.keepalive_send() {
+            Ok(_) => return Ok(()),
+            Err(error)
+                if is_ssh_would_block(&error)
+                    && started.elapsed() <= NONBLOCKING_OPERATION_TIMEOUT =>
+            {
+                thread::sleep(NONBLOCKING_RETRY_SLEEP);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn resize_remote_pty_nonblocking(
+    channel: &mut Channel,
+    cols: u32,
+    rows: u32,
+) -> Result<(), ssh2::Error> {
+    let started = Instant::now();
+    loop {
+        match channel.request_pty_size(cols, rows, None, None) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if is_ssh_would_block(&error)
+                    && started.elapsed() <= NONBLOCKING_OPERATION_TIMEOUT =>
+            {
+                thread::sleep(NONBLOCKING_RETRY_SLEEP);
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        drain_utf8_stream, fill_stored_credentials, is_closed_channel_error,
-        open_local_terminal_with_shell, pty_size,
+        drain_utf8_stream, fill_stored_credentials, is_closed_channel_error, is_ssh_would_block,
+        open_local_terminal_with_shell, pty_size, write_all_nonblocking,
     };
     use crate::ssh::credentials::{CredentialStore, MemoryCredentialStore};
     use crate::ssh::session::SshTarget;
     use std::io::{Error, ErrorKind, Read, Write};
+
+    #[derive(Default)]
+    struct BurstyWriter {
+        attempts: usize,
+        bytes: Vec<u8>,
+        flushes: usize,
+    }
+
+    impl Write for BurstyWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.attempts += 1;
+            if self.attempts == 1 {
+                return Err(Error::new(ErrorKind::WouldBlock, "busy"));
+            }
+            let count = bytes.len().min(1);
+            self.bytes.extend_from_slice(&bytes[..count]);
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            Err(Error::other("SSH channel flush must not be called"))
+        }
+    }
 
     #[test]
     fn passes_through_complete_utf8() {
@@ -1092,6 +1183,23 @@ mod tests {
         let unrelated = Error::new(ErrorKind::BrokenPipe, "network cable disconnected");
         assert!(is_closed_channel_error(&closed));
         assert!(!is_closed_channel_error(&unrelated));
+    }
+
+    #[test]
+    fn retries_key_bursts_without_flushing_incoming_ssh_data() {
+        let mut writer = BurstyWriter::default();
+        write_all_nonblocking(&mut writer, b"as").unwrap();
+        assert_eq!(writer.bytes, b"as");
+        assert_eq!(writer.flushes, 0);
+        assert!(writer.attempts >= 3);
+    }
+
+    #[test]
+    fn recognizes_libssh2_nonblocking_retry_code() {
+        let retry = ssh2::Error::new(ssh2::ErrorCode::Session(-37), "operation would block");
+        let fatal = ssh2::Error::new(ssh2::ErrorCode::Session(-43), "transport read");
+        assert!(is_ssh_would_block(&retry));
+        assert!(!is_ssh_would_block(&fatal));
     }
 
     #[test]

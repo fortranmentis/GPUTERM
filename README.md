@@ -55,6 +55,7 @@ Nothing is ever installed on your servers: every metric comes from one-shot stan
 - **CJK input works correctly** — Korean IME composition in the terminal is handled with the same backspace-rewrite protocol native terminals use, fixing the jamo-splitting bug in WebKit-based webviews
 - MOTD and early output are buffered and replayed, never lost to connection races
 - Serialized burst input plus a fully nonblocking SSH/TCP transport keeps simultaneous keys, modifier chords, and key repeat responsive without racing the terminal reader
+- Terminal writes avoid libssh2's incoming-data flush path, while writes, remote PTY resize, and SSH keepalive retry nonblocking operations without packet interleaving
 - Automatic remote PTY resize and SSH keepalive, including ProxyJump tunnels
 
 ### 📁 SFTP Browser
@@ -360,7 +361,7 @@ GpuTerm is free for personal and noncommercial use under [PolyForm Noncommercial
 | `tauri:dev` fails on Windows | VS Build Tools 2022 (C++ workload) + WebView2 Runtime installed, then restart the terminal |
 | `cargo` not found | Install via [rustup](https://rustup.rs), reopen the terminal (`%USERPROFILE%\.cargo\bin` on PATH) |
 | SSH auth fails | Verify host/port/user/credentials; confirm the server allows the auth method |
-| Pressing multiple keys shows `Terminal stream failed: transport read` | Fixed in v1.1.3-beta by synchronizing libssh2 and TCP nonblocking modes for direct and ProxyJump terminals — update the app |
+| Pressing multiple keys shows `Terminal stream failed: transport read` | Re-download v1.1.3-beta: the refreshed installers remove the destructive SSH channel flush and serialize nonblocking input, PTY resize, and keepalive operations |
 | Master password is rejected or forgotten | Check the password, or choose **Reset vault**. Profiles are kept, but all saved SSH passwords are deleted and must be entered again |
 | Host key mismatch | Verify the server fingerprint out-of-band, then remove the stale entry from `known_hosts.json` |
 | GPU shows unavailable | Confirm a GPU tool is installed (`nvidia-smi`, `rocm-smi`, `xpu-smi`, or `intel_gpu_top`); other metrics still work regardless |
