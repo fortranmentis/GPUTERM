@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to build and attach installers to (e.g. v1.1.5-beta)"
+        description: "Release tag to build and attach installers to (e.g. v1.1.6-beta)"
         required: true
   push:
     tags: ["v*"]
@@ -84,6 +84,10 @@ jobs:
         uses: ilammy/setup-nasm@v1
 
       - run: npm ci
+
+      - name: Verify Windows local telemetry collector
+        if: matrix.platform == 'windows-latest'
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib ssh::system_monitor::tests::executes_windows_local_collector_with_utf8_output
 
       - name: Build and upload Windows/Linux installer
         if: matrix.platform != 'macos-latest'

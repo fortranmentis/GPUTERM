@@ -14,6 +14,7 @@ use base64::Engine as _;
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use ssh2::Session;
+use std::ffi::OsString;
 use std::io::Read;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,8 +23,15 @@ use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+#[cfg(target_os = "windows")]
+use std::path::PathBuf;
+
 const COMMAND_TIMEOUT_SECS: u64 = 3;
 const COMMAND_TIMEOUT_MS: u32 = 3_000;
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// Windows PowerShell 5.1 cold-starts in 0.5–2 s and the batched telemetry
 /// script samples counters for 500 ms, so Windows remotes get a longer
 /// libssh2 session timeout than the Unix paths.
@@ -1021,14 +1029,10 @@ pub(crate) fn run_remote_command_for(
 /// Only stdout crosses into the parser and no shell output is exposed to the
 /// terminal session itself.
 pub(crate) fn run_local_command_for(os: RemoteOs, command: &str) -> Result<String, String> {
-    let output = match os {
-        RemoteOs::Windows => Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-EncodedCommand"])
-            .arg(encode_powershell_script(command))
-            .output(),
-        RemoteOs::Linux | RemoteOs::MacOs => Command::new("sh").args(["-lc", command]).output(),
-    }
-    .map_err(|error| format!("failed to start local telemetry command: {}", error))?;
+    let mut process = local_collector_command(os, command);
+    let output = process
+        .output()
+        .map_err(|error| format!("failed to start local telemetry command: {}", error))?;
 
     if !output.status.success() {
         return Err(non_zero_exit_error(
@@ -1037,6 +1041,76 @@ pub(crate) fn run_local_command_for(os: RemoteOs, command: &str) -> Result<Strin
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn local_collector_command(os: RemoteOs, command: &str) -> Command {
+    let process = match os {
+        RemoteOs::Windows => {
+            let mut process = Command::new(windows_powershell_executable());
+            process
+                .args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-OutputFormat",
+                    "Text",
+                    "-EncodedCommand",
+                ])
+                .arg(encode_powershell_script(&windows_local_script(command)));
+            process
+        }
+        RemoteOs::Linux | RemoteOs::MacOs => {
+            let mut process = Command::new("sh");
+            process.args(["-lc", command]);
+            process
+        }
+    };
+
+    // GpuTerm is a Windows GUI-subsystem application. Without this flag every
+    // local telemetry poll allocates a new console for powershell.exe, causing
+    // one or more terminal windows to flash on screen every few seconds.
+    #[cfg(target_os = "windows")]
+    {
+        let mut process = process;
+        process.creation_flags(CREATE_NO_WINDOW);
+        process
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        process
+    }
+}
+
+fn windows_powershell_executable() -> OsString {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(system_root) = std::env::var_os("SystemRoot") {
+            let executable = PathBuf::from(system_root)
+                .join("System32")
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe");
+            if executable.is_file() {
+                return executable.into_os_string();
+            }
+        }
+    }
+    OsString::from("powershell.exe")
+}
+
+fn windows_local_script(script: &str) -> String {
+    // PowerShell 5.1 otherwise writes redirected console output using the
+    // active OEM code page. JSON containing a localized CPU, volume, user, or
+    // process name can then become invalid when Rust decodes it. Force UTF-8
+    // before any collector output is produced.
+    format!(
+        "$utf8 = New-Object System.Text.UTF8Encoding($false)\n\
+         [Console]::OutputEncoding = $utf8\n\
+         $OutputEncoding = $utf8\n\
+         {}",
+        script
+    )
 }
 
 /// Runs a PowerShell script on a Windows remote. `-EncodedCommand` (base64 of
@@ -1468,6 +1542,43 @@ mod tests {
     fn encodes_powershell_script_as_utf16le_base64() {
         // "ab" → UTF-16LE 61 00 62 00 → base64 "YQBiAA==".
         assert_eq!(encode_powershell_script("ab"), "YQBiAA==");
+    }
+
+    #[test]
+    fn builds_noninteractive_utf8_windows_local_collector() {
+        let process = local_collector_command(
+            RemoteOs::Windows,
+            "Write-Output '__HOSTNAME__'; Write-Output $env:COMPUTERNAME",
+        );
+        assert_eq!(
+            std::path::Path::new(process.get_program())
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_ascii_lowercase)
+                .as_deref(),
+            Some("powershell.exe")
+        );
+        let args = process
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["-OutputFormat", "Text"]));
+        assert!(args.iter().any(|arg| arg == "-NonInteractive"));
+        assert!(args.iter().any(|arg| arg == "-EncodedCommand"));
+
+        let wrapped = windows_local_script("Write-Output 'ok'");
+        assert!(wrapped.contains("[Console]::OutputEncoding = $utf8"));
+        assert!(wrapped.ends_with("Write-Output 'ok'"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn executes_windows_local_collector_with_utf8_output() {
+        let output =
+            run_local_command_for(RemoteOs::Windows, "Write-Output '로컬 모니터링'").unwrap();
+        assert_eq!(output.trim(), "로컬 모니터링");
     }
 
     #[cfg(not(target_os = "windows"))]

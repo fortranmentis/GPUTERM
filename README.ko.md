@@ -76,6 +76,7 @@
 - 각 섹션을 클릭하면 표가 창 크기에 맞춰 확장되는 **드래그·크기 조절 가능 상세 팝오버**: 코어별 CPU 사용률, 상위 프로세스, GPU별 VRAM/전력/온도, 전체 마운트 목록
 - **상세창을 별도 OS 창으로 분리** 가능 — 독립적으로 갱신되고 세션이 끊기면 함께 닫힘
 - 원격 텔레메트리는 전용 SSH 연결에서 자동 재연결하고, 로컬 텔레메트리는 SSH 없이 호스트에서 수집기를 직접 실행
+- **조용한 Windows 로컬 모니터링** — PowerShell 수집기를 콘솔 창 없이 실행하고 UTF-8 텍스트로 출력해 한글 장치명·볼륨명도 안정적으로 파싱
 - GPU가 전혀 없는 서버에서는 시스템 지표만 표시하며 정상 동작
 
 ### 🔐 기본 보안
@@ -239,7 +240,7 @@ npm run tauri:build
 | GPU | `nvidia-smi`(NVIDIA), `rocm-smi --json`(AMD/ROCm), `xpu-smi` / `intel_gpu_top`(Intel) — 자동 감지 | `ioreg -c IOAccelerator` (Apple GPU 사용률, root 불필요) | `nvidia-smi`(NVIDIA, 전체 지표); AMD/Intel은 WDDM GPU 성능 카운터(사용률 + VRAM) |
 | 상위 프로세스 | `ps -eo … --sort=-%cpu` / `--sort=-rss` | `ps -Ao … -r` / `-m` | `Get-Process` (2회 샘플 CPU 델타) |
 
-명령은 전용 SSH 연결에서 3초 타임아웃으로 실행됩니다(Windows는 PowerShell 기동 시간을 감안해 10초). Windows 명령은 폴링마다 하나의 PowerShell 5.1 스크립트로 묶어 `-EncodedCommand`로 전송하므로 OpenSSH 기본 셸이 cmd.exe든 PowerShell이든 동작하며, 서버에 아무것도 설치하지 않고 관리자 권한도 필요 없습니다. GpuTerm이 원격 OS와 GPU 도구를 호스트별로 감지해 각 카드에 벤더 태그를 표시합니다. `intel_gpu_top`은 root 또는 `CAP_PERFMON`이 필요하고, Apple GPU의 전력·온도는 root `powermetrics`가 필요해 n/a로 표시됩니다. GPU 소스가 하나도 없으면 GPU 섹션만 '사용 불가'로 표시되고 나머지는 계속 동작합니다.
+명령은 전용 SSH 연결에서 3초 타임아웃으로 실행됩니다(Windows는 PowerShell 기동 시간을 감안해 10초). Windows 명령은 폴링마다 하나의 PowerShell 5.1 스크립트로 묶어 `-EncodedCommand`로 전송하므로 OpenSSH 기본 셸이 cmd.exe든 PowerShell이든 동작하며, 서버에 아무것도 설치하지 않고 관리자 권한도 필요 없습니다. Windows 로컬 세션에서는 동일한 수집기를 시스템 PowerShell로 직접 실행하되 `CREATE_NO_WINDOW`와 명시적인 UTF-8 텍스트 출력을 적용해 폴링 콘솔 창이 뜨지 않고 지역화된 JSON 필드도 보존됩니다. GpuTerm이 원격 OS와 GPU 도구를 호스트별로 감지해 각 카드에 벤더 태그를 표시합니다. `intel_gpu_top`은 root 또는 `CAP_PERFMON`이 필요하고, Apple GPU의 전력·온도는 root `powermetrics`가 필요해 n/a로 표시됩니다. GPU 소스가 하나도 없으면 GPU 섹션만 '사용 불가'로 표시되고 나머지는 계속 동작합니다.
 
 </details>
 
@@ -367,6 +368,7 @@ GpuTerm은 [PolyForm Noncommercial 1.0.0](./LICENSE)에 따라 개인·비상업
 | 마스터 비밀번호가 틀렸거나 기억나지 않음 | 비밀번호를 확인하거나 **Reset vault**를 선택하세요. 프로필은 유지되지만 저장된 SSH 비밀번호는 모두 삭제되어 다시 입력해야 합니다 |
 | 호스트 키 불일치 | 다른 경로로 서버 지문을 검증한 뒤 `known_hosts.json`에서 이전 항목 제거 |
 | GPU가 '사용 불가'로 표시 | GPU 도구(`nvidia-smi`, `rocm-smi`, `xpu-smi`, `intel_gpu_top`) 설치 확인 — 다른 지표는 무관하게 정상 동작 |
+| Windows 로컬 세션에서 콘솔 창이 반복 표시되거나 모니터링 데이터가 없음 | v1.1.6-beta에서 수정 — 앱을 업데이트하세요. 로컬 PowerShell 수집기는 콘솔 없이 UTF-8 출력으로 실행됩니다 |
 | Windows 원격에서 "The system cannot find the path specified" 표시 | v1.0.9-beta에서 수정 — 이전 빌드는 PATH에 `uname` 포트가 있는 Windows 호스트를 Linux로 오인했습니다; 앱을 업데이트하세요 |
 | 터미널에서 한글이 자모로 분리됨 | macOS/WebKit 클라이언트용으로 수정 완료 — 최신 릴리스로 업데이트하세요 |
 

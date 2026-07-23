@@ -79,6 +79,7 @@ Nothing is ever installed on your servers: every metric comes from one-shot stan
 - Click any section for a **draggable, resizable detail popover** whose tables expand with the window: per-core CPU usage, top processes, VRAM/power/temperature per GPU, full mount list
 - **Pop any detail view out into its own OS window** — it refreshes independently and closes with its session
 - Remote telemetry runs on a dedicated SSH connection with automatic reconnect; local telemetry executes collectors directly without SSH
+- **Quiet Windows local monitoring** — PowerShell collectors run without allocating console windows and emit UTF-8 text, so localized device and volume names remain parseable
 - Hosts without any GPU gracefully fall back to system-only metrics
 
 ### 🔐 Security by default
@@ -245,7 +246,7 @@ All metrics come from standard tools over SSH — nothing is installed on the se
 | GPU | `nvidia-smi` (NVIDIA), `rocm-smi --json` (AMD/ROCm), `xpu-smi` / `intel_gpu_top` (Intel) — auto-detected | `ioreg -c IOAccelerator` (Apple GPU utilization, no root needed) | `nvidia-smi` (NVIDIA, full metrics); WDDM GPU performance counters for AMD/Intel (utilization + VRAM) |
 | Top processes | `ps -eo … --sort=-%cpu` / `--sort=-rss` | `ps -Ao … -r` / `-m` | `Get-Process` (two-sample CPU delta) |
 
-Commands run with a 3-second timeout on a dedicated SSH connection (10 s on Windows to absorb PowerShell start-up). Windows commands are batched into a single PowerShell 5.1 invocation per poll and sent as `-EncodedCommand`, so they work with either cmd.exe or PowerShell as the OpenSSH default shell — nothing is installed and no admin rights are required. GpuTerm detects the remote OS and available GPU tools per host and shows a vendor tag on every card; `intel_gpu_top` needs root or `CAP_PERFMON`, and Apple GPU power/temperature would need root `powermetrics`, so they show as n/a. If no GPU source is present, the GPU section reports unavailable while everything else keeps working.
+Commands run with a 3-second timeout on a dedicated SSH connection (10 s on Windows to absorb PowerShell start-up). Windows commands are batched into a single PowerShell 5.1 invocation per poll and sent as `-EncodedCommand`, so they work with either cmd.exe or PowerShell as the OpenSSH default shell — nothing is installed and no admin rights are required. For a local Windows session, the same collectors use the system PowerShell directly with `CREATE_NO_WINDOW` and explicit UTF-8 text output, preventing polling consoles from appearing and preserving localized JSON fields. GpuTerm detects the remote OS and available GPU tools per host and shows a vendor tag on every card; `intel_gpu_top` needs root or `CAP_PERFMON`, and Apple GPU power/temperature would need root `powermetrics`, so they show as n/a. If no GPU source is present, the GPU section reports unavailable while everything else keeps working.
 
 </details>
 
@@ -373,6 +374,7 @@ GpuTerm is free for personal and noncommercial use under [PolyForm Noncommercial
 | Master password is rejected or forgotten | Check the password, or choose **Reset vault**. Profiles are kept, but all saved SSH passwords are deleted and must be entered again |
 | Host key mismatch | Verify the server fingerprint out-of-band, then remove the stale entry from `known_hosts.json` |
 | GPU shows unavailable | Confirm a GPU tool is installed (`nvidia-smi`, `rocm-smi`, `xpu-smi`, or `intel_gpu_top`); other metrics still work regardless |
+| Local Windows session flashes console windows or has no monitoring data | Fixed in v1.1.6-beta — update the app; local PowerShell collectors now run without a console and use UTF-8 output |
 | Windows remote shows “The system cannot find the path specified” | Fixed in v1.0.9-beta — older builds misdetected Windows hosts that have a `uname` port on PATH as Linux; update the app |
 | Korean input splits into jamo in the terminal | Fixed for macOS/WebKit clients — update to the latest release |
 

@@ -1,40 +1,35 @@
-# GpuTerm 1.1.5-beta
+# GpuTerm 1.1.6-beta
 
 ## Highlights
 
-- Completed bidirectional native SFTP desktop drag-and-drop across Debian/Linux, macOS, and Windows, addressing the asymmetric platform failures that remained after 1.1.4-beta.
-- Replaced the generic Linux drag plugin path with a GpuTerm-owned native GTK file drag. File URIs are percent-encoded and remain available until `drag-end`, allowing Nautilus and other GTK file managers to finish their asynchronous selection request.
-- Added platform-aware native drop coordinate normalization: AppKit and GTK logical coordinates are used directly, while Windows physical pixels are converted with the display scale factor.
-- Added a responsive SFTP layout driven by the pane's actual width. Remote metadata columns collapse progressively, local rows tighten, and toolbar and transfer controls remain usable at the minimum pane width.
+- Stabilized native local-host monitoring on Windows without changing the local terminal or saved-session workflow.
+- Local Windows telemetry now launches PowerShell with the Windows `CREATE_NO_WINDOW` process flag, so CPU, memory, disk, user, GPU, and detail polling stays inside GpuTerm instead of flashing console windows.
+- The collector resolves the installed system Windows PowerShell directly, with a normal PATH lookup fallback for nonstandard installations.
+- PowerShell collector output is explicitly emitted as UTF-8 text, preserving localized CPU, device, volume, user, and process names for the existing JSON parsers.
 
 ## Fixes
 
-- Fixed Debian/Linux drag-out showing `Drop the prepared items in Finder, Explorer, or Files` but creating no file in Nautilus or another external destination.
-- Fixed the Linux drag source being disconnected immediately on `drop-performed`, before the destination requested the `text/uri-list` payload.
-- Fixed spaces, non-ASCII characters, and other URI-sensitive characters in Linux drag-out paths by generating valid file URLs.
-- Fixed macOS Finder-to-SFTP drops being ignored on Retina displays because native AppKit coordinates were divided by `devicePixelRatio` a second time.
-- Fixed narrow SFTP panes clipping the Modified/Type columns, local Browse control, Download/Upload/Delete actions, and transfer cards.
-- Fixed long remote paths and filenames forcing horizontal overflow instead of using ellipsis and responsive columns.
-- Removed the no-longer-used drag plugin permission and routed native file drag startup through a validated application command.
+- Fixed one or more external terminal windows appearing repeatedly after connecting to the Windows local host.
+- Fixed monitoring cards remaining unavailable when installed-app environment differences prevented a bare `powershell.exe` lookup.
+- Fixed localized Windows collector output being decoded through the active OEM code page and potentially invalidating telemetry JSON.
+- Applied the hidden, noninteractive collector path consistently to regular telemetry polls, GPU probing/counters, and on-demand CPU, memory, and GPU detail queries.
 
 ## Validation
 
-- Frontend: 103 Vitest tests passed across SFTP, native drag IPC and coordinate scaling, terminal split/input, saved sessions, ProxyJump, monitoring, and credential-vault coverage. The SFTP suite contains 24 tests, plus two focused native drag command tests.
-- Backend: 104 Rust tests passed (1 ignored because it requires host telemetry permissions unavailable in some sandboxes), including native drag path/image validation and the existing recursive SFTP, terminal, telemetry, and encrypted-vault coverage.
-- Static/build checks: Clippy passed with warnings denied, and the TypeScript/Vite production build completed successfully.
-- Responsive visual QA: at a 300 px SFTP region (280 px content width), the remote panel, path controls, file rows, local panel, transfer actions, queue, and transfer card all reported `scrollWidth <= clientWidth` with no horizontal clipping.
-- Local macOS packaging: the 1.1.5 application bundle is built, fully ad-hoc signed inside-out, and verified with `codesign --verify --deep --strict` before release publication.
+- Frontend: 103 Vitest tests pass across terminal sessions/splits, SFTP, monitoring, saved profiles, ProxyJump, native drag-and-drop, and credential-vault behavior.
+- Backend: 105 Rust tests pass (1 ignored because it requires host telemetry permissions unavailable in some sandboxes), including the new Windows local collector command/UTF-8 configuration coverage.
+- Static/build checks: Rust `cargo check`, Clippy with warnings denied, and the TypeScript/Vite production build complete successfully.
+- Windows-specific regression coverage verifies the system PowerShell command, noninteractive text arguments, UTF-8 preamble, and a native Windows UTF-8 collector round trip.
 - Packaging: the tagged source is built on GitHub-hosted Windows, Ubuntu, and macOS runners into native NSIS `.exe`, Debian `.deb`, and Apple Silicon `.dmg` installers.
-- macOS release packaging signs nested Mach-O files and code containers before deep-signing the final app. The DMG is verified, mounted, and its enclosed app is verified again before upload.
+- macOS release packaging fully ad-hoc signs nested Mach-O files and code containers inside-out, deep-signs and strictly verifies the final app, creates the DMG from that verified bundle, then mounts it and verifies the enclosed app again before upload.
 - Release assets include `SHA256SUMS.txt` covering the `.exe`, `.deb`, and `.dmg` installers.
 
 ## Notes
 
-- No credential format or vault migration is required when upgrading from 1.1.4-beta. Saved profiles and the Argon2id + AES-256-GCM local vault remain unchanged.
-- Dragging a remote item outside GpuTerm still materializes it in an application-owned temporary export first. Keep holding while small items prepare; for a large file or folder, wait for preparation to finish and drag it again.
-- Native desktop drag-and-drop depends on the destination application's operating-system drag support. Browser-only file payloads are not used as absolute paths.
-- Interrupted transfer resume is not implemented; canceled or failed items must be started again.
+- No profile, known-host, or credential-vault migration is required when upgrading from 1.1.5-beta. Saved profiles and the Argon2id + AES-256-GCM local vault remain unchanged.
+- Local Windows monitoring uses Windows PowerShell 5.1, which is preinstalled on supported Windows 10/11 systems; no OpenSSH server is required for a local session.
+- The first CPU sample may show usage as unavailable until the next poll because usage is calculated from two counter samples. Memory and disk data can appear immediately.
 - This is a beta prerelease. Windows builds do not have a trusted publisher signature, and the macOS build is fully ad-hoc signed rather than Developer ID signed or notarized, so SmartScreen or Gatekeeper may still require a one-time confirmation.
 - The macOS installer is Apple Silicon (`aarch64`) only. Intel Mac users can build from source.
 
-**Full changelog:** https://github.com/fortranmentis/GPUTERM/compare/v1.1.4-beta...v1.1.5-beta
+**Full changelog:** https://github.com/fortranmentis/GPUTERM/compare/v1.1.5-beta...v1.1.6-beta
