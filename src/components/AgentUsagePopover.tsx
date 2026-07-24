@@ -3,7 +3,7 @@ import type { RefObject } from "react";
 import type { AgentMetric, AgentWorkMetric } from "../types/gpu";
 import { formatBytes } from "../utils/formatBytes";
 import { formatPercent } from "../utils/format";
-import { ResourceDetailPopover } from "./ResourceDetailPopover";
+import { DetailUsageBar, ResourceDetailPopover } from "./ResourceDetailPopover";
 
 type AgentUsagePopoverProps = {
   agents: AgentMetric[];
@@ -45,6 +45,8 @@ export function AgentDetailContent({
             </span>
           </header>
 
+          <AgentUsageDetails agent={agent} />
+
           <div className="agent-resource-grid">
             <AgentField label="CPU" value={formatPercent(agent.cpuPercent, 1)} />
             <AgentField label="Memory" value={formatBytes(agent.memoryBytes)} />
@@ -62,8 +64,6 @@ export function AgentDetailContent({
               Workspace <strong>{agent.cwd ?? "n/a"}</strong>
             </span>
           </div>
-
-          <AgentUsageDetails agent={agent} />
         </article>
       ))}
     </div>
@@ -71,22 +71,20 @@ export function AgentDetailContent({
 }
 
 function AgentUsageDetails({ agent }: { agent: AgentMetric }) {
-  if (agent.provider === "agy") {
-    return (
-      <div className="agent-provider-details">
-        <TokenSummary agent={agent} />
-        <RateLimits limits={agent.rateLimits} />
-        <WorkList title="Subagents" items={agent.subagents} />
-        <WorkList title="Background tasks" items={agent.backgroundTasks} />
-      </div>
-    );
-  }
+  return (
+    <div className="agent-provider-details">
+      <ContextRemaining agent={agent} />
+      <RateLimits provider={agent.provider} limits={agent.rateLimits} />
+      <TokenSummary agent={agent} />
 
-  if (agent.provider === "claude") {
-    return (
-      <div className="agent-provider-details">
-        <TokenSummary agent={agent} />
-        <RateLimits limits={agent.rateLimits} />
+      {agent.provider === "agy" && (
+        <>
+          <WorkList title="Subagents" items={agent.subagents} />
+          <WorkList title="Background tasks" items={agent.backgroundTasks} />
+        </>
+      )}
+
+      {agent.provider === "claude" && (
         <div className="agent-resource-grid compact">
           <AgentField
             label="Session cost"
@@ -97,62 +95,130 @@ function AgentUsageDetails({ agent }: { agent: AgentMetric }) {
             value={formatDuration(agent.sessionDurationSeconds)}
           />
         </div>
-      </div>
-    );
+      )}
+    </div>
+  );
+}
+
+function ContextRemaining({ agent }: { agent: AgentMetric }) {
+  const remainingPercent =
+    agent.contextRemainingPercent ??
+    (agent.contextUsedPercent == null
+      ? null
+      : Math.max(0, Math.min(100, 100 - agent.contextUsedPercent)));
+  let detail = "Context data unavailable";
+  if (agent.contextRemainingTokens != null && agent.contextWindowTokens != null) {
+    detail = `${formatTokens(agent.contextRemainingTokens)} of ${formatTokens(
+      agent.contextWindowTokens,
+    )} tokens left`;
+  } else if (agent.contextRemainingTokens != null) {
+    detail = `${formatTokens(agent.contextRemainingTokens)} tokens left`;
+  } else if (agent.contextWindowTokens != null && agent.contextUsedTokens != null) {
+    detail = `${formatTokens(
+      Math.max(0, agent.contextWindowTokens - agent.contextUsedTokens),
+    )} of ${formatTokens(agent.contextWindowTokens)} tokens left`;
   }
 
   return (
-    <div className="agent-provider-details">
-      <TokenSummary agent={agent} />
-      <RateLimits limits={agent.rateLimits} />
-    </div>
+    <section className="agent-context-remaining" aria-label="Context remaining">
+      <RemainingGauge
+        label="Context remaining"
+        remainingPercent={remainingPercent}
+        detail={detail}
+      />
+    </section>
   );
 }
 
 function TokenSummary({ agent }: { agent: AgentMetric }) {
   return (
-    <div className="agent-resource-grid compact">
-      <AgentField label="Input tokens" value={formatTokens(agent.inputTokens)} />
-      <AgentField label="Output tokens" value={formatTokens(agent.outputTokens)} />
-      <AgentField label="Total tokens" value={formatTokens(agent.totalTokens)} />
-      <AgentField
-        label="Context used"
-        value={
-          agent.contextUsedPercent == null
-            ? `${formatTokens(agent.contextUsedTokens)} / ${formatTokens(agent.contextWindowTokens)}`
-            : `${agent.contextUsedPercent.toFixed(1)}%`
-        }
-      />
-      <AgentField
-        label="Context left"
-        value={
-          agent.contextRemainingPercent == null
-            ? formatTokens(agent.contextRemainingTokens)
-            : `${agent.contextRemainingPercent.toFixed(1)}% (${formatTokens(agent.contextRemainingTokens)})`
-        }
-      />
-    </div>
+    <section className="agent-token-summary">
+      <span>Session tokens</span>
+      <div className="agent-resource-grid compact tokens">
+        <AgentField label="Input" value={formatTokens(agent.inputTokens)} />
+        <AgentField label="Output" value={formatTokens(agent.outputTokens)} />
+        <AgentField label="Total" value={formatTokens(agent.totalTokens)} />
+      </div>
+    </section>
   );
 }
 
-function RateLimits({ limits }: { limits: AgentMetric["rateLimits"] }) {
-  if (limits.length === 0) return null;
+function RateLimits({
+  provider,
+  limits,
+}: {
+  provider: AgentMetric["provider"];
+  limits: AgentMetric["rateLimits"];
+}) {
+  if (limits.length === 0) {
+    return (
+      <section className="agent-rate-limits unavailable" aria-label="Usage limits">
+        <span>Usage limits</span>
+        <small>No quota snapshot reported</small>
+      </section>
+    );
+  }
+
+  const grouped = groupLimits(limits);
   return (
-    <div className="agent-rate-limits">
-      {limits.map((limit) => (
-        <div key={limit.label}>
-          <span>{formatLimitLabel(limit.label)}</span>
-          <strong>
-            {limit.usedPercent == null
-              ? "n/a"
-              : `${(100 - limit.usedPercent).toFixed(0)}% remaining`}
-          </strong>
-          <small>
-            {limit.windowMinutes == null ? "" : `${formatWindow(limit.windowMinutes)} window`}
-            {limit.resetsAt == null ? "" : ` · resets ${formatReset(limit.resetsAt)}`}
-          </small>
-        </div>
+    <section className="agent-rate-limits" aria-label="Usage limits">
+      {grouped.map(({ group, items }) => (
+        <section className="agent-rate-limit-group" key={group ?? "default"}>
+          {group && <h4>{formatGroupLabel(group)}</h4>}
+          <div className="agent-rate-limit-grid">
+            {sortLimits(provider, items).map((limit) => {
+              const remainingPercent =
+                limit.usedPercent == null
+                  ? null
+                  : Math.max(0, Math.min(100, 100 - limit.usedPercent));
+              return (
+                <RemainingGauge
+                  key={`${limit.group ?? ""}:${limit.label}:${limit.windowMinutes ?? ""}`}
+                  label={formatRateLimitLabel(limit.label, limit.windowMinutes)}
+                  remainingPercent={remainingPercent}
+                  detail={
+                    limit.resetsAt == null
+                      ? limit.windowMinutes == null
+                        ? "Reset time unavailable"
+                        : `${formatWindow(limit.windowMinutes)} window`
+                      : `Resets ${formatResetCountdown(limit.resetsAt)}`
+                  }
+                  title={limit.resetsAt == null ? undefined : formatReset(limit.resetsAt)}
+                />
+              );
+            })}
+          </div>
+        </section>
       ))}
+    </section>
+  );
+}
+
+function RemainingGauge({
+  label,
+  remainingPercent,
+  detail,
+  title,
+}: {
+  label: string;
+  remainingPercent: number | null;
+  detail: string;
+  title?: string;
+}) {
+  const value = remainingPercent == null ? null : Math.max(0, Math.min(100, remainingPercent));
+  const level = remainingLevel(value);
+  return (
+    <div className={`agent-remaining-gauge ${level}`} title={title}>
+      <div>
+        <span>{label}</span>
+        <strong>{value == null ? "n/a" : `${formatGaugePercent(value)} remaining`}</strong>
+      </div>
+      <DetailUsageBar
+        value={value}
+        level={level}
+        ariaLabel={`${label}: ${value == null ? "unavailable" : `${formatGaugePercent(value)} remaining`}`}
+      />
+      <small>{detail}</small>
     </div>
   );
 }
@@ -236,10 +302,24 @@ function shorten(value: string | null) {
 
 function formatReset(value: number) {
   const milliseconds = value > 10_000_000_000 ? value : value * 1000;
-  return new Date(milliseconds).toLocaleTimeString([], {
+  return new Date(milliseconds).toLocaleString([], {
+    month: "short",
+    day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function formatResetCountdown(value: number) {
+  const milliseconds = value > 10_000_000_000 ? value : value * 1000;
+  const remainingSeconds = Math.max(0, Math.round((milliseconds - Date.now()) / 1000));
+  if (remainingSeconds === 0) return "now";
+  const days = Math.floor(remainingSeconds / 86_400);
+  const hours = Math.floor((remainingSeconds % 86_400) / 3_600);
+  const minutes = Math.floor((remainingSeconds % 3_600) / 60);
+  if (days > 0) return hours > 0 ? `in ${days}d ${hours}h` : `in ${days}d`;
+  if (hours > 0) return minutes > 0 ? `in ${hours}h ${minutes}m` : `in ${hours}h`;
+  return `in ${Math.max(1, minutes)}m`;
 }
 
 function formatLimitLabel(value: string) {
@@ -249,9 +329,65 @@ function formatLimitLabel(value: string) {
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
+function formatGroupLabel(value: string) {
+  return value.includes("_") || /[a-z][A-Z]/.test(value) ? formatLimitLabel(value) : value;
+}
+
+function formatRateLimitLabel(label: string, windowMinutes: number | null) {
+  if (windowMinutes === 5 * 60) return "5-hour limit";
+  if (windowMinutes === 7 * 24 * 60) return "Weekly limit";
+  return formatLimitLabel(label);
+}
+
 function formatWindow(minutes: number) {
-  if (minutes % (7 * 24 * 60) === 0) return `${minutes / (7 * 24 * 60)} week`;
-  if (minutes % (24 * 60) === 0) return `${minutes / (24 * 60)} day`;
-  if (minutes % 60 === 0) return `${minutes / 60} hour`;
+  if (minutes % (7 * 24 * 60) === 0) {
+    return pluralize(minutes / (7 * 24 * 60), "week");
+  }
+  if (minutes % (24 * 60) === 0) return pluralize(minutes / (24 * 60), "day");
+  if (minutes % 60 === 0) return pluralize(minutes / 60, "hour");
   return `${minutes} min`;
+}
+
+function pluralize(value: number, unit: string) {
+  return `${value} ${unit}${value === 1 ? "" : "s"}`;
+}
+
+function formatGaugePercent(value: number) {
+  return `${Intl.NumberFormat("en", {
+    minimumFractionDigits: value % 1 === 0 ? 0 : 1,
+    maximumFractionDigits: 1,
+  }).format(value)}%`;
+}
+
+function remainingLevel(value: number | null) {
+  if (value == null) return "unknown" as const;
+  if (value <= 10) return "critical" as const;
+  if (value <= 25) return "warning" as const;
+  return "normal" as const;
+}
+
+function groupLimits(limits: AgentMetric["rateLimits"]) {
+  const groups = new Map<string | null, AgentMetric["rateLimits"]>();
+  for (const limit of limits) {
+    const current = groups.get(limit.group) ?? [];
+    current.push(limit);
+    groups.set(limit.group, current);
+  }
+  return Array.from(groups, ([group, items]) => ({ group, items }));
+}
+
+function sortLimits(
+  provider: AgentMetric["provider"],
+  limits: AgentMetric["rateLimits"],
+) {
+  const preferredWindows =
+    provider === "agy" ? [7 * 24 * 60, 5 * 60] : [5 * 60, 7 * 24 * 60];
+  return [...limits].sort((left, right) => {
+    const leftIndex = preferredWindows.indexOf(left.windowMinutes ?? -1);
+    const rightIndex = preferredWindows.indexOf(right.windowMinutes ?? -1);
+    return (
+      (leftIndex < 0 ? preferredWindows.length : leftIndex) -
+      (rightIndex < 0 ? preferredWindows.length : rightIndex)
+    );
+  });
 }

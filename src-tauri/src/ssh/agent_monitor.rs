@@ -319,6 +319,7 @@ exit 0"#;
 #[serde(rename_all = "camelCase")]
 pub struct AgentRateLimitMetric {
     label: String,
+    group: Option<String>,
     used_percent: Option<f64>,
     window_minutes: Option<u64>,
     resets_at: Option<u64>,
@@ -1088,40 +1089,80 @@ fn parse_rate_limits(value: Option<&Value>) -> Vec<AgentRateLimitMetric> {
     let Some(Value::Object(limits)) = value else {
         return Vec::new();
     };
-    limits
-        .iter()
-        .filter_map(|(label, limit)| {
-            let remaining_fraction = value_f64(limit, "remaining_fraction")
-                .or_else(|| value_f64(limit, "remainingFraction"));
-            let remaining_percent = value_f64(limit, "remaining_percentage")
-                .or_else(|| value_f64(limit, "remainingPercentage"));
-            let used_percent = value_f64(limit, "used_percent")
-                .or_else(|| value_f64(limit, "usedPercent"))
-                .or_else(|| value_f64(limit, "used_percentage"))
-                .or_else(|| value_f64(limit, "usedPercentage"))
-                .or_else(|| {
-                    remaining_percent.map(|remaining| (100.0 - remaining).clamp(0.0, 100.0))
-                })
-                .or_else(|| {
-                    remaining_fraction
-                        .map(|remaining| (100.0 - remaining * 100.0).clamp(0.0, 100.0))
-                });
-            let resets_at = value_u64(limit, "resets_at").or_else(|| value_u64(limit, "resetsAt"));
-            let window_minutes = value_u64(limit, "window_minutes")
-                .or_else(|| value_u64(limit, "windowMinutes"))
-                .or(match label.as_str() {
-                    "five_hour" | "fiveHour" => Some(5 * 60),
-                    "seven_day" | "sevenDay" => Some(7 * 24 * 60),
-                    _ => None,
-                });
-            (used_percent.is_some() || resets_at.is_some()).then(|| AgentRateLimitMetric {
+    let mut parsed = Vec::new();
+    parse_rate_limit_entries(limits, None, &mut parsed);
+    parsed
+}
+
+fn parse_rate_limit_entries(
+    limits: &serde_json::Map<String, Value>,
+    group: Option<&str>,
+    parsed: &mut Vec<AgentRateLimitMetric>,
+) {
+    for (label, limit) in limits {
+        let Value::Object(object) = limit else {
+            continue;
+        };
+        let remaining_fraction = value_f64(limit, "remaining_fraction")
+            .or_else(|| value_f64(limit, "remainingFraction"));
+        let remaining_percent = value_f64(limit, "remaining_percentage")
+            .or_else(|| value_f64(limit, "remainingPercentage"))
+            .or_else(|| value_f64(limit, "remaining_percent"))
+            .or_else(|| value_f64(limit, "remainingPercent"));
+        let used_percent = value_f64(limit, "used_percent")
+            .or_else(|| value_f64(limit, "usedPercent"))
+            .or_else(|| value_f64(limit, "used_percentage"))
+            .or_else(|| value_f64(limit, "usedPercentage"))
+            .or_else(|| remaining_percent.map(|remaining| (100.0 - remaining).clamp(0.0, 100.0)))
+            .or_else(|| {
+                remaining_fraction.map(|remaining| (100.0 - remaining * 100.0).clamp(0.0, 100.0))
+            });
+        let resets_at = value_u64(limit, "resets_at")
+            .or_else(|| value_u64(limit, "resetsAt"))
+            .or_else(|| value_u64(limit, "reset_at"))
+            .or_else(|| value_u64(limit, "resetAt"))
+            .or_else(|| value_u64(limit, "refreshes_at"))
+            .or_else(|| value_u64(limit, "refreshesAt"));
+        let window_minutes = value_u64(limit, "window_minutes")
+            .or_else(|| value_u64(limit, "windowMinutes"))
+            .or_else(|| infer_rate_limit_window(label));
+
+        if used_percent.is_some() || resets_at.is_some() {
+            parsed.push(AgentRateLimitMetric {
                 label: label.clone(),
+                group: group.map(str::to_owned),
                 used_percent,
                 window_minutes,
                 resets_at,
-            })
-        })
-        .collect()
+            });
+            continue;
+        }
+
+        let nested_group = value_string(limit, "display_name")
+            .or_else(|| value_string(limit, "displayName"))
+            .or_else(|| value_string(limit, "name"))
+            .unwrap_or_else(|| label.clone());
+        parse_rate_limit_entries(object, Some(&nested_group), parsed);
+    }
+}
+
+fn infer_rate_limit_window(label: &str) -> Option<u64> {
+    let normalized = label
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    if normalized.contains("fivehour") || normalized.contains("5hour") {
+        Some(5 * 60)
+    } else if normalized.contains("sevenday")
+        || normalized.contains("7day")
+        || normalized.contains("weekly")
+        || normalized == "week"
+    {
+        Some(7 * 24 * 60)
+    } else {
+        None
+    }
 }
 
 fn finalize_context(metadata: &mut AgentSessionMetadata) {
@@ -1262,7 +1303,7 @@ mod tests {
         let lines = vec![
             r#"{"type":"session_meta","payload":{"id":"session-1","cwd":"/work","model_provider":"openai"}}"#.to_string(),
             r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#.to_string(),
-            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200,"output_tokens":300,"total_tokens":1500},"last_token_usage":{"total_tokens":500},"model_context_window":10000},"rate_limits":{"primary":{"used_percent":42,"window_minutes":300,"resets_at":1234}}}}"#.to_string(),
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200,"output_tokens":300,"total_tokens":1500},"last_token_usage":{"total_tokens":500},"model_context_window":10000},"rate_limits":{"primary":{"used_percent":42,"window_minutes":10080,"resets_at":1234}}}}"#.to_string(),
         ];
         let metadata = parse_provider_metadata(Provider::Codex, &lines);
         assert_eq!(metadata.session_id.as_deref(), Some("session-1"));
@@ -1270,6 +1311,8 @@ mod tests {
         assert_eq!(metadata.total_tokens, Some(1500));
         assert_eq!(metadata.context_used_percent, Some(5.0));
         assert_eq!(metadata.rate_limits[0].used_percent, Some(42.0));
+        assert_eq!(metadata.rate_limits[0].window_minutes, Some(10080));
+        assert_eq!(metadata.rate_limits[0].group, None);
     }
 
     #[test]
@@ -1294,6 +1337,45 @@ mod tests {
             serde_json::to_string(&build_agent_metrics(&processes, &sessions)).unwrap();
         assert!(!serialized.contains("do not expose this prompt"));
         assert!(!serialized.contains("do-not-expose"));
+    }
+
+    #[test]
+    fn parses_agy_grouped_weekly_and_five_hour_limits() {
+        let lines = vec![r#"{
+            "quota": {
+                "gemini_models": {
+                    "display_name": "Gemini models",
+                    "weekly_limit": {"remaining_percentage": 99.9, "refreshes_at": 1800000000},
+                    "five_hour_limit": {"remaining_percentage": 99.4, "refreshes_at": 1799990000}
+                },
+                "claude_and_gpt_models": {
+                    "display_name": "Claude and GPT models",
+                    "weekly_limit": {"remaining_percentage": 100},
+                    "five_hour_limit": {"remaining_percentage": 100}
+                }
+            }
+        }"#
+        .to_string()];
+        let metadata = parse_provider_metadata(Provider::Agy, &lines);
+        assert_eq!(metadata.rate_limits.len(), 4);
+        let gemini_weekly = metadata
+            .rate_limits
+            .iter()
+            .find(|limit| {
+                limit.group.as_deref() == Some("Gemini models")
+                    && limit.window_minutes == Some(10080)
+            })
+            .unwrap();
+        assert_eq!(gemini_weekly.group.as_deref(), Some("Gemini models"));
+        assert_eq!(gemini_weekly.window_minutes, Some(10080));
+        assert!((gemini_weekly.used_percent.unwrap() - 0.1).abs() < 1e-9);
+        assert!(metadata.rate_limits.iter().any(|limit| {
+            limit.group.as_deref() == Some("Gemini models") && limit.window_minutes == Some(300)
+        }));
+        assert!(metadata.rate_limits.iter().any(|limit| {
+            limit.group.as_deref() == Some("Claude and GPT models")
+                && limit.window_minutes == Some(10080)
+        }));
     }
 
     #[test]

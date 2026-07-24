@@ -57,6 +57,7 @@ export type RemoteUserSession = {
 
 export type AgentRateLimitMetric = {
   label: string;
+  group: string | null;
   usedPercent: number | null;
   windowMinutes: number | null;
   resetsAt: number | null;

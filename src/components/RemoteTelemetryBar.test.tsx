@@ -115,9 +115,85 @@ const codexAgent: AgentMetric = {
   contextRemainingPercent: 95,
   costUsd: null,
   sessionDurationSeconds: null,
-  rateLimits: [{ label: "primary", usedPercent: 40, windowMinutes: 300, resetsAt: null }],
+  rateLimits: [
+    {
+      label: "primary",
+      group: null,
+      usedPercent: 40,
+      windowMinutes: 7 * 24 * 60,
+      resetsAt: null,
+    },
+  ],
   subagents: [],
   backgroundTasks: [],
+};
+
+const agyAgent: AgentMetric = {
+  ...codexAgent,
+  provider: "agy",
+  displayName: "AGY",
+  rootPid: 4343,
+  sessionId: "session-agy",
+  model: "Gemini 2.5 Pro",
+  contextRemainingTokens: 7500,
+  contextRemainingPercent: 75,
+  rateLimits: [
+    {
+      label: "weekly_limit",
+      group: "Gemini models",
+      usedPercent: 0.1,
+      windowMinutes: 7 * 24 * 60,
+      resetsAt: null,
+    },
+    {
+      label: "five_hour_limit",
+      group: "Gemini models",
+      usedPercent: 0.6,
+      windowMinutes: 5 * 60,
+      resetsAt: null,
+    },
+    {
+      label: "weekly_limit",
+      group: "Claude and GPT models",
+      usedPercent: 0,
+      windowMinutes: 7 * 24 * 60,
+      resetsAt: null,
+    },
+    {
+      label: "five_hour_limit",
+      group: "Claude and GPT models",
+      usedPercent: 0,
+      windowMinutes: 5 * 60,
+      resetsAt: null,
+    },
+  ],
+};
+
+const claudeAgent: AgentMetric = {
+  ...codexAgent,
+  provider: "claude",
+  displayName: "Claude Code",
+  rootPid: 4444,
+  sessionId: "session-claude",
+  model: "Claude Sonnet",
+  contextRemainingTokens: 5000,
+  contextRemainingPercent: 50,
+  rateLimits: [
+    {
+      label: "five_hour",
+      group: null,
+      usedPercent: 20,
+      windowMinutes: 5 * 60,
+      resetsAt: null,
+    },
+    {
+      label: "seven_day",
+      group: null,
+      usedPercent: 40,
+      windowMinutes: 7 * 24 * 60,
+      resetsAt: null,
+    },
+  ],
 };
 
 function setTelemetry(payload: RemoteTelemetry) {
@@ -515,7 +591,42 @@ describe("RemoteTelemetryBar disk summary", () => {
     fireEvent.click(agentsButton);
     const dialog = await screen.findByRole("dialog", { name: "Coding agents" });
     expect(within(dialog).getByText("gpt-test")).toBeInTheDocument();
-    expect(within(dialog).getByText("95.0% (9.5K)")).toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("progressbar", {
+        name: "Context remaining: 95% remaining",
+      }),
+    ).toHaveAttribute("aria-valuenow", "95");
+    expect(within(dialog).getByText("9.5K of 10K tokens left")).toBeInTheDocument();
+    expect(within(dialog).getByText("Weekly limit")).toBeInTheDocument();
     expect(within(dialog).getByText("60% remaining")).toBeInTheDocument();
+  });
+
+  it("groups AGY quotas and labels Claude 5-hour and weekly gauges", async () => {
+    setTelemetry({
+      ...telemetry([]),
+      agents: [agyAgent, claudeAgent],
+    });
+
+    render(<RemoteTelemetryBar />);
+    fireEvent.click(screen.getByRole("button", { name: /agents/i }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Coding agents" });
+    expect(within(dialog).getByText("Gemini models")).toBeInTheDocument();
+    expect(within(dialog).getByText("Claude and GPT models")).toBeInTheDocument();
+    expect(
+      within(dialog).getByRole("progressbar", {
+        name: "Weekly limit: 99.9% remaining",
+      }),
+    ).toHaveAttribute("aria-valuenow", "99.9");
+    expect(
+      within(dialog).getByRole("progressbar", {
+        name: "5-hour limit: 80% remaining",
+      }),
+    ).toHaveAttribute("aria-valuenow", "80");
+    expect(
+      within(dialog).getByRole("progressbar", {
+        name: "Weekly limit: 60% remaining",
+      }),
+    ).toHaveAttribute("aria-valuenow", "60");
   });
 });

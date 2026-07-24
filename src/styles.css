@@ -1925,8 +1925,13 @@ button.telemetry-section:hover {
 }
 
 .agent-resource-grid.compact {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   border-top: 1px solid var(--line-soft);
+}
+
+.agent-resource-grid.compact.tokens {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-top: 0;
 }
 
 .agent-resource-grid > div {
@@ -1978,7 +1983,29 @@ button.telemetry-section:hover {
 }
 
 .agent-provider-details {
-  border-top: 1px solid var(--line-soft);
+  display: grid;
+  gap: 1px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--line-soft);
+}
+
+.agent-context-remaining,
+.agent-token-summary,
+.agent-rate-limits {
+  background: #0d151e;
+}
+
+.agent-context-remaining {
+  padding: 12px;
+}
+
+.agent-token-summary > span {
+  display: block;
+  padding: 9px 12px 7px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
 }
 
 .agent-work-list {
@@ -1987,6 +2014,7 @@ button.telemetry-section:hover {
   gap: 6px 12px;
   padding: 10px 12px;
   border-top: 1px solid var(--line-soft);
+  background: #0d151e;
 }
 
 .agent-work-list > strong {
@@ -2017,23 +2045,115 @@ button.telemetry-section:hover {
 
 .agent-rate-limits {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 1px;
-  border-top: 1px solid var(--line-soft);
-  background: var(--line-soft);
+  gap: 10px;
+  padding: 12px;
 }
 
-.agent-rate-limits > div {
+.agent-rate-limits.unavailable {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 10px 12px;
-  background: #0d151e;
 }
 
-.agent-rate-limits strong {
+.agent-rate-limits.unavailable > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.agent-rate-limit-group {
+  display: grid;
+  gap: 7px;
+}
+
+.agent-rate-limit-group > h4 {
+  margin: 0;
+  color: #dce8f7;
+  font-size: 11px;
+}
+
+.agent-rate-limit-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.agent-remaining-gauge {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: #0a1119;
+}
+
+.agent-context-remaining .agent-remaining-gauge {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.agent-remaining-gauge > div:first-child {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.agent-remaining-gauge span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-remaining-gauge strong {
+  flex: none;
   color: #e5edf7;
   font-size: 12px;
+}
+
+.agent-context-remaining .agent-remaining-gauge strong {
+  color: var(--green);
+  font-size: 15px;
+}
+
+.agent-context-remaining .agent-remaining-gauge.warning strong {
+  color: var(--amber);
+}
+
+.agent-context-remaining .agent-remaining-gauge.critical strong {
+  color: var(--red);
+}
+
+.agent-context-remaining .agent-remaining-gauge.unknown strong {
+  color: var(--subtle);
+}
+
+.agent-remaining-gauge small {
+  overflow: hidden;
+  color: var(--subtle);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-remaining-gauge .resource-usage-bar {
+  height: 8px;
+}
+
+.agent-remaining-gauge .resource-usage-bar.unknown > div {
+  background: var(--subtle);
+}
+
+@media (max-width: 640px) {
+  .agent-rate-limit-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .gpu-section {

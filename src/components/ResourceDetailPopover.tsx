@@ -228,13 +228,22 @@ export function ResourceDetailPopover({
 export function DetailUsageBar({
   value,
   level = "normal",
+  ariaLabel,
 }: {
   value: number | null;
   level?: "normal" | "warning" | "critical" | "unknown";
+  ariaLabel?: string;
 }) {
   const width = value == null ? 0 : Math.max(0, Math.min(100, value));
   return (
-    <div className={`resource-usage-bar ${level}`}>
+    <div
+      className={`resource-usage-bar ${level}`}
+      role={ariaLabel ? "progressbar" : undefined}
+      aria-label={ariaLabel}
+      aria-valuemin={ariaLabel ? 0 : undefined}
+      aria-valuemax={ariaLabel ? 100 : undefined}
+      aria-valuenow={ariaLabel && value != null ? width : undefined}
+    >
       <div style={{ width: `${width}%` }} />
     </div>
   );

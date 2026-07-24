@@ -73,7 +73,7 @@
 - **접을 수 있는 모니터링 바** — 독립적으로 닫고 오른쪽 하단에서 복원할 수 있으며, 표시 상태를 재실행 후에도 유지
 - **NVIDIA·AMD·Intel·Apple Silicon** GPU를 호스트별로 자동 감지하며, 카드마다 벤더 태그 표시
 - **내장 + 외장 하이브리드 구성도 두 GPU 모두 표시** — Linux는 벤더 도구에 DRM/sysfs 어댑터 탐색을 보완하고, Windows는 DirectX LUID로 카운터를 정확히 귀속하며 WDDM 활동 카운터가 아직 없는 유휴 GPU도 유지합니다
-- **AGY·Codex·Claude Code 모니터링** — 각 CLI의 전체 자식 프로세스 트리를 합산한 CPU/RAM·실행 시간을 표시하고, CLI가 제공하는 세션·모델·토큰·사용/잔여 컨텍스트·작업·비용·rate-limit 메타데이터를 함께 표시
+- **AGY·Codex·Claude Code 모니터링** — 각 CLI의 전체 자식 프로세스 트리를 합산한 CPU/RAM·실행 시간을 표시하고, 남은 컨텍스트와 쿼터를 GPU/RAM과 같은 게이지로 우선 표시합니다. 공급자가 제공하는 경우 Codex 주간 한도, Claude 5시간·주간 한도, AGY Gemini 및 Claude/GPT 모델 그룹별 한도를 정규화해 표시합니다
 - 각 섹션을 클릭하면 표가 창 크기에 맞춰 확장되는 **드래그·크기 조절 가능 상세 팝오버**: 코어별 CPU 사용률, 상위 프로세스, GPU별 VRAM/전력/온도, 전체 마운트 목록
 - **상세창을 별도 OS 창으로 분리** 가능 — 독립적으로 갱신되고 세션이 끊기면 함께 닫힘
 - 원격 텔레메트리는 전용 SSH 연결에서 자동 재연결하고, 로컬 텔레메트리는 SSH 없이 호스트에서 수집기를 직접 실행
@@ -225,7 +225,7 @@ npm run tauri:build
 - **Mode:** GPU + System, GPU only, System only.
 - **Ignore FS:** 디스크 요약에서 숨길 파일시스템 타입을 쉼표로 구분해 지정 (기본: `tmpfs`, `devtmpfs`, `squashfs`, `proc`, `sysfs`, `cgroup`, `cgroup2`, `overlay`, `devfs`, `autofs`). 디스크 팝오버에서 일시적으로 표시할 수 있습니다.
 - 마운트 우선순위는 `/` → `/home` → `/data` → `/mnt*` → `/media*` → 드라이브 문자 → 기타이며, 사용률 80% 이상은 경고, 90% 이상은 위험으로 표시됩니다.
-- **Agents:** System이 포함된 모드에서 AGY/Codex/Claude Code 카드를 별도로 표시합니다. CPU와 메모리는 실행 프로세스 하나가 아니라 언어 서버·서브에이전트·백그라운드 명령을 포함한 전체 자식 트리를 합산합니다. AGY 1.0 대화 메타데이터와 Claude Code status-line 스냅샷에서는 잔여 컨텍스트도 표시하며, Claude 구독 계정 스냅샷은 5시간·7일 한도의 잔여량도 표시할 수 있습니다.
+- **Agents:** System이 포함된 모드에서 AGY/Codex/Claude Code 카드를 별도로 표시합니다. 남은 컨텍스트와 쿼터를 색상 게이지로 먼저 보여주며 프로세스 자원, 토큰 합계, 세션 정보, 서브에이전트와 백그라운드 작업은 아래에서 계속 확인할 수 있습니다. CPU와 메모리는 실행 프로세스 하나가 아니라 전체 자식 트리를 합산합니다. Codex 세션 기록의 주간 창, Claude Code status-line의 5시간·7일 창, AGY 스냅샷의 Gemini Models 및 Claude and GPT Models 그룹별 주간·5시간 창을 정규화합니다.
 
 </details>
 
@@ -246,7 +246,7 @@ npm run tauri:build
 
 명령은 전용 SSH 연결에서 3초 타임아웃으로 실행됩니다(Windows는 PowerShell 기동 시간을 감안해 10초). Windows 명령은 폴링마다 하나의 PowerShell 5.1 스크립트로 묶어 `-EncodedCommand`로 전송하므로 OpenSSH 기본 셸이 cmd.exe든 PowerShell이든 동작하며, 서버에 아무것도 설치하지 않고 관리자 권한도 필요 없습니다. Windows 로컬 세션에서는 동일한 수집기를 시스템 PowerShell로 직접 실행하되 `CREATE_NO_WINDOW`와 명시적인 UTF-8 텍스트 출력을 적용해 폴링 콘솔 창이 뜨지 않고 지역화된 JSON 필드도 보존됩니다. GpuTerm이 원격 OS와 GPU 도구를 호스트별로 감지해 각 카드에 벤더 태그를 표시합니다. `intel_gpu_top`은 root 또는 `CAP_PERFMON`이 필요하고, Apple GPU의 전력·온도는 root `powermetrics`가 필요해 n/a로 표시됩니다. Linux DRM/sysfs는 더 풍부한 벤더 수집기에 잡히지 않은 GPU의 어댑터 정보와 드라이버가 제공하는 사용률/VRAM 카운터를 보완합니다. GPU 소스가 하나도 없으면 GPU 섹션만 '사용 불가'로 표시되고 나머지는 계속 동작합니다.
 
-에이전트 모니터링은 읽기 전용입니다. 프로세스 합계는 텔레메트리 주기마다 수집하고, 세션 메타데이터는 최근 Codex(`~/.codex/sessions`)·Claude Code(`~/.claude/projects`) 기록에서 최대 5초마다 갱신합니다. AGY 1.0은 Python 3 표준 `sqlite3` 모듈이 있으면 최신 `~/.gemini/antigravity-cli/conversations/*.db` 두 개의 `gen_metadata`만 읽어 모델명·토큰 카운터·컨텍스트 크기를 해석합니다. 단계·프롬프트·응답·도구 인수·자격증명·환경 데이터는 선택하거나 텔레메트리로 직렬화하지 않습니다. 선택적인 AGY/Claude status-line 연동은 더 풍부한 실시간 상태를 `~/.cache/gputerm/agent-status/{agy,claude}.json`에 제공할 수 있으며, Claude의 공식 `context_window.remaining_percentage`와 구독 계정 `rate_limits` 필드를 직접 해석합니다.
+에이전트 모니터링은 읽기 전용입니다. 프로세스 합계는 텔레메트리 주기마다 수집하고, 세션 메타데이터는 최근 Codex(`~/.codex/sessions`)·Claude Code(`~/.claude/projects`) 기록에서 최대 5초마다 갱신합니다. AGY 1.0은 Python 3 표준 `sqlite3` 모듈이 있으면 최신 `~/.gemini/antigravity-cli/conversations/*.db` 두 개의 `gen_metadata`만 읽어 모델명·토큰 카운터·컨텍스트 크기를 해석합니다. 단계·프롬프트·응답·도구 인수·자격증명·환경 데이터는 선택하거나 텔레메트리로 직렬화하지 않습니다. 선택적인 AGY/Claude status-line 연동은 더 풍부한 실시간 상태를 `~/.cache/gputerm/agent-status/{agy,claude}.json`에 제공할 수 있으며, Claude의 공식 `context_window.remaining_percentage`와 구독 계정 `rate_limits` 필드를 직접 해석합니다. AGY 쿼터 객체는 모델 그룹 아래 `weekly_limit`·`five_hour_limit`로 중첩할 수 있고, GpuTerm은 그룹명과 잔여 비율·reset 시각을 보존합니다. 공급자가 쿼터 스냅샷을 제공하지 않으면 잔여량을 추정하지 않고 미제공 상태를 표시합니다.
 
 </details>
 
