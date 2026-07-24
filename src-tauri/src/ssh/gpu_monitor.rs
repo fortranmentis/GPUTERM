@@ -70,6 +70,10 @@ pub struct GpuProbe {
     pub amd_smi: bool,
     pub xpu_smi: bool,
     pub intel_gpu_top: bool,
+    /// Linux DRM sysfs is the zero-install fallback used to enumerate GPUs
+    /// that do not have a vendor CLI (most commonly an Intel/AMD iGPU next to
+    /// an NVIDIA dGPU).
+    pub linux_drm: bool,
     /// macOS host: the integrated Apple GPU is read from ioreg, no tool needed.
     pub apple: bool,
     pub xpu_devices: Vec<XpuDevice>,
@@ -109,6 +113,7 @@ impl GpuProbe {
             || self.amd_smi
             || self.xpu_smi
             || self.intel_gpu_top
+            || self.linux_drm
             || self.apple
             || !self.windows_adapters.is_empty()
     }
@@ -119,7 +124,34 @@ impl GpuProbe {
 /// /bin/sh, used by run_remote_command's `sh -lc`) only inspects its first
 /// operand, so a multi-argument form would silently ignore every tool after
 /// the first. The trailing `true` keeps the overall exit status zero.
-pub const GPU_PROBE_COMMAND: &str = "uname -s 2>/dev/null; for t in nvidia-smi rocm-smi amd-smi xpu-smi intel_gpu_top; do command -v \"$t\" 2>/dev/null; done; for p in /opt/rocm/bin/rocm-smi /opt/rocm/bin/amd-smi; do [ -x \"$p\" ] && echo \"$p\"; done; true";
+pub const GPU_PROBE_COMMAND: &str = "uname -s 2>/dev/null; for t in nvidia-smi rocm-smi amd-smi xpu-smi intel_gpu_top; do command -v \"$t\" 2>/dev/null; done; for p in /opt/rocm/bin/rocm-smi /opt/rocm/bin/amd-smi; do [ -x \"$p\" ] && echo \"$p\"; done; [ -d /sys/class/drm ] && echo drm-sysfs; true";
+
+/// Emits one key/value section per physical Linux DRM card. Connector entries
+/// do not have a readable PCI vendor file and are skipped. Every read is
+/// best-effort so an unsupported metric becomes `None` instead of hiding the
+/// integrated adapter.
+pub const LINUX_DRM_GPU_COMMAND: &str = r#"for card in /sys/class/drm/card[0-9]*; do
+  dev="$card/device"
+  [ -r "$dev/vendor" ] || continue
+  printf '__DRM_GPU__\n'
+  printf 'card=%s\n' "$(basename "$card")"
+  printf 'vendor=%s\n' "$(cat "$dev/vendor" 2>/dev/null)"
+  printf 'device=%s\n' "$(cat "$dev/device" 2>/dev/null)"
+  slot="$(sed -n 's/^PCI_SLOT_NAME=//p' "$dev/uevent" 2>/dev/null | head -n 1)"
+  printf 'slot=%s\n' "$slot"
+  driver="$(basename "$(readlink -f "$dev/driver" 2>/dev/null)" 2>/dev/null)"
+  printf 'driver=%s\n' "$driver"
+  name=''
+  if [ -n "$slot" ] && command -v lspci >/dev/null 2>&1; then
+    name="$(lspci -s "$slot" 2>/dev/null | sed 's/^[^ ]* //')"
+  fi
+  printf 'name=%s\n' "$name"
+  printf 'gpu_busy_percent=%s\n' "$(cat "$dev/gpu_busy_percent" 2>/dev/null)"
+  printf 'mem_busy_percent=%s\n' "$(cat "$dev/mem_busy_percent" 2>/dev/null)"
+  printf 'vram_total=%s\n' "$(cat "$dev/mem_info_vram_total" 2>/dev/null)"
+  printf 'vram_used=%s\n' "$(cat "$dev/mem_info_vram_used" 2>/dev/null)"
+done
+true"#;
 
 pub fn parse_gpu_probe(output: &str) -> GpuProbe {
     let mut probe = GpuProbe::default();
@@ -131,6 +163,7 @@ pub fn parse_gpu_probe(output: &str) -> GpuProbe {
             "amd-smi" => probe.amd_smi = true,
             "xpu-smi" => probe.xpu_smi = true,
             "intel_gpu_top" => probe.intel_gpu_top = true,
+            "drm-sysfs" => probe.linux_drm = true,
             // From the leading `uname -s`: a Darwin host exposes its Apple GPU
             // through ioreg without any dedicated tool.
             "Darwin" => probe.apple = true,
@@ -138,6 +171,134 @@ pub fn parse_gpu_probe(output: &str) -> GpuProbe {
         }
     }
     probe
+}
+
+fn linux_vendor(vendor_id: &str) -> Option<&'static str> {
+    match vendor_id.trim().to_ascii_lowercase().as_str() {
+        "0x10de" => Some("nvidia"),
+        "0x1002" | "0x1022" => Some("amd"),
+        "0x8086" => Some("intel"),
+        _ => None,
+    }
+}
+
+/// Parses [`LINUX_DRM_GPU_COMMAND`]. The caller merges these physical cards
+/// with richer vendor metrics through [`append_uncovered_linux_drm`].
+pub fn parse_linux_drm_gpus(output: &str, next_index: u32) -> Vec<GpuMetric> {
+    output
+        .split("__DRM_GPU__")
+        .skip(1)
+        .filter_map(|section| {
+            let fields = section
+                .lines()
+                .filter_map(|line| line.trim().split_once('='))
+                .collect::<std::collections::HashMap<_, _>>();
+            let vendor = linux_vendor(fields.get("vendor").copied().unwrap_or(""))?;
+            let card = fields
+                .get("card")
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .unwrap_or("card");
+            let slot = fields
+                .get("slot")
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty());
+            let device_id = fields
+                .get("device")
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .unwrap_or("unknown");
+            let name = fields
+                .get("name")
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    format!(
+                        "{} GPU ({})",
+                        match vendor {
+                            "nvidia" => "NVIDIA",
+                            "amd" => "AMD",
+                            "intel" => "Intel",
+                            _ => "DRM",
+                        },
+                        device_id
+                    )
+                });
+            let total_bytes = fields
+                .get("vram_total")
+                .and_then(|value| value.trim().parse::<u64>().ok());
+            let used_bytes = fields
+                .get("vram_used")
+                .and_then(|value| value.trim().parse::<u64>().ok());
+            let memory_total_mi_b = total_bytes.map(|value| value / 1024 / 1024);
+            let memory_used_mi_b = used_bytes.map(|value| value / 1024 / 1024);
+
+            Some(GpuMetric {
+                index: next_index,
+                name,
+                uuid: format!("linux-drm-{}", slot.unwrap_or(card)),
+                vendor: vendor.to_string(),
+                driver_version: fields
+                    .get("driver")
+                    .map(|value| value.trim().to_string())
+                    .unwrap_or_default(),
+                power_draw_w: None,
+                power_limit_w: None,
+                temperature_c: None,
+                gpu_util_percent: fields
+                    .get("gpu_busy_percent")
+                    .and_then(|value| parse_optional_f64(value)),
+                mem_util_percent: fields
+                    .get("mem_busy_percent")
+                    .and_then(|value| parse_optional_f64(value)),
+                memory_total_mi_b,
+                memory_used_mi_b,
+                memory_free_mi_b: match (memory_total_mi_b, memory_used_mi_b) {
+                    (Some(total), Some(used)) => Some(total.saturating_sub(used)),
+                    _ => None,
+                },
+            })
+        })
+        .enumerate()
+        .map(|(offset, mut metric)| {
+            metric.index = next_index + offset as u32;
+            metric
+        })
+        .collect()
+}
+
+/// Appends only physical DRM cards that are not already represented by a
+/// richer vendor collector. Card counts handle same-vendor hybrid systems
+/// (for example an AMD iGPU plus AMD dGPU); when only some same-vendor cards
+/// are uncovered, the shared/smaller-memory cards are preferred because
+/// vendor CLIs generally cover the discrete adapter.
+pub fn append_uncovered_linux_drm(metrics: &mut Vec<GpuMetric>, drm: Vec<GpuMetric>) {
+    let mut appended = Vec::new();
+    for vendor in ["nvidia", "amd", "intel"] {
+        let covered_count = metrics
+            .iter()
+            .filter(|metric| metric.vendor == vendor)
+            .count();
+        let mut cards = drm
+            .iter()
+            .filter(|metric| metric.vendor == vendor)
+            .cloned()
+            .collect::<Vec<_>>();
+        let uncovered_count = cards.len().saturating_sub(covered_count);
+        cards.sort_by_key(|metric| metric.memory_total_mi_b.unwrap_or(0));
+        appended.extend(cards.into_iter().take(uncovered_count));
+    }
+
+    let next_index = metrics
+        .iter()
+        .map(|metric| metric.index + 1)
+        .max()
+        .unwrap_or(0);
+    for (offset, mut metric) in appended.into_iter().enumerate() {
+        metric.index = next_index + offset as u32;
+        metrics.push(metric);
+    }
 }
 
 fn number_from_value(value: &Value) -> Option<f64> {
@@ -498,6 +659,106 @@ mod tests {
         assert!(probe.apple);
         assert!(probe.any());
         assert!(!probe.nvidia);
+    }
+
+    #[test]
+    fn probe_marks_linux_drm_fallback() {
+        let probe = parse_gpu_probe("Linux\ndrm-sysfs\n");
+        assert!(probe.linux_drm);
+        assert!(probe.any());
+    }
+
+    #[test]
+    fn parses_uncovered_integrated_gpu_from_linux_drm() {
+        let output = r#"__DRM_GPU__
+card=card0
+vendor=0x8086
+device=0x46a6
+slot=0000:00:02.0
+driver=i915
+name=VGA compatible controller: Intel Corporation Alder Lake-P Integrated Graphics
+gpu_busy_percent=17
+mem_busy_percent=
+vram_total=
+vram_used=
+__DRM_GPU__
+card=card1
+vendor=0x10de
+device=0x2684
+slot=0000:01:00.0
+driver=nvidia
+name=3D controller: NVIDIA Corporation AD104
+gpu_busy_percent=42
+mem_busy_percent=
+vram_total=8589934592
+vram_used=2147483648
+"#;
+        let mut gpus = vec![GpuMetric {
+            index: 0,
+            name: "NVIDIA AD104".to_string(),
+            uuid: "GPU-rich".to_string(),
+            vendor: "nvidia".to_string(),
+            driver_version: "555".to_string(),
+            power_draw_w: None,
+            power_limit_w: None,
+            temperature_c: None,
+            gpu_util_percent: Some(42.0),
+            mem_util_percent: None,
+            memory_total_mi_b: Some(8192),
+            memory_used_mi_b: Some(2048),
+            memory_free_mi_b: Some(6144),
+        }];
+        append_uncovered_linux_drm(&mut gpus, parse_linux_drm_gpus(output, 0));
+        assert_eq!(gpus.len(), 2);
+        let integrated = &gpus[1];
+        assert_eq!(integrated.index, 1);
+        assert_eq!(integrated.vendor, "intel");
+        assert_eq!(integrated.uuid, "linux-drm-0000:00:02.0");
+        assert_eq!(integrated.gpu_util_percent, Some(17.0));
+        assert_eq!(integrated.driver_version, "i915");
+    }
+
+    #[test]
+    fn keeps_same_vendor_integrated_card_missing_from_vendor_tool() {
+        let rich_output = r#"{"card1":{"Card series":"AMD Radeon RX 7900","Unique ID":"dGPU","GPU use (%)":"20","VRAM Total Memory (B)":"8589934592","VRAM Total Used Memory (B)":"1073741824"}}"#;
+        let mut gpus = parse_rocm_smi_json(rich_output).unwrap();
+        let drm_output = r#"__DRM_GPU__
+card=card0
+vendor=0x1002
+device=0x164e
+slot=0000:05:00.0
+driver=amdgpu
+name=AMD Radeon Integrated Graphics
+gpu_busy_percent=7
+mem_busy_percent=
+vram_total=536870912
+vram_used=67108864
+__DRM_GPU__
+card=card1
+vendor=0x1002
+device=0x744c
+slot=0000:03:00.0
+driver=amdgpu
+name=AMD Radeon RX 7900
+gpu_busy_percent=20
+mem_busy_percent=
+vram_total=8589934592
+vram_used=1073741824
+"#;
+        append_uncovered_linux_drm(&mut gpus, parse_linux_drm_gpus(drm_output, 0));
+        assert_eq!(gpus.len(), 2);
+        assert_eq!(gpus[1].name, "AMD Radeon Integrated Graphics");
+        assert_eq!(gpus[1].memory_total_mi_b, Some(512));
+    }
+
+    #[test]
+    fn linux_drm_reports_amd_vram_in_mib() {
+        let output = "__DRM_GPU__\ncard=card0\nvendor=0x1002\ndevice=0x164e\nslot=0000:05:00.0\ndriver=amdgpu\nname=\ngpu_busy_percent=9\nmem_busy_percent=3\nvram_total=4294967296\nvram_used=1073741824\n";
+        let gpus = parse_linux_drm_gpus(output, 0);
+        assert_eq!(gpus[0].vendor, "amd");
+        assert_eq!(gpus[0].memory_total_mi_b, Some(4096));
+        assert_eq!(gpus[0].memory_used_mi_b, Some(1024));
+        assert_eq!(gpus[0].memory_free_mi_b, Some(3072));
     }
 
     #[test]

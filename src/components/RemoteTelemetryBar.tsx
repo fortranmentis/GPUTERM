@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
   Activity,
+  Bot,
   Cpu,
   Gauge,
   HardDrive,
@@ -20,6 +21,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
+import { AgentUsagePopover } from "./AgentUsagePopover";
 import { CpuUsagePopover } from "./CpuUsagePopover";
 import { DiskUsagePopover } from "./DiskUsagePopover";
 import { GpuUsagePopover } from "./GpuUsagePopover";
@@ -52,8 +54,9 @@ import {
   formatTemperature,
   formatWatts,
 } from "../utils/format";
+import { formatBytes } from "../utils/formatBytes";
 
-type OpenResource = ResourceDetailType | "disk" | "users" | null;
+type OpenResource = ResourceDetailType | "disk" | "users" | "agents" | null;
 
 const DETAIL_TITLES: Record<Exclude<OpenResource, null>, string> = {
   cpu: "CPU details",
@@ -61,6 +64,7 @@ const DETAIL_TITLES: Record<Exclude<OpenResource, null>, string> = {
   gpu: "GPU details",
   disk: "Disks",
   users: "Logged-in users",
+  agents: "Coding agents",
 };
 
 type RemoteTelemetryBarProps = {
@@ -86,6 +90,7 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
   const gpuAnchorUuidRef = useRef<string | null>(null);
   const diskButtonRef = useRef<HTMLButtonElement | null>(null);
   const usersButtonRef = useRef<HTMLButtonElement | null>(null);
+  const agentsButtonRef = useRef<HTMLButtonElement | null>(null);
   const [ignoreDraft, setIgnoreDraft] = useState(settings.diskIgnoreFsTypes.join(", "));
 
   useEffect(() => {
@@ -109,11 +114,22 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
     () => [...new Set((telemetry?.users ?? []).map((session) => session.user))],
     [telemetry?.users],
   );
+  const agentSummary = useMemo(() => {
+    const agents = telemetry?.agents ?? [];
+    return {
+      providers: [...new Set(agents.map((agent) => agent.displayName))],
+      cpuPercent: agents.reduce((total, agent) => total + (agent.cpuPercent ?? 0), 0),
+      memoryBytes: agents.reduce((total, agent) => total + (agent.memoryBytes ?? 0), 0),
+    };
+  }, [telemetry?.agents]);
 
   useEffect(() => {
     if (!connected) {
       setOpenResource(null);
-    } else if (!showSystem && ["cpu", "memory", "disk", "users"].includes(openResource ?? "")) {
+    } else if (
+      !showSystem &&
+      ["cpu", "memory", "disk", "users", "agents"].includes(openResource ?? "")
+    ) {
       setOpenResource(null);
     } else if (!showGpu && openResource === "gpu") {
       setOpenResource(null);
@@ -126,7 +142,8 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
       !activeSessionId ||
       !openResource ||
       openResource === "disk" ||
-      openResource === "users"
+      openResource === "users" ||
+      openResource === "agents"
     ) {
       setResourceDetails(null);
       setDetailsLoading(false);
@@ -427,6 +444,34 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
         </TelemetryButton>
       )}
 
+      {connected && telemetry && showSystem && (
+        <TelemetryButton
+          buttonRef={agentsButtonRef}
+          title="Agents"
+          icon={<Bot size={16} />}
+          expanded={openResource === "agents"}
+          onClick={() => openDetail("agents")}
+        >
+          {telemetry.agents.length > 0 ? (
+            <>
+              <strong>
+                {telemetry.agents.length}{" "}
+                {telemetry.agents.length === 1 ? "session" : "sessions"}
+              </strong>
+              <span>
+                CPU {formatPercent(agentSummary.cpuPercent, 1)} · RAM{" "}
+                {formatBytes(agentSummary.memoryBytes)}
+              </span>
+              <span title={agentSummary.providers.join(", ")}>
+                {agentSummary.providers.join(", ")}
+              </span>
+            </>
+          ) : (
+            <span>{telemetry.errors.agents ?? "No coding agents running"}</span>
+          )}
+        </TelemetryButton>
+      )}
+
       {openResource === "cpu" && (
         <CpuUsagePopover
           metric={resourceDetails?.cpu ?? null}
@@ -475,6 +520,15 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
           anchorRef={usersButtonRef}
           onClose={() => setOpenResource(null)}
           onPopOut={() => void popOut("users")}
+        />
+      )}
+      {openResource === "agents" && telemetry && (
+        <AgentUsagePopover
+          agents={telemetry.agents}
+          error={telemetry.errors.agents}
+          anchorRef={agentsButtonRef}
+          onClose={() => setOpenResource(null)}
+          onPopOut={() => void popOut("agents")}
         />
       )}
     </footer>

@@ -1,3 +1,4 @@
+pub mod agent_monitor;
 pub mod credentials;
 pub mod gpu_monitor;
 pub mod local_fs;

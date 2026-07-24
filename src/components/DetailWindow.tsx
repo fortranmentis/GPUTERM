@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Cpu, Gauge, HardDrive, MemoryStick, Users } from "lucide-react";
+import { Bot, Cpu, Gauge, HardDrive, MemoryStick, Users } from "lucide-react";
+import { AgentDetailContent } from "./AgentUsagePopover";
 import { CpuDetailContent } from "./CpuUsagePopover";
 import { DiskDetailContent } from "./DiskUsagePopover";
 import { GpuDetailContent } from "./GpuUsagePopover";
@@ -11,7 +12,7 @@ import { UsersDetailContent } from "./UsersPopover";
 import type { RemoteTelemetry, TelemetrySettings } from "../types/gpu";
 import type { ResourceDetails } from "../types/resourceDetails";
 
-type DetailResource = "cpu" | "memory" | "gpu" | "disk" | "users";
+type DetailResource = "cpu" | "memory" | "gpu" | "disk" | "users" | "agents";
 
 type TerminalClosedPayload = {
   sessionId: string;
@@ -24,6 +25,7 @@ const RESOURCE_META: Record<DetailResource, { title: string; icon: ReactNode }> 
   gpu: { title: "GPU details", icon: <Gauge size={16} /> },
   disk: { title: "Disks", icon: <HardDrive size={16} /> },
   users: { title: "Logged-in users", icon: <Users size={16} /> },
+  agents: { title: "Coding agents", icon: <Bot size={16} /> },
 };
 
 const DEFAULT_SETTINGS: TelemetrySettings = {
@@ -47,7 +49,12 @@ function parseQuery(): { sessionId: string | null; resource: DetailResource | nu
   const params = new URLSearchParams(window.location.search);
   const resource = params.get("resource");
   const isResource = (value: string | null): value is DetailResource =>
-    value === "cpu" || value === "memory" || value === "gpu" || value === "disk" || value === "users";
+    value === "cpu" ||
+    value === "memory" ||
+    value === "gpu" ||
+    value === "disk" ||
+    value === "users" ||
+    value === "agents";
   return {
     sessionId: params.get("session"),
     resource: isResource(resource) ? resource : null,
@@ -100,9 +107,12 @@ export function DetailWindow() {
     };
   }, [sessionId]);
 
-  // disk/users render straight from the broadcast telemetry stream.
+  // disk/users/agents render straight from the broadcast telemetry stream.
   useEffect(() => {
-    if (!sessionId || !(resource === "disk" || resource === "users")) {
+    if (
+      !sessionId ||
+      !(resource === "disk" || resource === "users" || resource === "agents")
+    ) {
       return;
     }
     let disposed = false;
@@ -177,7 +187,8 @@ export function DetailWindow() {
   }
 
   const meta = RESOURCE_META[resource];
-  const needsTelemetry = resource === "disk" || resource === "users";
+  const needsTelemetry =
+    resource === "disk" || resource === "users" || resource === "agents";
 
   return (
     <div className="detail-window">
@@ -211,10 +222,15 @@ export function DetailWindow() {
             disks={telemetry?.disks ?? []}
             ignoredFsTypes={settings.diskIgnoreFsTypes}
           />
-        ) : (
+        ) : resource === "users" ? (
           <UsersDetailContent
             users={telemetry?.users ?? []}
             error={telemetry?.errors.users}
+          />
+        ) : (
+          <AgentDetailContent
+            agents={telemetry?.agents ?? []}
+            error={telemetry?.errors.agents}
           />
         )}
       </div>

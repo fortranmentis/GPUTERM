@@ -55,6 +55,45 @@ export type RemoteUserSession = {
   from: string | null;
 };
 
+export type AgentRateLimitMetric = {
+  label: string;
+  usedPercent: number | null;
+  windowMinutes: number | null;
+  resetsAt: number | null;
+};
+
+export type AgentWorkMetric = {
+  name: string;
+  role: string | null;
+  status: string | null;
+};
+
+export type AgentMetric = {
+  provider: "agy" | "codex" | "claude";
+  displayName: string;
+  status: string;
+  rootPid: number;
+  processCount: number;
+  user: string | null;
+  cpuPercent: number | null;
+  memoryBytes: number | null;
+  elapsedSeconds: number | null;
+  sessionId: string | null;
+  cwd: string | null;
+  model: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  totalTokens: number | null;
+  contextUsedTokens: number | null;
+  contextWindowTokens: number | null;
+  contextUsedPercent: number | null;
+  costUsd: number | null;
+  sessionDurationSeconds: number | null;
+  rateLimits: AgentRateLimitMetric[];
+  subagents: AgentWorkMetric[];
+  backgroundTasks: AgentWorkMetric[];
+};
+
 export type RemoteTelemetry = {
   sessionId: string;
   timestamp: string;
@@ -64,12 +103,14 @@ export type RemoteTelemetry = {
   disks: DiskMetric[];
   gpu: GpuMetric[];
   users: RemoteUserSession[];
+  agents: AgentMetric[];
   errors: {
     cpu?: string;
     memory?: string;
     disk?: string;
     gpu?: string;
     users?: string;
+    agents?: string;
   };
 };
 

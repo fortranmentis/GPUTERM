@@ -355,7 +355,22 @@ fn collect_gpu_details(session: &Session, os: RemoteOs) -> Result<Vec<GpuDetailM
         run_remote_command(session, &command).unwrap_or_default()
     };
     let identity = parse_ps_identity_output(&ps_output);
-    parse_gpu_detail_output(&gpu_output, process_rows, &identity)
+    let mut details = parse_gpu_detail_output(&gpu_output, process_rows, &identity)?;
+
+    // A hybrid Linux host can expose NVIDIA through nvidia-smi and its Intel
+    // or AMD iGPU through another vendor tool/DRM sysfs. Keep NVIDIA's rich
+    // process detail, then append every non-NVIDIA adapter so the popover
+    // matches the compact telemetry cards.
+    let mut probe = None;
+    if let Ok(extra) = collect_gpu_metrics(session, os, &mut probe) {
+        details.extend(
+            extra
+                .into_iter()
+                .filter(|metric| metric.vendor != "nvidia")
+                .map(gpu_metric_to_detail),
+        );
+    }
+    Ok(details)
 }
 
 /// Windows GPU details: the nvidia-smi queries are argument-identical to the

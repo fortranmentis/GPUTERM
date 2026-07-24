@@ -1,7 +1,9 @@
+use crate::ssh::agent_monitor::{self, AgentMetric, AgentMonitorState};
 use crate::ssh::gpu_monitor::{
-    parse_gpu_probe, parse_intel_gpu_top_stream, parse_nvidia_smi_csv, parse_rocm_smi_json,
-    parse_xpu_discovery, parse_xpu_stats, xpu_stats_command, GpuMetric, GpuProbe,
-    GPU_PROBE_COMMAND, INTEL_GPU_TOP_COMMAND, NVIDIA_SMI_QUERY, XPU_DISCOVERY_COMMAND,
+    append_uncovered_linux_drm, parse_gpu_probe, parse_intel_gpu_top_stream,
+    parse_linux_drm_gpus, parse_nvidia_smi_csv, parse_rocm_smi_json, parse_xpu_discovery,
+    parse_xpu_stats, xpu_stats_command, GpuMetric, GpuProbe, GPU_PROBE_COMMAND,
+    INTEL_GPU_TOP_COMMAND, LINUX_DRM_GPU_COMMAND, NVIDIA_SMI_QUERY, XPU_DISCOVERY_COMMAND,
 };
 use crate::ssh::macos_monitor;
 use crate::ssh::parse_util::{
@@ -124,6 +126,8 @@ pub struct TelemetryErrors {
     gpu: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     users: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agents: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -137,6 +141,7 @@ pub struct RemoteTelemetry {
     disks: Vec<DiskMetric>,
     gpu: Vec<GpuMetric>,
     users: Vec<RemoteUserSession>,
+    agents: Vec<AgentMetric>,
     errors: TelemetryErrors,
 }
 
@@ -269,6 +274,7 @@ pub fn start(
 
             let mut previous_cpu = None;
             let mut gpu_probe = None;
+            let mut agent_state = AgentMonitorState::default();
             let mut host_os: Option<RemoteOs> = None;
             let mut consecutive_total_failures = 0_u32;
             while !stop.load(Ordering::SeqCst) {
@@ -296,6 +302,7 @@ pub fn start(
                     host_os.unwrap_or(RemoteOs::Linux),
                     &mut previous_cpu,
                     &mut gpu_probe,
+                    &mut agent_state,
                 );
                 consecutive_total_failures = if telemetry_all_failed(&telemetry) {
                     consecutive_total_failures + 1
@@ -326,6 +333,7 @@ pub fn start_local(
     thread::spawn(move || {
         let os = local_os();
         let mut previous_cpu = None;
+        let mut agent_state = AgentMonitorState::default();
         let mut gpu_probe = (os == RemoteOs::MacOs).then(|| GpuProbe {
             apple: true,
             ..GpuProbe::default()
@@ -337,7 +345,13 @@ pub fn start_local(
                 .map(|settings| settings.clone())
                 .unwrap_or_default();
             let telemetry =
-                collect_local_telemetry(&session_id, os, &mut previous_cpu, &mut gpu_probe);
+                collect_local_telemetry(
+                    &session_id,
+                    os,
+                    &mut previous_cpu,
+                    &mut gpu_probe,
+                    &mut agent_state,
+                );
             emit_telemetry(&app, telemetry);
             sleep_with_stop(settings_snapshot.telemetry_interval_secs, &stop);
         }
@@ -356,12 +370,14 @@ fn emit_connection_error_telemetry(app: &AppHandle, session_id: &str, error: &st
             disks: Vec::new(),
             gpu: Vec::new(),
             users: Vec::new(),
+            agents: Vec::new(),
             errors: TelemetryErrors {
                 cpu: Some(format!("Telemetry SSH connection failed: {}", error)),
                 memory: Some("Telemetry SSH connection failed".to_string()),
                 disk: Some("Telemetry SSH connection failed".to_string()),
                 gpu: Some("Telemetry SSH connection failed".to_string()),
                 users: Some("Telemetry SSH connection failed".to_string()),
+                agents: Some("Telemetry SSH connection failed".to_string()),
             },
         },
     );
@@ -374,9 +390,11 @@ fn telemetry_all_failed(telemetry: &RemoteTelemetry) -> bool {
         && telemetry.disks.is_empty()
         && telemetry.gpu.is_empty()
         && telemetry.users.is_empty()
+        && telemetry.agents.is_empty()
         && telemetry.errors.cpu.is_some()
         && telemetry.errors.memory.is_some()
         && telemetry.errors.disk.is_some()
+        && telemetry.errors.agents.is_some()
 }
 
 fn emit_telemetry(app: &AppHandle, telemetry: RemoteTelemetry) {
@@ -389,9 +407,16 @@ fn collect_remote_telemetry(
     os: RemoteOs,
     previous_cpu: &mut Option<CpuStatSample>,
     gpu_probe: &mut Option<GpuProbe>,
+    agent_state: &mut AgentMonitorState,
 ) -> RemoteTelemetry {
     if os == RemoteOs::Windows {
-        return collect_windows_telemetry(session_id, session, previous_cpu, gpu_probe);
+        return collect_windows_telemetry(
+            session_id,
+            session,
+            previous_cpu,
+            gpu_probe,
+            agent_state,
+        );
     }
     let mut errors = TelemetryErrors::default();
 
@@ -465,6 +490,13 @@ fn collect_remote_telemetry(
             Vec::new()
         }
     };
+    let agents = match agent_monitor::collect_remote_agents(session, os, agent_state) {
+        Ok(metrics) => metrics,
+        Err(error) => {
+            errors.agents = Some(error);
+            Vec::new()
+        }
+    };
 
     RemoteTelemetry {
         session_id: session_id.to_string(),
@@ -475,6 +507,7 @@ fn collect_remote_telemetry(
         disks,
         gpu,
         users,
+        agents,
         errors,
     }
 }
@@ -484,9 +517,15 @@ fn collect_local_telemetry(
     os: RemoteOs,
     previous_cpu: &mut Option<CpuStatSample>,
     gpu_probe: &mut Option<GpuProbe>,
+    agent_state: &mut AgentMonitorState,
 ) -> RemoteTelemetry {
     if os == RemoteOs::Windows {
-        return collect_local_windows_telemetry(session_id, previous_cpu, gpu_probe);
+        return collect_local_windows_telemetry(
+            session_id,
+            previous_cpu,
+            gpu_probe,
+            agent_state,
+        );
     }
 
     let mut errors = TelemetryErrors::default();
@@ -535,6 +574,9 @@ fn collect_local_telemetry(
         .map(|output| parse_who_output(&output))
         .map_err(|error| errors.users = Some(error))
         .unwrap_or_default();
+    let agents = agent_monitor::collect_local_agents(os, agent_state)
+        .map_err(|error| errors.agents = Some(error))
+        .unwrap_or_default();
 
     RemoteTelemetry {
         session_id: session_id.to_string(),
@@ -545,6 +587,7 @@ fn collect_local_telemetry(
         disks,
         gpu,
         users,
+        agents,
         errors,
     }
 }
@@ -553,6 +596,7 @@ fn collect_local_windows_telemetry(
     session_id: &str,
     previous_cpu: &mut Option<CpuStatSample>,
     gpu_probe: &mut Option<GpuProbe>,
+    agent_state: &mut AgentMonitorState,
 ) -> RemoteTelemetry {
     let mut errors = TelemetryErrors::default();
     let mut hostname = None;
@@ -599,6 +643,9 @@ fn collect_local_windows_telemetry(
     let gpu = collect_local_gpu_metrics(RemoteOs::Windows, gpu_probe)
         .map_err(|error| errors.gpu = Some(error))
         .unwrap_or_default();
+    let agents = agent_monitor::collect_local_agents(RemoteOs::Windows, agent_state)
+        .map_err(|error| errors.agents = Some(error))
+        .unwrap_or_default();
     RemoteTelemetry {
         session_id: session_id.to_string(),
         timestamp: timestamp(),
@@ -608,6 +655,7 @@ fn collect_local_windows_telemetry(
         disks,
         gpu,
         users,
+        agents,
         errors,
     }
 }
@@ -704,6 +752,16 @@ pub(crate) fn collect_gpu_metrics(
             Err(error) => errors.push(error),
         }
     }
+    if os == RemoteOs::Linux && probe.linux_drm {
+        let next_index = metrics.iter().map(|m| m.index + 1).max().unwrap_or(0);
+        match run_remote_command(session, LINUX_DRM_GPU_COMMAND) {
+            Ok(output) => {
+                let found = parse_linux_drm_gpus(&output, next_index);
+                append_uncovered_linux_drm(&mut metrics, found);
+            }
+            Err(error) => errors.push(error),
+        }
+    }
 
     if metrics.is_empty() && !errors.is_empty() {
         return Err(errors.join("; "));
@@ -792,6 +850,20 @@ pub(crate) fn collect_local_gpu_metrics(
             .and_then(|output| parse_intel_gpu_top_stream(&output, next_index))
         {
             Ok(metric) => metrics.push(metric),
+            Err(error) => errors.push(error),
+        }
+    }
+    if os == RemoteOs::Linux && probe.linux_drm {
+        let next_index = metrics
+            .iter()
+            .map(|metric| metric.index + 1)
+            .max()
+            .unwrap_or(0);
+        match run_local_command_for(os, LINUX_DRM_GPU_COMMAND) {
+            Ok(output) => {
+                let found = parse_linux_drm_gpus(&output, next_index);
+                append_uncovered_linux_drm(&mut metrics, found);
+            }
             Err(error) => errors.push(error),
         }
     }
@@ -889,6 +961,7 @@ fn collect_windows_telemetry(
     session: &Session,
     previous_cpu: &mut Option<CpuStatSample>,
     gpu_probe: &mut Option<GpuProbe>,
+    agent_state: &mut AgentMonitorState,
 ) -> RemoteTelemetry {
     let mut errors = TelemetryErrors::default();
     let mut hostname = None;
@@ -943,6 +1016,14 @@ fn collect_windows_telemetry(
             Vec::new()
         }
     };
+    let agents =
+        match agent_monitor::collect_remote_agents(session, RemoteOs::Windows, agent_state) {
+            Ok(metrics) => metrics,
+            Err(error) => {
+                errors.agents = Some(error);
+                Vec::new()
+            }
+        };
 
     RemoteTelemetry {
         session_id: session_id.to_string(),
@@ -953,6 +1034,7 @@ fn collect_windows_telemetry(
         disks,
         gpu,
         users,
+        agents,
         errors,
     }
 }
@@ -1595,8 +1677,14 @@ mod tests {
         let os = local_os();
         let mut previous_cpu = None;
         let mut gpu_probe = None;
-        let telemetry =
-            collect_local_telemetry("local-test", os, &mut previous_cpu, &mut gpu_probe);
+        let mut agent_state = AgentMonitorState::default();
+        let telemetry = collect_local_telemetry(
+            "local-test",
+            os,
+            &mut previous_cpu,
+            &mut gpu_probe,
+            &mut agent_state,
+        );
 
         assert!(telemetry.hostname.is_some());
         assert!(telemetry.cpu.is_some(), "{:?}", telemetry.errors.cpu);
@@ -1640,12 +1728,14 @@ mod tests {
             disks: Vec::new(),
             gpu: Vec::new(),
             users: Vec::new(),
+            agents: Vec::new(),
             errors: TelemetryErrors {
                 cpu: Some("failed".to_string()),
                 memory: Some("failed".to_string()),
                 disk: Some("failed".to_string()),
                 gpu: Some("failed".to_string()),
                 users: Some("failed".to_string()),
+                agents: Some("failed".to_string()),
             },
         };
         assert!(telemetry_all_failed(&telemetry));

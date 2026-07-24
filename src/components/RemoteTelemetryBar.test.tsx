@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { RemoteTelemetryBar } from "./RemoteTelemetryBar";
 import { useSessionStore } from "../stores/sessionStore";
-import type { DiskMetric, GpuMetric, RemoteTelemetry } from "../types/gpu";
+import type { AgentMetric, DiskMetric, GpuMetric, RemoteTelemetry } from "../types/gpu";
 import type { GpuDetailMetric, ResourceDetails } from "../types/resourceDetails";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -87,9 +87,36 @@ function telemetry(disks: DiskMetric[], sessionId = "session-1"): RemoteTelemetr
     disks,
     gpu: [],
     users: [],
+    agents: [],
     errors: {},
   };
 }
+
+const codexAgent: AgentMetric = {
+  provider: "codex",
+  displayName: "Codex",
+  status: "active",
+  rootPid: 4242,
+  processCount: 3,
+  user: "tester",
+  cpuPercent: 12.5,
+  memoryBytes: 512 * 1024 * 1024,
+  elapsedSeconds: 600,
+  sessionId: "session-codex",
+  cwd: "/workspace",
+  model: "gpt-test",
+  inputTokens: 1000,
+  outputTokens: 200,
+  totalTokens: 1200,
+  contextUsedTokens: 500,
+  contextWindowTokens: 10000,
+  contextUsedPercent: 5,
+  costUsd: null,
+  sessionDurationSeconds: null,
+  rateLimits: [{ label: "primary", usedPercent: 40, windowMinutes: 300, resetsAt: null }],
+  subagents: [],
+  backgroundTasks: [],
+};
 
 function setTelemetry(payload: RemoteTelemetry) {
   useSessionStore.setState({
@@ -470,5 +497,22 @@ describe("RemoteTelemetryBar disk summary", () => {
     fireEvent.click(closeButton);
 
     expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("summarizes coding agents and opens their provider details", async () => {
+    setTelemetry({
+      ...telemetry([]),
+      agents: [codexAgent],
+    });
+
+    render(<RemoteTelemetryBar />);
+    const agentsButton = screen.getByRole("button", { name: /agents/i });
+    expect(within(agentsButton).getByText("1 session")).toBeInTheDocument();
+    expect(within(agentsButton).getByText("Codex")).toBeInTheDocument();
+
+    fireEvent.click(agentsButton);
+    const dialog = await screen.findByRole("dialog", { name: "Coding agents" });
+    expect(within(dialog).getByText("gpt-test")).toBeInTheDocument();
+    expect(within(dialog).getByText("40% used")).toBeInTheDocument();
   });
 });
