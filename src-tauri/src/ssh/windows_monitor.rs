@@ -10,7 +10,7 @@ use crate::ssh::system_monitor::{
     calculate_cpu_usage, CpuMetric, CpuStatSample, DiskMetric, MemoryMetric, RemoteUserSession,
 };
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 const BYTES_PER_MIB: u64 = 1024 * 1024;
 
@@ -471,13 +471,6 @@ pub(crate) fn parse_windows_gpu_counters(
     let sections = split_sections(output);
     let first = parse_engine_samples(sections.get("ENG1").map(String::as_str).unwrap_or(""));
     let second = parse_engine_samples(sections.get("ENG2").map(String::as_str).unwrap_or(""));
-    if second.is_empty() {
-        return Err(
-            "Windows GPU counters unavailable (no GPU Engine performance counter instances; requires Windows 10 1709+ with a WDDM 2.x driver)"
-                .to_string(),
-        );
-    }
-
     let mut luid_by_phys: HashMap<u32, u64> = HashMap::new();
     let mut engine_busy: HashMap<(u32, String), f64> = HashMap::new();
     for (name, (busy_now, time_now)) in &second {
@@ -526,29 +519,42 @@ pub(crate) fn parse_windows_gpu_counters(
     let mut phys_ids: Vec<u32> = util_by_phys
         .keys()
         .chain(memory_by_phys.keys())
+        .chain(luid_by_phys.keys())
         .copied()
         .collect();
     phys_ids.sort_unstable();
     phys_ids.dedup();
 
     let mut metrics = Vec::new();
+    let mut represented_adapters = HashSet::new();
     for phys in phys_ids {
-        let adapter = luid_by_phys
+        let adapter_index = luid_by_phys
             .get(&phys)
-            .and_then(|luid| adapters.iter().find(|adapter| adapter.luids.contains(luid)))
-            .or_else(|| adapters.get(phys as usize));
-        let Some(adapter) = adapter else {
+            .and_then(|luid| {
+                adapters
+                    .iter()
+                    .position(|adapter| adapter.luids.contains(luid))
+            })
+            .or_else(|| ((phys as usize) < adapters.len()).then_some(phys as usize));
+        let Some(adapter_index) = adapter_index else {
             continue;
         };
+        let adapter = &adapters[adapter_index];
         if nvidia_covered && adapter.vendor == "nvidia" {
             continue;
         }
-        let memory_total_mi_b = adapter.memory_total_bytes.map(|bytes| bytes / BYTES_PER_MIB);
+        represented_adapters.insert(adapter_index);
+        let memory_total_mi_b = adapter
+            .memory_total_bytes
+            .map(|bytes| bytes / BYTES_PER_MIB);
         let memory_used_mi_b = memory_by_phys.get(&phys).map(|bytes| bytes / BYTES_PER_MIB);
         metrics.push(GpuMetric {
             index: next_index + metrics.len() as u32,
             name: adapter.name.clone(),
-            uuid: format!("win-gpu-{}", phys),
+            // Adapter enumeration is stable across polling ticks. Using it
+            // keeps React identity stable when an idle adapter later gains a
+            // WDDM counter instance with a different phys_N value.
+            uuid: format!("win-gpu-{}", adapter_index),
             vendor: adapter.vendor.clone(),
             driver_version: adapter.driver_version.clone(),
             // Power/temperature need a vendor CLI; the counters expose neither.
@@ -565,10 +571,43 @@ pub(crate) fn parse_windows_gpu_counters(
             memory_used_mi_b,
         });
     }
+
+    // WDDM creates GPU Engine counter instances lazily. On hybrid laptops the
+    // iGPU therefore often has no row while the dGPU is doing all the work.
+    // Keep every physical adapter from Win32_VideoController in the result;
+    // if some counters exist, a missing adapter is currently idle (0%).
+    for (adapter_index, adapter) in adapters.iter().enumerate() {
+        if represented_adapters.contains(&adapter_index)
+            || (nvidia_covered && adapter.vendor == "nvidia")
+        {
+            continue;
+        }
+        let memory_total_mi_b = adapter
+            .memory_total_bytes
+            .map(|bytes| bytes / BYTES_PER_MIB);
+        metrics.push(GpuMetric {
+            index: next_index + metrics.len() as u32,
+            name: adapter.name.clone(),
+            uuid: format!("win-gpu-{}", adapter_index),
+            vendor: adapter.vendor.clone(),
+            driver_version: adapter.driver_version.clone(),
+            power_draw_w: None,
+            power_limit_w: None,
+            temperature_c: None,
+            gpu_util_percent: (!second.is_empty()).then_some(0.0),
+            mem_util_percent: None,
+            memory_total_mi_b,
+            memory_free_mi_b: None,
+            memory_used_mi_b: None,
+        });
+    }
     if metrics.is_empty() {
-        return Err(
-            "Windows GPU counters found no adapters to attribute metrics to".to_string(),
-        );
+        let detail = if second.is_empty() {
+            "no GPU Engine performance counter instances; requires Windows 10 1709+ with a WDDM 2.x driver"
+        } else {
+            "no adapters to attribute metrics to"
+        };
+        return Err(format!("Windows GPU counters unavailable ({})", detail));
     }
     Ok(metrics)
 }
@@ -890,6 +929,35 @@ mod tests {
         let metrics = parse_windows_gpu_counters(&output, &adapters, false, 0).unwrap();
         assert_eq!(metrics[0].gpu_util_percent, None);
         assert_eq!(metrics[0].memory_used_mi_b, Some(1));
+    }
+
+    #[test]
+    fn windows_gpu_counters_keep_idle_igpu_without_counter_instances() {
+        let eng1 = engine_row("pid_1_luid_0x0_0x11170_phys_1_eng_0_engtype_3D", 0, 0);
+        let eng2 = engine_row("pid_1_luid_0x0_0x11170_phys_1_eng_0_engtype_3D", 500, 1000);
+        let output = format!("__ENG1__\n{}\n__ENG2__\n{}\n__ADAPTERMEM__\n\n", eng1, eng2);
+        let mut dgpu = adapter("NVIDIA GeForce RTX 4070", "nvidia");
+        dgpu.luids = vec![70000];
+        let mut igpu = adapter("Intel(R) Iris(R) Xe Graphics", "intel");
+        igpu.luids = vec![50000];
+
+        let metrics =
+            parse_windows_gpu_counters(&output, &[dgpu, igpu], true, 1).unwrap();
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].name, "Intel(R) Iris(R) Xe Graphics");
+        assert_eq!(metrics[0].uuid, "win-gpu-1");
+        assert_eq!(metrics[0].gpu_util_percent, Some(0.0));
+    }
+
+    #[test]
+    fn windows_gpu_probe_still_lists_adapters_when_wddm_counters_are_empty() {
+        let output = "__ENG1__\n\n__ENG2__\n\n__ADAPTERMEM__\n\n";
+        let metrics =
+            parse_windows_gpu_counters(output, &[adapter("Intel UHD Graphics", "intel")], false, 0)
+                .unwrap();
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].name, "Intel UHD Graphics");
+        assert_eq!(metrics[0].gpu_util_percent, None);
     }
 
     #[test]

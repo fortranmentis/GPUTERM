@@ -111,6 +111,8 @@ const codexAgent: AgentMetric = {
   contextUsedTokens: 500,
   contextWindowTokens: 10000,
   contextUsedPercent: 5,
+  contextRemainingTokens: 9500,
+  contextRemainingPercent: 95,
   costUsd: null,
   sessionDurationSeconds: null,
   rateLimits: [{ label: "primary", usedPercent: 40, windowMinutes: 300, resetsAt: null }],
@@ -513,6 +515,7 @@ describe("RemoteTelemetryBar disk summary", () => {
     fireEvent.click(agentsButton);
     const dialog = await screen.findByRole("dialog", { name: "Coding agents" });
     expect(within(dialog).getByText("gpt-test")).toBeInTheDocument();
-    expect(within(dialog).getByText("40% used")).toBeInTheDocument();
+    expect(within(dialog).getByText("95.0% (9.5K)")).toBeInTheDocument();
+    expect(within(dialog).getByText("60% remaining")).toBeInTheDocument();
   });
 });

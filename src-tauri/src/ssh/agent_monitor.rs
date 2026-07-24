@@ -56,7 +56,120 @@ const POSIX_METADATA_COMMAND: &str = r#"emit_agent_files() {
 }
 emit_agent_files codex "$HOME/.codex/sessions" 'rollout-*.jsonl'
 emit_agent_files claude "$HOME/.claude/projects" '*.jsonl'
-emit_agent_files agy "$HOME/.gemini/antigravity-cli/brain" 'transcript.jsonl'
+# AGY 1.0 stores token metadata in SQLite/protobuf conversation records. Read
+# only the small generator-metadata blobs: no step payloads, prompts, model
+# responses, tool arguments, credentials, or environment values are selected.
+if command -v python3 >/dev/null 2>&1; then
+python3 - <<'GPUTERM_AGY_USAGE' 2>/dev/null
+import glob, json, os, sqlite3
+
+def read_varint(data, pos):
+    value = 0
+    shift = 0
+    while pos < len(data) and shift < 70:
+        byte = data[pos]
+        pos += 1
+        value |= (byte & 0x7f) << shift
+        if byte < 0x80:
+            return value, pos
+        shift += 7
+    raise ValueError("invalid protobuf varint")
+
+def fields(data):
+    result = {}
+    pos = 0
+    while pos < len(data):
+        tag, pos = read_varint(data, pos)
+        number, wire = tag >> 3, tag & 7
+        if number == 0:
+            break
+        if wire == 0:
+            value, pos = read_varint(data, pos)
+        elif wire == 1:
+            value, pos = data[pos:pos + 8], pos + 8
+        elif wire == 2:
+            size, pos = read_varint(data, pos)
+            value, pos = data[pos:pos + size], pos + size
+        elif wire == 5:
+            value, pos = data[pos:pos + 4], pos + 4
+        else:
+            raise ValueError("unsupported protobuf wire type")
+        result.setdefault(number, []).append(value)
+    return result
+
+def child(parent, number):
+    for value in reversed(parent.get(number, [])):
+        if isinstance(value, (bytes, bytearray)):
+            try:
+                return fields(value)
+            except Exception:
+                pass
+    return {}
+
+def integer(parent, number):
+    for value in reversed(parent.get(number, [])):
+        if isinstance(value, int):
+            return value
+    return 0
+
+def text(parent, number):
+    for value in reversed(parent.get(number, [])):
+        if isinstance(value, (bytes, bytearray)):
+            try:
+                decoded = value.decode("utf-8").strip()
+            except Exception:
+                continue
+            if decoded:
+                return decoded
+    return None
+
+root = os.path.expanduser("~/.gemini/antigravity-cli/conversations")
+paths = sorted(glob.glob(os.path.join(root, "*.db")), key=os.path.getmtime, reverse=True)[:2]
+for path in paths:
+    total_input = total_output = 0
+    context_used = context_window = 0
+    model = None
+    try:
+        uri = "file:" + path.replace("?", "%3f") + "?mode=ro&immutable=1"
+        connection = sqlite3.connect(uri, uri=True)
+        rows = connection.execute("SELECT data FROM gen_metadata ORDER BY idx").fetchall()
+        connection.close()
+        for (blob,) in rows:
+            outer = fields(bytes(blob))
+            generation = child(outer, 1)
+            usage = child(generation, 4)
+            if not usage:
+                continue
+            # AGY generator token metadata: input, output, cached input, and
+            # tool-use input. Output already includes visible + thought tokens.
+            current_input = integer(usage, 2) + integer(usage, 5) + integer(usage, 6)
+            current_output = integer(usage, 3)
+            total_input += current_input
+            total_output += current_output
+            context_used = current_input
+            config = child(generation, 15)
+            context_window = integer(config, 2) or context_window
+            model = text(generation, 21) or model
+    except Exception:
+        continue
+    if not (total_input or total_output or context_used or model):
+        continue
+    payload = {
+        "conversation_id": os.path.splitext(os.path.basename(path))[0],
+        "model": model,
+        "input_tokens": total_input or None,
+        "output_tokens": total_output or None,
+        "total_tokens": (total_input + total_output) or None,
+        "context_window": {
+            "context_used_tokens": context_used or None,
+            "context_window_size": context_window or None,
+        },
+    }
+    print("__GPUTERM_AGENT_FILE__\tagy\t" + path)
+    print(json.dumps(payload, separators=(",", ":")))
+    print("__GPUTERM_AGENT_END__")
+GPUTERM_AGY_USAGE
+fi
 for provider in agy claude; do
   snapshot="$HOME/.cache/gputerm/agent-status/$provider.json"
   if [ -r "$snapshot" ]; then
@@ -82,7 +195,116 @@ function Emit-AgentFiles([string]$provider, [string]$root, [string]$filter) {
 }
 Emit-AgentFiles 'codex' (Join-Path $HOME '.codex\sessions') 'rollout-*.jsonl'
 Emit-AgentFiles 'claude' (Join-Path $HOME '.claude\projects') '*.jsonl'
-Emit-AgentFiles 'agy' (Join-Path $HOME '.gemini\antigravity-cli\brain') 'transcript.jsonl'
+$agyPython = @'
+import glob, json, os, sqlite3
+
+def read_varint(data, pos):
+    value = 0
+    shift = 0
+    while pos < len(data) and shift < 70:
+        byte = data[pos]
+        pos += 1
+        value |= (byte & 0x7f) << shift
+        if byte < 0x80:
+            return value, pos
+        shift += 7
+    raise ValueError("invalid protobuf varint")
+
+def fields(data):
+    result = {}
+    pos = 0
+    while pos < len(data):
+        tag, pos = read_varint(data, pos)
+        number, wire = tag >> 3, tag & 7
+        if number == 0:
+            break
+        if wire == 0:
+            value, pos = read_varint(data, pos)
+        elif wire == 1:
+            value, pos = data[pos:pos + 8], pos + 8
+        elif wire == 2:
+            size, pos = read_varint(data, pos)
+            value, pos = data[pos:pos + size], pos + size
+        elif wire == 5:
+            value, pos = data[pos:pos + 4], pos + 4
+        else:
+            raise ValueError("unsupported protobuf wire type")
+        result.setdefault(number, []).append(value)
+    return result
+
+def child(parent, number):
+    for value in reversed(parent.get(number, [])):
+        if isinstance(value, (bytes, bytearray)):
+            try:
+                return fields(value)
+            except Exception:
+                pass
+    return {}
+
+def integer(parent, number):
+    for value in reversed(parent.get(number, [])):
+        if isinstance(value, int):
+            return value
+    return 0
+
+def text(parent, number):
+    for value in reversed(parent.get(number, [])):
+        if isinstance(value, (bytes, bytearray)):
+            try:
+                decoded = value.decode("utf-8").strip()
+            except Exception:
+                continue
+            if decoded:
+                return decoded
+    return None
+
+root = os.path.expanduser("~/.gemini/antigravity-cli/conversations")
+paths = sorted(glob.glob(os.path.join(root, "*.db")), key=os.path.getmtime, reverse=True)[:2]
+for path in paths:
+    total_input = total_output = 0
+    context_used = context_window = 0
+    model = None
+    try:
+        uri = "file:" + path.replace("?", "%3f") + "?mode=ro&immutable=1"
+        connection = sqlite3.connect(uri, uri=True)
+        rows = connection.execute("SELECT data FROM gen_metadata ORDER BY idx").fetchall()
+        connection.close()
+        for (blob,) in rows:
+            outer = fields(bytes(blob))
+            generation = child(outer, 1)
+            usage = child(generation, 4)
+            if not usage:
+                continue
+            current_input = integer(usage, 2) + integer(usage, 5) + integer(usage, 6)
+            current_output = integer(usage, 3)
+            total_input += current_input
+            total_output += current_output
+            context_used = current_input
+            config = child(generation, 15)
+            context_window = integer(config, 2) or context_window
+            model = text(generation, 21) or model
+    except Exception:
+        continue
+    if not (total_input or total_output or context_used or model):
+        continue
+    payload = {
+        "conversation_id": os.path.splitext(os.path.basename(path))[0],
+        "model": model,
+        "input_tokens": total_input or None,
+        "output_tokens": total_output or None,
+        "total_tokens": (total_input + total_output) or None,
+        "context_window": {
+            "context_used_tokens": context_used or None,
+            "context_window_size": context_window or None,
+        },
+    }
+    print("__GPUTERM_AGENT_FILE__\tagy\t" + path)
+    print(json.dumps(payload, separators=(",", ":")))
+    print("__GPUTERM_AGENT_END__")
+'@
+$python = Get-Command python3.exe -ErrorAction SilentlyContinue
+if (-not $python) { $python = Get-Command python.exe -ErrorAction SilentlyContinue }
+if ($python) { & $python.Source -c $agyPython 2>$null }
 foreach ($provider in @('agy', 'claude')) {
   $snapshot = Join-Path $HOME ".cache\gputerm\agent-status\$provider.json"
   if (Test-Path -LiteralPath $snapshot) {
@@ -131,6 +353,8 @@ pub struct AgentMetric {
     context_used_tokens: Option<u64>,
     context_window_tokens: Option<u64>,
     context_used_percent: Option<f64>,
+    context_remaining_tokens: Option<u64>,
+    context_remaining_percent: Option<f64>,
     cost_usd: Option<f64>,
     session_duration_seconds: Option<f64>,
     rate_limits: Vec<AgentRateLimitMetric>,
@@ -196,6 +420,8 @@ struct AgentSessionMetadata {
     context_used_tokens: Option<u64>,
     context_window_tokens: Option<u64>,
     context_used_percent: Option<f64>,
+    context_remaining_tokens: Option<u64>,
+    context_remaining_percent: Option<f64>,
     cost_usd: Option<f64>,
     session_duration_seconds: Option<f64>,
     rate_limits: Vec<AgentRateLimitMetric>,
@@ -491,6 +717,8 @@ fn build_agent_metrics(
                 context_used_tokens: provider_metadata.context_used_tokens,
                 context_window_tokens: provider_metadata.context_window_tokens,
                 context_used_percent: provider_metadata.context_used_percent,
+                context_remaining_tokens: provider_metadata.context_remaining_tokens,
+                context_remaining_percent: provider_metadata.context_remaining_percent,
                 cost_usd: provider_metadata.cost_usd,
                 // Claude status-line snapshots expose an API/session duration.
                 // The process elapsed time remains a useful read-only fallback.
@@ -512,20 +740,14 @@ fn parse_metadata_output(output: &str) -> HashMap<Provider, Vec<AgentSessionMeta
     for line in output.lines() {
         if let Some(marker) = line.strip_prefix("__GPUTERM_AGENT_FILE__\t") {
             if let Some(current) = provider.take() {
-                grouped
-                    .entry(current)
-                    .or_default()
-                    .push(parse_provider_metadata(current, &lines));
+                insert_provider_metadata(&mut grouped, current, &lines);
             }
             let key = marker.split('\t').next().unwrap_or("");
             provider = Provider::parse(key);
             lines.clear();
         } else if line.trim() == "__GPUTERM_AGENT_END__" {
             if let Some(current) = provider.take() {
-                grouped
-                    .entry(current)
-                    .or_default()
-                    .push(parse_provider_metadata(current, &lines));
+                insert_provider_metadata(&mut grouped, current, &lines);
             }
             lines.clear();
         } else if provider.is_some() {
@@ -533,12 +755,85 @@ fn parse_metadata_output(output: &str) -> HashMap<Provider, Vec<AgentSessionMeta
         }
     }
     if let Some(current) = provider {
-        grouped
-            .entry(current)
-            .or_default()
-            .push(parse_provider_metadata(current, &lines));
+        insert_provider_metadata(&mut grouped, current, &lines);
     }
     grouped
+}
+
+fn insert_provider_metadata(
+    grouped: &mut HashMap<Provider, Vec<AgentSessionMetadata>>,
+    provider: Provider,
+    lines: &[String],
+) {
+    let metadata = parse_provider_metadata(provider, lines);
+    if !metadata_has_values(&metadata) {
+        return;
+    }
+    let sessions = grouped.entry(provider).or_default();
+    if let Some(session_id) = metadata.session_id.as_deref() {
+        if let Some(existing) = sessions
+            .iter_mut()
+            .find(|existing| existing.session_id.as_deref() == Some(session_id))
+        {
+            merge_metadata(existing, metadata);
+            return;
+        }
+    }
+    sessions.push(metadata);
+}
+
+fn metadata_has_values(metadata: &AgentSessionMetadata) -> bool {
+    metadata.session_id.is_some()
+        || metadata.cwd.is_some()
+        || metadata.model.is_some()
+        || metadata.status.is_some()
+        || metadata.input_tokens.is_some()
+        || metadata.output_tokens.is_some()
+        || metadata.total_tokens.is_some()
+        || metadata.context_used_tokens.is_some()
+        || metadata.context_window_tokens.is_some()
+        || metadata.context_used_percent.is_some()
+        || metadata.context_remaining_tokens.is_some()
+        || metadata.context_remaining_percent.is_some()
+        || metadata.cost_usd.is_some()
+        || metadata.session_duration_seconds.is_some()
+        || !metadata.rate_limits.is_empty()
+        || !metadata.subagents.is_empty()
+        || !metadata.background_tasks.is_empty()
+}
+
+fn merge_metadata(base: &mut AgentSessionMetadata, newer: AgentSessionMetadata) {
+    macro_rules! prefer_new {
+        ($field:ident) => {
+            if newer.$field.is_some() {
+                base.$field = newer.$field;
+            }
+        };
+    }
+    prefer_new!(session_id);
+    prefer_new!(cwd);
+    prefer_new!(model);
+    prefer_new!(status);
+    prefer_new!(input_tokens);
+    prefer_new!(output_tokens);
+    prefer_new!(total_tokens);
+    prefer_new!(context_used_tokens);
+    prefer_new!(context_window_tokens);
+    prefer_new!(context_used_percent);
+    prefer_new!(context_remaining_tokens);
+    prefer_new!(context_remaining_percent);
+    prefer_new!(cost_usd);
+    prefer_new!(session_duration_seconds);
+    if !newer.rate_limits.is_empty() {
+        base.rate_limits = newer.rate_limits;
+    }
+    if !newer.subagents.is_empty() {
+        base.subagents = newer.subagents;
+    }
+    if !newer.background_tasks.is_empty() {
+        base.background_tasks = newer.background_tasks;
+    }
+    finalize_context(base);
 }
 
 fn parse_provider_metadata(provider: Provider, lines: &[String]) -> AgentSessionMetadata {
@@ -590,6 +885,7 @@ fn parse_codex_metadata(values: &[Value]) -> AgentSessionMetadata {
             metadata.model = value_string(payload, "model").or(metadata.model);
         }
     }
+    finalize_context(&mut metadata);
     metadata
 }
 
@@ -664,6 +960,17 @@ fn parse_claude_metadata(values: &[Value]) -> AgentSessionMetadata {
         metadata.context_used_percent = value_f64(context, "used_percentage")
             .or_else(|| value_f64(context, "usedPercentage"))
             .or(metadata.context_used_percent);
+        metadata.context_remaining_percent = value_f64(context, "remaining_percentage")
+            .or_else(|| value_f64(context, "remainingPercentage"))
+            .or(metadata.context_remaining_percent);
+        metadata.context_remaining_tokens = value_u64(context, "remaining_tokens")
+            .or_else(|| value_u64(context, "remainingTokens"))
+            .or(metadata.context_remaining_tokens);
+        let rate_limits =
+            parse_rate_limits(value.get("rate_limits").or_else(|| value.get("rateLimits")));
+        if !rate_limits.is_empty() {
+            metadata.rate_limits = rate_limits;
+        }
     }
     if saw_usage {
         metadata.input_tokens = Some(input);
@@ -673,10 +980,7 @@ fn parse_claude_metadata(values: &[Value]) -> AgentSessionMetadata {
         (Some(input), Some(output)) => Some(input.saturating_add(output)),
         _ => None,
     };
-    if metadata.context_used_percent.is_none() {
-        metadata.context_used_percent =
-            ratio_percent(metadata.context_used_tokens, metadata.context_window_tokens);
-    }
+    finalize_context(&mut metadata);
     metadata
 }
 
@@ -701,26 +1005,64 @@ fn parse_agy_metadata(values: &[Value]) -> AgentSessionMetadata {
         metadata.status = value_string(payload, "agent_state")
             .or_else(|| value_string(payload, "agentState"))
             .or(metadata.status);
+        metadata.input_tokens = value_u64(payload, "input_tokens")
+            .or_else(|| value_u64(payload, "inputTokens"))
+            .or(metadata.input_tokens);
+        metadata.output_tokens = value_u64(payload, "output_tokens")
+            .or_else(|| value_u64(payload, "outputTokens"))
+            .or(metadata.output_tokens);
+        metadata.total_tokens = value_u64(payload, "total_tokens")
+            .or_else(|| value_u64(payload, "totalTokens"))
+            .or(metadata.total_tokens);
         let context = payload
             .get("context_window")
             .or_else(|| payload.get("contextWindow"))
+            .or_else(|| payload.get("context"))
             .unwrap_or(payload);
-        metadata.input_tokens = value_u64(context, "total_input_tokens")
-            .or_else(|| value_u64(context, "totalInputTokens"))
-            .or(metadata.input_tokens);
-        metadata.output_tokens = value_u64(context, "total_output_tokens")
-            .or_else(|| value_u64(context, "totalOutputTokens"))
-            .or(metadata.output_tokens);
+        metadata.input_tokens = metadata.input_tokens.or_else(|| {
+            value_u64(context, "total_input_tokens")
+                .or_else(|| value_u64(context, "totalInputTokens"))
+                .or_else(|| value_u64(context, "input_tokens"))
+                .or_else(|| value_u64(context, "inputTokens"))
+        });
+        metadata.output_tokens = metadata.output_tokens.or_else(|| {
+            value_u64(context, "total_output_tokens")
+                .or_else(|| value_u64(context, "totalOutputTokens"))
+                .or_else(|| value_u64(context, "output_tokens"))
+                .or_else(|| value_u64(context, "outputTokens"))
+        });
         metadata.context_window_tokens = value_u64(context, "context_window_size")
             .or_else(|| value_u64(context, "contextWindowSize"))
+            .or_else(|| value_u64(context, "max_size"))
+            .or_else(|| value_u64(context, "maxSize"))
             .or(metadata.context_window_tokens);
         metadata.context_used_percent = value_f64(context, "used_percentage")
             .or_else(|| value_f64(context, "usedPercentage"))
             .or(metadata.context_used_percent);
+        metadata.context_remaining_percent = value_f64(context, "remaining_percentage")
+            .or_else(|| value_f64(context, "remainingPercentage"))
+            .or(metadata.context_remaining_percent);
         metadata.context_used_tokens = value_u64(context, "context_used_tokens")
             .or_else(|| value_u64(context, "contextUsedTokens"))
             .or_else(|| value_u64(context, "input_tokens"))
+            .or_else(|| value_u64(context, "inputTokens"))
+            .or_else(|| value_u64(context, "used_size"))
+            .or_else(|| value_u64(context, "usedSize"))
             .or(metadata.context_used_tokens);
+        metadata.context_remaining_tokens = value_u64(context, "remaining_tokens")
+            .or_else(|| value_u64(context, "remainingTokens"))
+            .or_else(|| value_u64(context, "remaining_size"))
+            .or_else(|| value_u64(context, "remainingSize"))
+            .or(metadata.context_remaining_tokens);
+        let rate_limits = parse_rate_limits(
+            payload
+                .get("rate_limits")
+                .or_else(|| payload.get("rateLimits"))
+                .or_else(|| payload.get("quota")),
+        );
+        if !rate_limits.is_empty() {
+            metadata.rate_limits = rate_limits;
+        }
         if let Some(items) = payload.get("subagents").and_then(Value::as_array) {
             metadata.subagents = parse_work_items(items);
         }
@@ -732,14 +1074,13 @@ fn parse_agy_metadata(values: &[Value]) -> AgentSessionMetadata {
             metadata.background_tasks = parse_work_items(items);
         }
     }
-    metadata.total_tokens = match (metadata.input_tokens, metadata.output_tokens) {
-        (Some(input), Some(output)) => Some(input.saturating_add(output)),
-        _ => None,
-    };
-    if metadata.context_used_percent.is_none() {
-        metadata.context_used_percent =
-            ratio_percent(metadata.context_used_tokens, metadata.context_window_tokens);
+    if metadata.total_tokens.is_none() {
+        metadata.total_tokens = match (metadata.input_tokens, metadata.output_tokens) {
+            (Some(input), Some(output)) => Some(input.saturating_add(output)),
+            _ => None,
+        };
     }
+    finalize_context(&mut metadata);
     metadata
 }
 
@@ -747,20 +1088,65 @@ fn parse_rate_limits(value: Option<&Value>) -> Vec<AgentRateLimitMetric> {
     let Some(Value::Object(limits)) = value else {
         return Vec::new();
     };
-    ["primary", "secondary"]
-        .into_iter()
-        .filter_map(|label| {
-            let limit = limits.get(label)?;
-            Some(AgentRateLimitMetric {
-                label: label.to_string(),
-                used_percent: value_f64(limit, "used_percent")
-                    .or_else(|| value_f64(limit, "usedPercent")),
-                window_minutes: value_u64(limit, "window_minutes")
-                    .or_else(|| value_u64(limit, "windowMinutes")),
-                resets_at: value_u64(limit, "resets_at").or_else(|| value_u64(limit, "resetsAt")),
+    limits
+        .iter()
+        .filter_map(|(label, limit)| {
+            let remaining_fraction = value_f64(limit, "remaining_fraction")
+                .or_else(|| value_f64(limit, "remainingFraction"));
+            let remaining_percent = value_f64(limit, "remaining_percentage")
+                .or_else(|| value_f64(limit, "remainingPercentage"));
+            let used_percent = value_f64(limit, "used_percent")
+                .or_else(|| value_f64(limit, "usedPercent"))
+                .or_else(|| value_f64(limit, "used_percentage"))
+                .or_else(|| value_f64(limit, "usedPercentage"))
+                .or_else(|| {
+                    remaining_percent.map(|remaining| (100.0 - remaining).clamp(0.0, 100.0))
+                })
+                .or_else(|| {
+                    remaining_fraction
+                        .map(|remaining| (100.0 - remaining * 100.0).clamp(0.0, 100.0))
+                });
+            let resets_at = value_u64(limit, "resets_at").or_else(|| value_u64(limit, "resetsAt"));
+            let window_minutes = value_u64(limit, "window_minutes")
+                .or_else(|| value_u64(limit, "windowMinutes"))
+                .or(match label.as_str() {
+                    "five_hour" | "fiveHour" => Some(5 * 60),
+                    "seven_day" | "sevenDay" => Some(7 * 24 * 60),
+                    _ => None,
+                });
+            (used_percent.is_some() || resets_at.is_some()).then(|| AgentRateLimitMetric {
+                label: label.clone(),
+                used_percent,
+                window_minutes,
+                resets_at,
             })
         })
         .collect()
+}
+
+fn finalize_context(metadata: &mut AgentSessionMetadata) {
+    if metadata.context_used_percent.is_none() {
+        metadata.context_used_percent =
+            ratio_percent(metadata.context_used_tokens, metadata.context_window_tokens);
+    }
+    if metadata.context_remaining_tokens.is_none() {
+        metadata.context_remaining_tokens =
+            match (metadata.context_window_tokens, metadata.context_used_tokens) {
+                (Some(window), Some(used)) => Some(window.saturating_sub(used)),
+                _ => None,
+            };
+    }
+    if metadata.context_remaining_percent.is_none() {
+        metadata.context_remaining_percent = metadata
+            .context_used_percent
+            .map(|used| (100.0 - used).clamp(0.0, 100.0))
+            .or_else(|| {
+                ratio_percent(
+                    metadata.context_remaining_tokens,
+                    metadata.context_window_tokens,
+                )
+            });
+    }
 }
 
 fn parse_work_items(items: &[Value]) -> Vec<AgentWorkMetric> {
@@ -888,11 +1274,15 @@ mod tests {
 
     #[test]
     fn parses_agy_status_payload_without_prompt_content() {
-        let lines = vec![r#"{"conversation_id":"agy-1","model":{"display_name":"Gemini"},"agent_state":"working","context_window":{"total_input_tokens":80,"total_output_tokens":20,"context_window_size":1000,"used_percentage":10},"subagents":[{"name":"tests","role":"worker","status":"active"}],"background_tasks":[{"name":"npm test","status":"running"}],"prompt":"do not expose this prompt"}"#.to_string()];
+        let lines = vec![r#"{"conversation_id":"agy-1","model":{"display_name":"Gemini"},"agent_state":"working","input_tokens":80,"output_tokens":20,"total_tokens":100,"context_window":{"context_used_tokens":100,"context_window_size":1000},"quota":{"premium":{"remaining_fraction":0.7}},"subagents":[{"name":"tests","role":"worker","status":"active"}],"background_tasks":[{"name":"npm test","status":"running"}],"prompt":"do not expose this prompt"}"#.to_string()];
         let metadata = parse_provider_metadata(Provider::Agy, &lines);
         assert_eq!(metadata.status.as_deref(), Some("working"));
         assert_eq!(metadata.model.as_deref(), Some("Gemini"));
         assert_eq!(metadata.total_tokens, Some(100));
+        assert_eq!(metadata.context_used_percent, Some(10.0));
+        assert_eq!(metadata.context_remaining_tokens, Some(900));
+        assert_eq!(metadata.context_remaining_percent, Some(90.0));
+        assert_eq!(metadata.rate_limits[0].used_percent, Some(30.0));
         assert_eq!(metadata.subagents.len(), 1);
         assert_eq!(metadata.background_tasks.len(), 1);
 
@@ -911,13 +1301,36 @@ mod tests {
         let lines = vec![
             r#"{"sessionId":"claude-1","message":{"id":"msg-1","model":"claude-sonnet","usage":{"input_tokens":100,"cache_read_input_tokens":50,"output_tokens":20}}}"#.to_string(),
             r#"{"sessionId":"claude-1","message":{"id":"msg-1","model":"claude-sonnet","usage":{"input_tokens":100,"cache_read_input_tokens":50,"output_tokens":20}}}"#.to_string(),
-            r#"{"total_cost_usd":0.42,"total_duration_ms":5000}"#.to_string(),
+            r#"{"total_cost_usd":0.42,"total_duration_ms":5000,"context_window":{"total_input_tokens":150,"total_output_tokens":20,"context_window_size":1000,"used_percentage":15,"remaining_percentage":85},"rate_limits":{"five_hour":{"used_percentage":23.5,"resets_at":1738425600},"seven_day":{"used_percentage":41.2,"resets_at":1738857600}}}"#.to_string(),
         ];
         let metadata = parse_provider_metadata(Provider::Claude, &lines);
         assert_eq!(metadata.input_tokens, Some(150));
         assert_eq!(metadata.output_tokens, Some(20));
         assert_eq!(metadata.cost_usd, Some(0.42));
         assert_eq!(metadata.session_duration_seconds, Some(5.0));
+        assert_eq!(metadata.context_remaining_tokens, Some(850));
+        assert_eq!(metadata.context_remaining_percent, Some(85.0));
+        assert_eq!(metadata.rate_limits.len(), 2);
+        assert_eq!(metadata.rate_limits[0].window_minutes, Some(300));
+        assert_eq!(metadata.rate_limits[1].window_minutes, Some(10080));
+    }
+
+    #[test]
+    fn merges_status_snapshot_into_matching_agent_session() {
+        let output = concat!(
+            "__GPUTERM_AGENT_FILE__\tagy\tconversation.db\n",
+            "{\"conversation_id\":\"same\",\"input_tokens\":100,\"output_tokens\":20,\"context_window\":{\"context_used_tokens\":80,\"context_window_size\":1000}}\n",
+            "__GPUTERM_AGENT_END__\n",
+            "__GPUTERM_AGENT_FILE__\tagy\tstatus.json\n",
+            "{\"conversation_id\":\"same\",\"agent_state\":\"working\",\"quota\":{\"premium\":{\"remaining_percentage\":75}}}\n",
+            "__GPUTERM_AGENT_END__\n",
+        );
+        let grouped = parse_metadata_output(output);
+        let sessions = grouped.get(&Provider::Agy).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].input_tokens, Some(100));
+        assert_eq!(sessions[0].status.as_deref(), Some("working"));
+        assert_eq!(sessions[0].rate_limits[0].used_percent, Some(25.0));
     }
 
     #[test]

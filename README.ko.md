@@ -72,8 +72,8 @@
 - 하단 상태바에서 CPU, RAM, 디스크, 로그인 사용자, GPU를 1~10초 주기로 폴링 — **로컬 및 원격 Linux·macOS·Windows 지원**
 - **접을 수 있는 모니터링 바** — 독립적으로 닫고 오른쪽 하단에서 복원할 수 있으며, 표시 상태를 재실행 후에도 유지
 - **NVIDIA·AMD·Intel·Apple Silicon** GPU를 호스트별로 자동 감지하며, 카드마다 벤더 태그 표시
-- **내장 + 외장 하이브리드 구성도 두 GPU 모두 표시** — Linux는 벤더 도구에 DRM/sysfs 어댑터 탐색을 보완하고, Windows는 DirectX LUID로 카운터를 정확히 귀속시킵니다
-- **AGY·Codex·Claude Code 모니터링** — 각 CLI의 전체 자식 프로세스 트리를 합산한 CPU/RAM·실행 시간을 표시하고, CLI가 제공하는 세션·모델·토큰/컨텍스트·작업·비용·rate-limit 메타데이터를 함께 표시
+- **내장 + 외장 하이브리드 구성도 두 GPU 모두 표시** — Linux는 벤더 도구에 DRM/sysfs 어댑터 탐색을 보완하고, Windows는 DirectX LUID로 카운터를 정확히 귀속하며 WDDM 활동 카운터가 아직 없는 유휴 GPU도 유지합니다
+- **AGY·Codex·Claude Code 모니터링** — 각 CLI의 전체 자식 프로세스 트리를 합산한 CPU/RAM·실행 시간을 표시하고, CLI가 제공하는 세션·모델·토큰·사용/잔여 컨텍스트·작업·비용·rate-limit 메타데이터를 함께 표시
 - 각 섹션을 클릭하면 표가 창 크기에 맞춰 확장되는 **드래그·크기 조절 가능 상세 팝오버**: 코어별 CPU 사용률, 상위 프로세스, GPU별 VRAM/전력/온도, 전체 마운트 목록
 - **상세창을 별도 OS 창으로 분리** 가능 — 독립적으로 갱신되고 세션이 끊기면 함께 닫힘
 - 원격 텔레메트리는 전용 SSH 연결에서 자동 재연결하고, 로컬 텔레메트리는 SSH 없이 호스트에서 수집기를 직접 실행
@@ -225,7 +225,7 @@ npm run tauri:build
 - **Mode:** GPU + System, GPU only, System only.
 - **Ignore FS:** 디스크 요약에서 숨길 파일시스템 타입을 쉼표로 구분해 지정 (기본: `tmpfs`, `devtmpfs`, `squashfs`, `proc`, `sysfs`, `cgroup`, `cgroup2`, `overlay`, `devfs`, `autofs`). 디스크 팝오버에서 일시적으로 표시할 수 있습니다.
 - 마운트 우선순위는 `/` → `/home` → `/data` → `/mnt*` → `/media*` → 드라이브 문자 → 기타이며, 사용률 80% 이상은 경고, 90% 이상은 위험으로 표시됩니다.
-- **Agents:** System이 포함된 모드에서 AGY/Codex/Claude Code 카드를 별도로 표시합니다. CPU와 메모리는 실행 프로세스 하나가 아니라 언어 서버·서브에이전트·백그라운드 명령을 포함한 전체 자식 트리를 합산합니다.
+- **Agents:** System이 포함된 모드에서 AGY/Codex/Claude Code 카드를 별도로 표시합니다. CPU와 메모리는 실행 프로세스 하나가 아니라 언어 서버·서브에이전트·백그라운드 명령을 포함한 전체 자식 트리를 합산합니다. AGY 1.0 대화 메타데이터와 Claude Code status-line 스냅샷에서는 잔여 컨텍스트도 표시하며, Claude 구독 계정 스냅샷은 5시간·7일 한도의 잔여량도 표시할 수 있습니다.
 
 </details>
 
@@ -242,11 +242,11 @@ npm run tauri:build
 | 사용자 | `who` | `who` | `quser` |
 | GPU | `nvidia-smi`(NVIDIA), `rocm-smi --json`(AMD/ROCm), `xpu-smi` / `intel_gpu_top`(Intel), 미수집 어댑터는 `/sys/class/drm/card*/device` | `ioreg -c IOAccelerator` (Apple GPU 사용률, root 불필요) | `nvidia-smi`(NVIDIA, 전체 지표); AMD/Intel은 WDDM GPU 성능 카운터(사용률 + VRAM) |
 | 상위 프로세스 | `ps -eo … --sort=-%cpu` / `--sort=-rss` | `ps -Ao … -r` / `-m` | `Get-Process` (2회 샘플 CPU 델타) |
-| AI 코딩 에이전트 | `ps -axo …`; 감지한 사용자의 로컬 CLI 세션 파일 끝부분에서 메타데이터 수집 | 동일 | `Win32_Process` + `Get-Process`; 로컬 CLI 세션 파일 끝부분에서 메타데이터 수집 |
+| AI 코딩 에이전트 | `ps -axo …`; 메타데이터 끝부분과 Python 3가 있으면 읽기 전용 AGY SQLite 생성 메타데이터 수집 | 동일 | `Win32_Process` + `Get-Process`; 메타데이터 끝부분과 동일한 선택적 Python 3 AGY 리더 |
 
 명령은 전용 SSH 연결에서 3초 타임아웃으로 실행됩니다(Windows는 PowerShell 기동 시간을 감안해 10초). Windows 명령은 폴링마다 하나의 PowerShell 5.1 스크립트로 묶어 `-EncodedCommand`로 전송하므로 OpenSSH 기본 셸이 cmd.exe든 PowerShell이든 동작하며, 서버에 아무것도 설치하지 않고 관리자 권한도 필요 없습니다. Windows 로컬 세션에서는 동일한 수집기를 시스템 PowerShell로 직접 실행하되 `CREATE_NO_WINDOW`와 명시적인 UTF-8 텍스트 출력을 적용해 폴링 콘솔 창이 뜨지 않고 지역화된 JSON 필드도 보존됩니다. GpuTerm이 원격 OS와 GPU 도구를 호스트별로 감지해 각 카드에 벤더 태그를 표시합니다. `intel_gpu_top`은 root 또는 `CAP_PERFMON`이 필요하고, Apple GPU의 전력·온도는 root `powermetrics`가 필요해 n/a로 표시됩니다. Linux DRM/sysfs는 더 풍부한 벤더 수집기에 잡히지 않은 GPU의 어댑터 정보와 드라이버가 제공하는 사용률/VRAM 카운터를 보완합니다. GPU 소스가 하나도 없으면 GPU 섹션만 '사용 불가'로 표시되고 나머지는 계속 동작합니다.
 
-에이전트 모니터링은 읽기 전용입니다. 프로세스 합계는 텔레메트리 주기마다 수집하고, 세션 메타데이터는 최근 Codex(`~/.codex/sessions`)·Claude Code(`~/.claude/projects`)·AGY(`~/.gemini/antigravity-cli/brain`) 기록에서 최대 5초마다 갱신합니다. GpuTerm은 카운터와 식별자만 추출하며 프롬프트·응답·환경변수·인증 정보는 텔레메트리에 포함하지 않습니다. 선택적인 공급자 status-line 연동은 더 풍부한 AGY/Claude 상태를 `~/.cache/gputerm/agent-status/{agy,claude}.json`에 제공할 수 있습니다.
+에이전트 모니터링은 읽기 전용입니다. 프로세스 합계는 텔레메트리 주기마다 수집하고, 세션 메타데이터는 최근 Codex(`~/.codex/sessions`)·Claude Code(`~/.claude/projects`) 기록에서 최대 5초마다 갱신합니다. AGY 1.0은 Python 3 표준 `sqlite3` 모듈이 있으면 최신 `~/.gemini/antigravity-cli/conversations/*.db` 두 개의 `gen_metadata`만 읽어 모델명·토큰 카운터·컨텍스트 크기를 해석합니다. 단계·프롬프트·응답·도구 인수·자격증명·환경 데이터는 선택하거나 텔레메트리로 직렬화하지 않습니다. 선택적인 AGY/Claude status-line 연동은 더 풍부한 실시간 상태를 `~/.cache/gputerm/agent-status/{agy,claude}.json`에 제공할 수 있으며, Claude의 공식 `context_window.remaining_percentage`와 구독 계정 `rate_limits` 필드를 직접 해석합니다.
 
 </details>
 
@@ -375,7 +375,8 @@ GpuTerm은 [PolyForm Noncommercial 1.0.0](./LICENSE)에 따라 개인·비상업
 | 마스터 비밀번호가 틀렸거나 기억나지 않음 | 비밀번호를 확인하거나 **Reset vault**를 선택하세요. 프로필은 유지되지만 저장된 SSH 비밀번호는 모두 삭제되어 다시 입력해야 합니다 |
 | 호스트 키 불일치 | 다른 경로로 서버 지문을 검증한 뒤 `known_hosts.json`에서 이전 항목 제거 |
 | GPU가 '사용 불가'로 표시 | GPU 도구(`nvidia-smi`, `rocm-smi`, `xpu-smi`, `intel_gpu_top`) 설치 또는 Linux `/sys/class/drm` 읽기 권한 확인 — 다른 지표는 무관하게 정상 동작 |
-| Agents 카드가 비어 있음 | 텔레메트리 계정에서 볼 수 있는 사용자로 `agy`, `codex`, `claude`가 실행 중인지 확인하세요. CPU/RAM은 프로세스 트리에서 표시되며 상세 필드는 해당 CLI 버전이 메타데이터를 제공해야 합니다 |
+| Windows 하이브리드 PC에서 외장 GPU만 표시 | 최신 빌드로 업데이트하세요. WDDM GPU Engine 카운터가 아직 없는 유휴 Intel/AMD 어댑터도 `Win32_VideoController` 탐색 결과에서 유지합니다 |
+| Agents 카드가 비어 있음 | 텔레메트리 계정에서 볼 수 있는 사용자로 `agy`, `codex`, `claude`가 실행 중인지 확인하세요. CPU/RAM은 프로세스 트리에서 표시되며 AGY 토큰/컨텍스트 메타데이터에는 모니터링 호스트의 `python3` 또는 `python`도 필요합니다 |
 | Windows 로컬 세션에서 콘솔 창이 반복 표시되거나 모니터링 데이터가 없음 | v1.1.6-beta에서 수정 — 앱을 업데이트하세요. 로컬 PowerShell 수집기는 콘솔 없이 UTF-8 출력으로 실행됩니다 |
 | Windows 원격에서 "The system cannot find the path specified" 표시 | v1.0.9-beta에서 수정 — 이전 빌드는 PATH에 `uname` 포트가 있는 Windows 호스트를 Linux로 오인했습니다; 앱을 업데이트하세요 |
 | 터미널에서 한글이 자모로 분리됨 | macOS/WebKit 클라이언트용으로 수정 완료 — 최신 릴리스로 업데이트하세요 |
@@ -387,8 +388,8 @@ GpuTerm은 [PolyForm Noncommercial 1.0.0](./LICENSE)에 따라 개인·비상업
 - `known_hosts.json`은 OpenSSH known_hosts 형식이 아닌 SHA-256 지문 JSON 사용
 - 텔레메트리는 로컬 및 원격 Linux·macOS(Apple Silicon 포함)·Windows를 지원; Apple GPU 전력·온도와 코어별 CPU 사용률은 root `powermetrics`가 필요해 미표시
 - GPU 모니터링은 `nvidia-smi`·`rocm-smi`·`xpu-smi`·`intel_gpu_top`·Linux DRM/sysfs·macOS `ioreg`·Windows WDDM 성능 카운터 사용; 공유 메모리 방식 GPU는 DRM에서 사용률만 제공하고 전용 VRAM·전력·온도는 n/a일 수 있음
-- CLI 프로세스가 모니터링 사용자에게 보이면 에이전트 CPU/RAM/프로세스 트리 합계는 항상 제공됩니다. 모델·토큰·컨텍스트, AGY 작업 상태, Claude 비용, Codex rate-limit은 CLI 버전별 로그/status 스키마 차이 때문에 가능한 범위에서 수집하며 없는 값은 n/a로 표시됩니다
-- Windows 원격: Windows PowerShell 5.1 이상 필요(기본 탑재); load average는 존재하지 않아 n/a로 표시; AMD/Intel GPU는 사용률·전용 VRAM만 제공(전력·온도 불가, Windows 10 1709+ 및 WDDM 2.x 드라이버 필요); 프로세스 소유자와 GPU 프로세스 커맨드라인은 관리자 권한이 필요해 n/a 또는 프로세스 이름으로 대체; Home 에디션에는 `quser`가 없어 사용자 섹션이 비어 있음; 내장+외장 하이브리드 호스트는 두 GPU 모두 표시(카운터는 DirectX 레지스트리의 어댑터 LUID로 정확히 매핑, 해당 키가 없으면 위치 기반 휴리스틱으로 폴백)
+- CLI 프로세스가 모니터링 사용자에게 보이면 에이전트 CPU/RAM/프로세스 트리 합계는 항상 제공됩니다. AGY 1.0 토큰/컨텍스트 메타데이터에는 모니터링 호스트의 Python 3가 필요합니다. AGY 실시간 쿼터/작업 상태, Claude 비용·구독 한도 등 공급자별 필드는 CLI 버전별 로그/status 스키마 차이 때문에 가능한 범위에서 수집하며 없는 값은 n/a로 표시됩니다
+- Windows 원격: Windows PowerShell 5.1 이상 필요(기본 탑재); load average는 존재하지 않아 n/a로 표시; AMD/Intel GPU는 사용률·전용 VRAM만 제공(전력·온도 불가, Windows 10 1709+ 및 WDDM 2.x 드라이버 필요); 프로세스 소유자와 GPU 프로세스 커맨드라인은 관리자 권한이 필요해 n/a 또는 프로세스 이름으로 대체; Home 에디션에는 `quser`가 없어 사용자 섹션이 비어 있음; 내장+외장 하이브리드 호스트는 두 GPU 모두 표시(카운터는 DirectX 레지스트리의 어댑터 LUID로 정확히 매핑하며, 유휴 어댑터는 활동 카운터가 없어도 탐색 결과로 유지하고 해당 키가 없으면 위치 기반 휴리스틱으로 폴백)
 - macOS 설치 파일은 현재 Apple Silicon 전용 (Intel Mac은 소스 빌드 필요)
 
 이슈와 풀 리퀘스트를 환영합니다 — 제출 전에 위의 테스트를 실행해 주세요.

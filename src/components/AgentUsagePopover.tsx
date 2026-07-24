@@ -75,6 +75,7 @@ function AgentUsageDetails({ agent }: { agent: AgentMetric }) {
     return (
       <div className="agent-provider-details">
         <TokenSummary agent={agent} />
+        <RateLimits limits={agent.rateLimits} />
         <WorkList title="Subagents" items={agent.subagents} />
         <WorkList title="Background tasks" items={agent.backgroundTasks} />
       </div>
@@ -85,6 +86,7 @@ function AgentUsageDetails({ agent }: { agent: AgentMetric }) {
     return (
       <div className="agent-provider-details">
         <TokenSummary agent={agent} />
+        <RateLimits limits={agent.rateLimits} />
         <div className="agent-resource-grid compact">
           <AgentField
             label="Session cost"
@@ -102,22 +104,7 @@ function AgentUsageDetails({ agent }: { agent: AgentMetric }) {
   return (
     <div className="agent-provider-details">
       <TokenSummary agent={agent} />
-      {agent.rateLimits.length > 0 && (
-        <div className="agent-rate-limits">
-          {agent.rateLimits.map((limit) => (
-            <div key={limit.label}>
-              <span>{limit.label}</span>
-              <strong>
-                {limit.usedPercent == null ? "n/a" : `${limit.usedPercent.toFixed(0)}% used`}
-              </strong>
-              <small>
-                {limit.windowMinutes == null ? "" : `${limit.windowMinutes} min window`}
-                {limit.resetsAt == null ? "" : ` · resets ${formatReset(limit.resetsAt)}`}
-              </small>
-            </div>
-          ))}
-        </div>
-      )}
+      <RateLimits limits={agent.rateLimits} />
     </div>
   );
 }
@@ -129,13 +116,43 @@ function TokenSummary({ agent }: { agent: AgentMetric }) {
       <AgentField label="Output tokens" value={formatTokens(agent.outputTokens)} />
       <AgentField label="Total tokens" value={formatTokens(agent.totalTokens)} />
       <AgentField
-        label="Context"
+        label="Context used"
         value={
           agent.contextUsedPercent == null
             ? `${formatTokens(agent.contextUsedTokens)} / ${formatTokens(agent.contextWindowTokens)}`
             : `${agent.contextUsedPercent.toFixed(1)}%`
         }
       />
+      <AgentField
+        label="Context left"
+        value={
+          agent.contextRemainingPercent == null
+            ? formatTokens(agent.contextRemainingTokens)
+            : `${agent.contextRemainingPercent.toFixed(1)}% (${formatTokens(agent.contextRemainingTokens)})`
+        }
+      />
+    </div>
+  );
+}
+
+function RateLimits({ limits }: { limits: AgentMetric["rateLimits"] }) {
+  if (limits.length === 0) return null;
+  return (
+    <div className="agent-rate-limits">
+      {limits.map((limit) => (
+        <div key={limit.label}>
+          <span>{formatLimitLabel(limit.label)}</span>
+          <strong>
+            {limit.usedPercent == null
+              ? "n/a"
+              : `${(100 - limit.usedPercent).toFixed(0)}% remaining`}
+          </strong>
+          <small>
+            {limit.windowMinutes == null ? "" : `${formatWindow(limit.windowMinutes)} window`}
+            {limit.resetsAt == null ? "" : ` · resets ${formatReset(limit.resetsAt)}`}
+          </small>
+        </div>
+      ))}
     </div>
   );
 }
@@ -223,4 +240,18 @@ function formatReset(value: number) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function formatLimitLabel(value: string) {
+  return value
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function formatWindow(minutes: number) {
+  if (minutes % (7 * 24 * 60) === 0) return `${minutes / (7 * 24 * 60)} week`;
+  if (minutes % (24 * 60) === 0) return `${minutes / (24 * 60)} day`;
+  if (minutes % 60 === 0) return `${minutes / 60} hour`;
+  return `${minutes} min`;
 }

@@ -75,8 +75,8 @@ Nothing is ever installed on your servers: every metric comes from one-shot stan
 - Bottom status bar polling CPU, RAM, disk, logged-in users, and GPUs every 1–10 s — on **local or remote Linux, macOS, and Windows hosts**
 - **Collapsible monitoring bar** — close it independently and restore it from the bottom-right; visibility is remembered across launches
 - **NVIDIA, AMD, Intel, and Apple Silicon** GPUs are auto-detected per host; every card carries a vendor tag
-- **Hybrid iGPU + dGPU hosts show both cards** — Linux supplements vendor tools with DRM/sysfs adapter discovery, while Windows attributes counters by DirectX LUID so the integrated GPU is never mistaken for the discrete one
-- **AGY, Codex, and Claude Code monitoring** — aggregate CPU/RAM and elapsed time across each CLI's complete child-process tree, then show provider-specific session, model, token/context, work, cost, and rate-limit metadata when emitted by that CLI
+- **Hybrid iGPU + dGPU hosts show both cards** — Linux supplements vendor tools with DRM/sysfs adapter discovery, while Windows attributes counters by DirectX LUID and keeps idle adapters visible even before WDDM creates an activity counter
+- **AGY, Codex, and Claude Code monitoring** — aggregate CPU/RAM and elapsed time across each CLI's complete child-process tree, then show provider-specific session, model, tokens, used/remaining context, work, cost, and available rate-limit metadata
 - Click any section for a **draggable, resizable detail popover** whose tables expand with the window: per-core CPU usage, top processes, VRAM/power/temperature per GPU, full mount list
 - **Pop any detail view out into its own OS window** — it refreshes independently and closes with its session
 - Remote telemetry runs on a dedicated SSH connection with automatic reconnect; local telemetry executes collectors directly without SSH
@@ -231,7 +231,7 @@ npm run tauri:build
 - **Mode:** GPU + System, GPU only, or System only.
 - **Ignore FS:** comma-separated filesystem types hidden from the disk summary (default: `tmpfs`, `devtmpfs`, `squashfs`, `proc`, `sysfs`, `cgroup`, `cgroup2`, `overlay`, `devfs`, `autofs`). The disk popover can temporarily reveal them.
 - Mount points are prioritized `/` → `/home` → `/data` → `/mnt*` → `/media*` → drive letters → others; disks ≥ 80% are flagged warning, ≥ 90% critical.
-- **Agents:** the System modes include a separate AGY/Codex/Claude Code card. Its CPU and memory values include descendants such as language servers, subagents, and background commands rather than only the launcher process.
+- **Agents:** the System modes include a separate AGY/Codex/Claude Code card. Its CPU and memory values include descendants such as language servers, subagents, and background commands rather than only the launcher process. AGY 1.0 conversation metadata and Claude Code status-line snapshots also supply context remaining; Claude subscriber snapshots can show the remaining 5-hour and 7-day limits.
 
 </details>
 
@@ -248,11 +248,11 @@ All metrics come from standard tools over SSH — nothing is installed on the se
 | Users | `who` | `who` | `quser` |
 | GPU | `nvidia-smi` (NVIDIA), `rocm-smi --json` (AMD/ROCm), `xpu-smi` / `intel_gpu_top` (Intel), plus `/sys/class/drm/card*/device` for uncovered adapters | `ioreg -c IOAccelerator` (Apple GPU utilization, no root needed) | `nvidia-smi` (NVIDIA, full metrics); WDDM GPU performance counters for AMD/Intel (utilization + VRAM) |
 | Top processes | `ps -eo … --sort=-%cpu` / `--sort=-rss` | `ps -Ao … -r` / `-m` | `Get-Process` (two-sample CPU delta) |
-| AI coding agents | `ps -axo …`; metadata tails from the detected user's local CLI session files | same | `Win32_Process` + `Get-Process`; metadata tails from local CLI session files |
+| AI coding agents | `ps -axo …`; metadata tails plus read-only AGY SQLite generator metadata through Python 3 when available | same | `Win32_Process` + `Get-Process`; metadata tails plus the same optional Python 3 AGY reader |
 
 Commands run with a 3-second timeout on a dedicated SSH connection (10 s on Windows to absorb PowerShell start-up). Windows commands are batched into a single PowerShell 5.1 invocation per poll and sent as `-EncodedCommand`, so they work with either cmd.exe or PowerShell as the OpenSSH default shell — nothing is installed and no admin rights are required. For a local Windows session, the same collectors use the system PowerShell directly with `CREATE_NO_WINDOW` and explicit UTF-8 text output, preventing polling consoles from appearing and preserving localized JSON fields. GpuTerm detects the remote OS and available GPU tools per host and shows a vendor tag on every card; `intel_gpu_top` needs root or `CAP_PERFMON`, and Apple GPU power/temperature would need root `powermetrics`, so they show as n/a. Linux DRM/sysfs supplies adapter identity and any driver-exported utilization/VRAM counters for GPUs not covered by a richer vendor collector. If no GPU source is present, the GPU section reports unavailable while everything else keeps working.
 
-Agent monitoring is read-only. Process totals are collected every telemetry interval; session metadata is refreshed at most every five seconds from recent Codex (`~/.codex/sessions`), Claude Code (`~/.claude/projects`), and AGY (`~/.gemini/antigravity-cli/brain`) records. GpuTerm extracts counters and identifiers only—prompt, response, environment, and authentication contents are never included in telemetry. Optional provider status-line integrations can publish richer AGY/Claude state to `~/.cache/gputerm/agent-status/{agy,claude}.json`.
+Agent monitoring is read-only. Process totals are collected every telemetry interval; session metadata is refreshed at most every five seconds from recent Codex (`~/.codex/sessions`) and Claude Code (`~/.claude/projects`) records. For AGY 1.0, GpuTerm uses Python 3's standard `sqlite3` module, when present, to read only `gen_metadata` from the two newest `~/.gemini/antigravity-cli/conversations/*.db` files. It decodes token counters, model name, and context size without selecting steps, prompts, responses, tool arguments, credentials, or environment data. Optional AGY/Claude status-line integrations can publish richer live state to `~/.cache/gputerm/agent-status/{agy,claude}.json`; Claude's official `context_window.remaining_percentage` and subscriber `rate_limits` fields are understood directly.
 
 </details>
 
@@ -381,7 +381,8 @@ GpuTerm is free for personal and noncommercial use under [PolyForm Noncommercial
 | Master password is rejected or forgotten | Check the password, or choose **Reset vault**. Profiles are kept, but all saved SSH passwords are deleted and must be entered again |
 | Host key mismatch | Verify the server fingerprint out-of-band, then remove the stale entry from `known_hosts.json` |
 | GPU shows unavailable | Confirm a GPU tool is installed (`nvidia-smi`, `rocm-smi`, `xpu-smi`, or `intel_gpu_top`) or Linux `/sys/class/drm` is readable; other metrics still work regardless |
-| Agents card is empty | Confirm `agy`, `codex`, or `claude` is running under a user visible to the telemetry account. CPU/RAM appears from the process tree; richer fields require metadata emitted by that CLI version |
+| Hybrid Windows PC only shows the dGPU | Update to the latest build. Idle Intel/AMD adapters are now retained from `Win32_VideoController` even when WDDM has not created a GPU Engine counter instance yet |
+| Agents card is empty | Confirm `agy`, `codex`, or `claude` is running under a user visible to the telemetry account. CPU/RAM appears from the process tree; AGY token/context metadata additionally needs `python3` or `python` on the monitored host |
 | Local Windows session flashes console windows or has no monitoring data | Fixed in v1.1.6-beta — update the app; local PowerShell collectors now run without a console and use UTF-8 output |
 | Windows remote shows “The system cannot find the path specified” | Fixed in v1.0.9-beta — older builds misdetected Windows hosts that have a `uname` port on PATH as Linux; update the app |
 | Korean input splits into jamo in the terminal | Fixed for macOS/WebKit clients — update to the latest release |
@@ -393,8 +394,8 @@ GpuTerm is free for personal and noncommercial use under [PolyForm Noncommercial
 - `known_hosts.json` uses SHA-256 fingerprints, not the OpenSSH known_hosts format
 - Telemetry supports local and remote Linux, macOS (Apple Silicon included), and Windows hosts; Apple GPU power/temperature and per-core CPU usage need root `powermetrics` and are not shown
 - GPU monitoring uses `nvidia-smi`, `rocm-smi`, `xpu-smi`, `intel_gpu_top`, Linux DRM/sysfs, macOS `ioreg`, or Windows WDDM performance counters; DRM shared-memory GPUs may expose utilization without dedicated VRAM, power, or temperature
-- Agent CPU/RAM/process-tree totals are always available when the CLI process is visible to the monitoring user. Model/token/context, AGY work state, Claude cost, and Codex rate-limit fields are best effort because CLI log/status schemas vary by provider version; unavailable fields show as n/a
-- Windows remotes: requires Windows PowerShell 5.1+ (preinstalled); load averages don't exist and show as n/a; AMD/Intel GPUs report utilization and dedicated VRAM only (no power/temperature, needs Windows 10 1709+ with a WDDM 2.x driver); process owners and GPU process command lines need elevation and fall back to n/a / process names; `quser` is missing on Home editions, so the Users section stays empty there; hybrid iGPU+dGPU hosts show both cards (counters are attributed by adapter LUID from the DirectX registry, falling back to a positional heuristic if that key is unavailable)
+- Agent CPU/RAM/process-tree totals are always available when the CLI process is visible to the monitoring user. AGY 1.0 token/context metadata needs Python 3 on the monitored host; AGY live quota/work state, Claude cost/subscriber limits, and provider-specific fields remain best effort because CLI log/status schemas vary. Unavailable fields show as n/a
+- Windows remotes: requires Windows PowerShell 5.1+ (preinstalled); load averages don't exist and show as n/a; AMD/Intel GPUs report utilization and dedicated VRAM only (no power/temperature, needs Windows 10 1709+ with a WDDM 2.x driver); process owners and GPU process command lines need elevation and fall back to n/a / process names; `quser` is missing on Home editions, so the Users section stays empty there; hybrid iGPU+dGPU hosts show both cards (counters are attributed by adapter LUID from the DirectX registry, idle adapters remain visible without an activity counter, and a positional heuristic is used if the key is unavailable)
 - macOS installer currently targets Apple Silicon only (Intel Macs: build from source)
 
 Issues and pull requests are welcome — please run the test suites above before submitting.

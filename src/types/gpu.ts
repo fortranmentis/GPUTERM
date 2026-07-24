@@ -87,6 +87,8 @@ export type AgentMetric = {
   contextUsedTokens: number | null;
   contextWindowTokens: number | null;
   contextUsedPercent: number | null;
+  contextRemainingTokens: number | null;
+  contextRemainingPercent: number | null;
   costUsd: number | null;
   sessionDurationSeconds: number | null;
   rateLimits: AgentRateLimitMetric[];
