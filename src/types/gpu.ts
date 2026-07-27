@@ -58,9 +58,39 @@ export type RemoteUserSession = {
 export type AgentRateLimitMetric = {
   label: string;
   group: string | null;
+  modelNames: string[];
+  remainingPercent: number | null;
   usedPercent: number | null;
   windowMinutes: number | null;
   resetsAt: number | null;
+  stale: boolean;
+};
+
+export type AgentQuotaHistoryLimit = {
+  group: string | null;
+  windowMinutes: number;
+  remainingPercent: number | null;
+};
+
+export type AgentQuotaHistoryPoint = {
+  capturedAt: number;
+  status: "available" | "unavailable";
+  limits: AgentQuotaHistoryLimit[];
+};
+
+export type AgentQuotaSnapshot = {
+  status: "available" | "setup-required" | "unsupported" | "stale" | "error";
+  source:
+    | "codex-app-server"
+    | "codex-session-log"
+    | "claude-statusline"
+    | "agy-usage-tui"
+    | "none";
+  capturedAt: number | null;
+  snapshotAgeSeconds: number | null;
+  message: string | null;
+  limits: AgentRateLimitMetric[];
+  history: AgentQuotaHistoryPoint[];
 };
 
 export type AgentWorkMetric = {
@@ -90,9 +120,14 @@ export type AgentMetric = {
   contextUsedPercent: number | null;
   contextRemainingTokens: number | null;
   contextRemainingPercent: number | null;
+  lastRequestInputTokens: number | null;
+  lastRequestOutputTokens: number | null;
+  lastRequestCacheCreationTokens: number | null;
+  lastRequestCacheReadTokens: number | null;
   costUsd: number | null;
   sessionDurationSeconds: number | null;
-  rateLimits: AgentRateLimitMetric[];
+  snapshotAgeSeconds: number | null;
+  quota: AgentQuotaSnapshot;
   subagents: AgentWorkMetric[];
   backgroundTasks: AgentWorkMetric[];
 };

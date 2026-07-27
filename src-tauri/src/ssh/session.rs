@@ -1,9 +1,10 @@
+use crate::ssh::agent_monitor::AgentQuotaHistories;
 use crate::ssh::credentials::{CredentialStore, CredentialVaultStatus, SecureCredentialStore};
 use crate::ssh::system_monitor::{RemoteOs, SystemMonitorSettings};
 use crate::ssh::terminal::TerminalHandle;
 use serde::{Deserialize, Serialize};
 use ssh2::{Channel, HashType, HostKeyType, Session};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fmt::Write as FmtWrite;
 use std::fs;
@@ -22,6 +23,7 @@ use uuid::Uuid;
 /// internally synchronized but operations on one session must be serialized,
 /// hence the per-entry mutex.
 pub type OpsSessions = Arc<Mutex<HashMap<String, Arc<Mutex<SshConnection>>>>>;
+pub type AgentQuotaRefreshes = Arc<Mutex<HashMap<String, HashSet<String>>>>;
 
 fn is_false(value: &bool) -> bool {
     !*value
@@ -39,6 +41,10 @@ pub struct AppState {
     /// Remote OS per session, detected once by the detail path so popover
     /// ticks skip the probe round-trips; cleared alongside the ops session.
     pub remote_os_cache: Arc<Mutex<HashMap<String, RemoteOs>>>,
+    /// Provider names queued by the UI for an immediate account-quota refresh.
+    pub agent_quota_refreshes: AgentQuotaRefreshes,
+    /// In-memory AGY quota history keyed by monitored host/account identity.
+    pub agent_quota_histories: AgentQuotaHistories,
 }
 
 #[derive(Clone)]

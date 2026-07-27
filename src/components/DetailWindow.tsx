@@ -25,7 +25,7 @@ const RESOURCE_META: Record<DetailResource, { title: string; icon: ReactNode }> 
   gpu: { title: "GPU details", icon: <Gauge size={16} /> },
   disk: { title: "Disks", icon: <HardDrive size={16} /> },
   users: { title: "Logged-in users", icon: <Users size={16} /> },
-  agents: { title: "Coding agents", icon: <Bot size={16} /> },
+  agents: { title: "AI DASH", icon: <Bot size={16} /> },
 };
 
 const DEFAULT_SETTINGS: TelemetrySettings = {
@@ -229,6 +229,7 @@ export function DetailWindow() {
           />
         ) : (
           <AgentDetailContent
+            sessionId={sessionId}
             agents={telemetry?.agents ?? []}
             error={telemetry?.errors.agents}
           />

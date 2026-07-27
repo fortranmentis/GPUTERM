@@ -786,7 +786,14 @@ fn start_system_monitor(app: AppHandle, state: &AppState, target: crate::ssh::se
         }
         stops.insert(target.session_id.clone(), Arc::clone(&stop));
     }
-    system_monitor::start(app, target, stop, Arc::clone(&state.telemetry_settings));
+    system_monitor::start(
+        app,
+        target,
+        stop,
+        Arc::clone(&state.telemetry_settings),
+        Arc::clone(&state.agent_quota_refreshes),
+        Arc::clone(&state.agent_quota_histories),
+    );
 }
 
 fn start_local_system_monitor(app: AppHandle, state: &AppState, session_id: String) {
@@ -797,13 +804,23 @@ fn start_local_system_monitor(app: AppHandle, state: &AppState, session_id: Stri
         }
         stops.insert(session_id.clone(), Arc::clone(&stop));
     }
-    system_monitor::start_local(app, session_id, stop, Arc::clone(&state.telemetry_settings));
+    system_monitor::start_local(
+        app,
+        session_id,
+        stop,
+        Arc::clone(&state.telemetry_settings),
+        Arc::clone(&state.agent_quota_refreshes),
+        Arc::clone(&state.agent_quota_histories),
+    );
 }
 
 fn stop_existing_session(state: &AppState, session_id: &str) {
     crate::ssh::session::drop_ops_session(&state.ops_sessions, session_id);
     if let Ok(mut cache) = state.remote_os_cache.lock() {
         cache.remove(session_id);
+    }
+    if let Ok(mut refreshes) = state.agent_quota_refreshes.lock() {
+        refreshes.remove(session_id);
     }
 
     if let Ok(mut stops) = state.telemetry_stops.lock() {

@@ -33,6 +33,8 @@ import {
   useSessionStore,
 } from "../stores/sessionStore";
 import type {
+  AgentMetric,
+  AgentRateLimitMetric,
   GpuMetric,
   TelemetryDisplayMode,
   TelemetrySettings,
@@ -54,7 +56,6 @@ import {
   formatTemperature,
   formatWatts,
 } from "../utils/format";
-import { formatBytes } from "../utils/formatBytes";
 
 type OpenResource = ResourceDetailType | "disk" | "users" | "agents" | null;
 
@@ -64,7 +65,7 @@ const DETAIL_TITLES: Record<Exclude<OpenResource, null>, string> = {
   gpu: "GPU details",
   disk: "Disks",
   users: "Logged-in users",
-  agents: "Coding agents",
+  agents: "AI DASH",
 };
 
 type RemoteTelemetryBarProps = {
@@ -114,14 +115,10 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
     () => [...new Set((telemetry?.users ?? []).map((session) => session.user))],
     [telemetry?.users],
   );
-  const agentSummary = useMemo(() => {
-    const agents = telemetry?.agents ?? [];
-    return {
-      providers: [...new Set(agents.map((agent) => agent.displayName))],
-      cpuPercent: agents.reduce((total, agent) => total + (agent.cpuPercent ?? 0), 0),
-      memoryBytes: agents.reduce((total, agent) => total + (agent.memoryBytes ?? 0), 0),
-    };
-  }, [telemetry?.agents]);
+  const agentQuotaRows = useMemo(
+    () => createAgentQuotaSummary(telemetry?.agents ?? []),
+    [telemetry?.agents],
+  );
 
   useEffect(() => {
     if (!connected) {
@@ -447,8 +444,9 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
       {connected && telemetry && showSystem && (
         <TelemetryButton
           buttonRef={agentsButtonRef}
-          title="Agents"
+          title="AI DASH"
           icon={<Bot size={16} />}
+          className="agent-summary-section"
           expanded={openResource === "agents"}
           onClick={() => openDetail("agents")}
         >
@@ -458,16 +456,10 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
                 {telemetry.agents.length}{" "}
                 {telemetry.agents.length === 1 ? "session" : "sessions"}
               </strong>
-              <span>
-                CPU {formatPercent(agentSummary.cpuPercent, 1)} · RAM{" "}
-                {formatBytes(agentSummary.memoryBytes)}
-              </span>
-              <span title={agentSummary.providers.join(", ")}>
-                {agentSummary.providers.join(", ")}
-              </span>
+              <AgentQuotaSummary rows={agentQuotaRows} />
             </>
           ) : (
-            <span>{telemetry.errors.agents ?? "No coding agents running"}</span>
+            <span>{telemetry.errors.agents ?? "No AI agents running"}</span>
           )}
         </TelemetryButton>
       )}
@@ -524,6 +516,7 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
       )}
       {openResource === "agents" && telemetry && (
         <AgentUsagePopover
+          sessionId={telemetry.sessionId}
           agents={telemetry.agents}
           error={telemetry.errors.agents}
           anchorRef={agentsButtonRef}
@@ -539,6 +532,7 @@ function TelemetryButton({
   buttonRef,
   title,
   icon,
+  className,
   expanded,
   onClick,
   children,
@@ -546,6 +540,7 @@ function TelemetryButton({
   buttonRef: RefObject<HTMLButtonElement | null>;
   title: string;
   icon: ReactNode;
+  className?: string;
   expanded: boolean;
   onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   children: ReactNode;
@@ -553,7 +548,7 @@ function TelemetryButton({
   return (
     <button
       ref={buttonRef}
-      className="telemetry-section"
+      className={`telemetry-section${className ? ` ${className}` : ""}`}
       type="button"
       aria-expanded={expanded}
       onClick={onClick}
@@ -561,6 +556,173 @@ function TelemetryButton({
       <div className="telemetry-section-title">{icon}<span>{title}</span></div>
       <div className="telemetry-section-body">{children}</div>
     </button>
+  );
+}
+
+type AgentQuotaSummaryCell = {
+  remainingPercent: number | null;
+  stale: boolean;
+  title: string;
+};
+
+type AgentQuotaSummaryRow = {
+  key: string;
+  label: string;
+  fiveHour: AgentQuotaSummaryCell;
+  weekly: AgentQuotaSummaryCell;
+};
+
+function createAgentQuotaSummary(agents: AgentMetric[]): AgentQuotaSummaryRow[] {
+  const latest = new Map<AgentMetric["provider"], AgentMetric>();
+  for (const agent of agents) {
+    const current = latest.get(agent.provider);
+    if (
+      !current ||
+      (agent.quota.capturedAt ?? 0) > (current.quota.capturedAt ?? 0)
+    ) {
+      latest.set(agent.provider, agent);
+    }
+  }
+
+  const rows: AgentQuotaSummaryRow[] = [];
+  const agy = latest.get("agy");
+  if (agy) {
+    rows.push(
+      createQuotaSummaryRow(
+        "agy-gemini",
+        "AGY · Gemini",
+        agy,
+        (group) => group?.toLowerCase().includes("gemini") === true,
+      ),
+      createQuotaSummaryRow(
+        "agy-claude-gpt",
+        "AGY · Claude/GPT",
+        agy,
+        (group) => {
+          const normalized = group?.toLowerCase() ?? "";
+          return normalized.includes("claude") || normalized.includes("gpt");
+        },
+      ),
+    );
+  }
+  const claude = latest.get("claude");
+  if (claude) {
+    rows.push(createQuotaSummaryRow("claude", "Claude Code", claude));
+  }
+  const codex = latest.get("codex");
+  if (codex) {
+    rows.push(createQuotaSummaryRow("codex", "Codex", codex));
+  }
+  return rows;
+}
+
+function createQuotaSummaryRow(
+  key: string,
+  label: string,
+  agent: AgentMetric,
+  matchesGroup: (group: string | null) => boolean = () => true,
+): AgentQuotaSummaryRow {
+  const find = (windowMinutes: number) =>
+    agent.quota.limits.find(
+      (limit) =>
+        limit.windowMinutes === windowMinutes && matchesGroup(limit.group),
+    );
+  return {
+    key,
+    label,
+    fiveHour: quotaSummaryCell(agent, find(5 * 60)),
+    weekly: quotaSummaryCell(agent, find(7 * 24 * 60)),
+  };
+}
+
+function quotaSummaryCell(
+  agent: AgentMetric,
+  limit: AgentRateLimitMetric | undefined,
+): AgentQuotaSummaryCell {
+  if (!limit) {
+    return {
+      remainingPercent: null,
+      stale: false,
+      title: `${agent.displayName}: quota data unavailable`,
+    };
+  }
+  const reset = limit.resetsAt == null
+    ? "Reset time unavailable"
+    : `Resets ${new Date(limit.resetsAt * 1000).toLocaleString()}`;
+  return {
+    remainingPercent: limit.stale ? null : limit.remainingPercent,
+    stale: limit.stale,
+    title: `${formatSummaryQuotaSource(agent.quota.source)} · ${reset}`,
+  };
+}
+
+function formatSummaryQuotaSource(source: AgentMetric["quota"]["source"]) {
+  switch (source) {
+    case "codex-app-server":
+      return "Live Codex account";
+    case "codex-session-log":
+      return "Codex session-log fallback";
+    case "claude-statusline":
+      return "Claude status line";
+    case "agy-usage-tui":
+      return "Experimental AGY /usage";
+    default:
+      return "Provider data unavailable";
+  }
+}
+
+function AgentQuotaSummary({ rows }: { rows: AgentQuotaSummaryRow[] }) {
+  return (
+    <div className="agent-summary-grid" aria-label="AI usage remaining">
+      <span className="agent-summary-column-label" />
+      <span className="agent-summary-column-label">5h</span>
+      <span className="agent-summary-column-label">Week</span>
+      {rows.map((row) => (
+        <div className="agent-summary-row" key={row.key}>
+          <span className="agent-summary-row-label" title={row.label}>
+            {row.label}
+          </span>
+          <AgentSummaryGauge label={`${row.label} 5-hour`} cell={row.fiveHour} />
+          <AgentSummaryGauge label={`${row.label} weekly`} cell={row.weekly} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AgentSummaryGauge({
+  label,
+  cell,
+}: {
+  label: string;
+  cell: AgentQuotaSummaryCell;
+}) {
+  const value = cell.remainingPercent == null
+    ? null
+    : Math.max(0, Math.min(100, cell.remainingPercent));
+  const level =
+    value == null ? "unknown" : value <= 10 ? "critical" : value <= 25 ? "warning" : "normal";
+  const reading = cell.stale
+    ? "reset"
+    : value == null
+      ? "n/a"
+      : `${Intl.NumberFormat("en", { maximumFractionDigits: 2 }).format(value)}%`;
+  return (
+    <span
+      className={`agent-summary-gauge ${level}`}
+      role="progressbar"
+      aria-label={`${label}: ${reading}`}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={value ?? undefined}
+      aria-valuetext={reading}
+      title={cell.title}
+    >
+      <span className="agent-summary-gauge-reading">{reading}</span>
+      <span className="agent-summary-gauge-track">
+        <span style={{ width: `${value ?? 0}%` }} />
+      </span>
+    </span>
   );
 }
 

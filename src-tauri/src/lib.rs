@@ -3,6 +3,7 @@ mod ssh;
 
 use native_drag::start_native_file_drag;
 
+use ssh::agent_monitor::{configure_claude_quota_monitor, refresh_agent_quota};
 use ssh::local_fs::{
     describe_local_paths, list_local_dir, load_app_settings, local_path_exists,
     update_recent_local_path,
@@ -53,6 +54,8 @@ pub fn run() {
             disconnect_terminal,
             get_telemetry_settings,
             update_telemetry_settings,
+            refresh_agent_quota,
+            configure_claude_quota_monitor,
             get_resource_details,
             sftp_list_dir,
             sftp_create_drag_out_paths,

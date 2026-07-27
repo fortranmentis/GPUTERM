@@ -6,17 +6,41 @@
 //! snapshots, and AGY worker state. Prompt, response, tool input/output, and
 //! authentication fields are never serialized into GpuTerm telemetry.
 
-use crate::ssh::system_monitor::{run_local_command_for, run_remote_command_for, RemoteOs};
+use crate::ssh::session::{target_for_active_session, with_ops_session, AppState};
+use crate::ssh::system_monitor::{
+    detect_remote_os, local_os, run_local_command_for, run_remote_command_for, RemoteOs,
+};
+use base64::Engine as _;
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
-use ssh2::Session;
+use ssh2::{Channel, Session};
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::fs;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tauri::State;
 
 const METADATA_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const CODEX_QUOTA_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+const AGY_QUOTA_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const CODEX_QUOTA_TIMEOUT: Duration = Duration::from_secs(5);
+const AGY_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+const AGY_QUOTA_TIMEOUT: Duration = Duration::from_secs(15);
+const AGY_USAGE_COMMAND: &[u8] = b"/usage\r";
+const AGY_QUOTA_HISTORY_WINDOW_SECONDS: u64 = 24 * 60 * 60;
+const AGY_QUOTA_HISTORY_BUCKET_SECONDS: u64 = 5 * 60;
+const AGY_QUOTA_HISTORY_MAX_POINTS: usize = 288;
 
+// `comm` is deliberately absent: macOS pads that column to sixteen characters,
+// which turns an absolute executable path into an unusable fragment. `args` is
+// the final column, so it is the one field that always arrives complete.
 const POSIX_PROCESS_COMMAND: &str =
-    "LC_ALL=C ps -axo pid=,ppid=,user=,%cpu=,rss=,etime=,comm=,args= 2>/dev/null || true";
+    "LC_ALL=C ps -axo pid=,ppid=,user=,%cpu=,rss=,etime=,args= 2>/dev/null || true";
 
 const WINDOWS_PROCESS_COMMAND: &str = r#"$ErrorActionPreference='SilentlyContinue'
 $logical = [Math]::Max(1, [int](Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors)
@@ -40,12 +64,23 @@ $rows = Get-CimInstance Win32_Process | ForEach-Object {
 [pscustomobject]@{ logicalCores = $logical; processes = @($rows) } | ConvertTo-Json -Depth 4 -Compress
 exit 0"#;
 
-const POSIX_METADATA_COMMAND: &str = r#"emit_agent_files() {
+const POSIX_METADATA_PRELUDE: &str = r#"emit_agent_tail() {
+  provider="$1"
+  file="$2"
+  [ -r "$file" ] || return 0
+  printf '__GPUTERM_AGENT_FILE__\t%s\t%s\n' "$provider" "$file"
+  tail -c 131072 "$file" 2>/dev/null
+  printf '\n__GPUTERM_AGENT_END__\n'
+}
+emit_agent_files() {
   provider="$1"
   root="$2"
   pattern="$3"
   [ -d "$root" ] || return 0
-  find "$root" -type f -name "$pattern" -exec ls -t {} + 2>/dev/null | head -n 2 |
+  # Subagent transcripts live under */subagents/ and describe a worker's own
+  # context rather than the session the user started. Excluding them keeps a
+  # worker's counters from overwriting the parent session's.
+  find "$root" -type f -name "$pattern" ! -path '*/subagents/*' -exec ls -t {} + 2>/dev/null | head -n 2 |
   while IFS= read -r file; do
     [ -r "$file" ] || continue
     printf '__GPUTERM_AGENT_FILE__\t%s\t%s\n' "$provider" "$file"
@@ -54,14 +89,26 @@ const POSIX_METADATA_COMMAND: &str = r#"emit_agent_files() {
     printf '\n__GPUTERM_AGENT_END__\n'
   done
 }
-emit_agent_files codex "$HOME/.codex/sessions" 'rollout-*.jsonl'
-emit_agent_files claude "$HOME/.claude/projects" '*.jsonl'
-# AGY 1.0 stores token metadata in SQLite/protobuf conversation records. Read
-# only the small generator-metadata blobs: no step payloads, prompts, model
-# responses, tool arguments, credentials, or environment values are selected.
-if command -v python3 >/dev/null 2>&1; then
-python3 - <<'GPUTERM_AGY_USAGE' 2>/dev/null
-import glob, json, os, sqlite3
+# Status-line snapshots are emitted after the transcripts so their richer
+# fields win the per-session merge. One file per session id keeps concurrent
+# sessions from overwriting each other.
+emit_agent_snapshots() {
+  provider="$1"
+  dir="$HOME/.cache/gputerm/agent-status/$provider"
+  if [ -d "$dir" ]; then
+    find "$dir" -type f -name '*.json' -exec ls -t {} + 2>/dev/null | head -n 4 |
+    while IFS= read -r file; do
+      emit_agent_tail "$provider" "$file"
+    done
+  fi
+  emit_agent_tail "$provider" "$HOME/.cache/gputerm/agent-status/$provider.json"
+}
+"#;
+
+/// AGY 1.0 stores token metadata in SQLite/protobuf conversation records. Read
+/// only the small generator-metadata blobs: no step payloads, prompts, model
+/// responses, tool arguments, credentials, or environment values are selected.
+const AGY_USAGE_PYTHON: &str = r#"import glob, json, os, sqlite3
 
 def read_varint(data, pos):
     value = 0
@@ -167,23 +214,19 @@ for path in paths:
     }
     print("__GPUTERM_AGENT_FILE__\tagy\t" + path)
     print(json.dumps(payload, separators=(",", ":")))
-    print("__GPUTERM_AGENT_END__")
-GPUTERM_AGY_USAGE
-fi
-for provider in agy claude; do
-  snapshot="$HOME/.cache/gputerm/agent-status/$provider.json"
-  if [ -r "$snapshot" ]; then
-    printf '__GPUTERM_AGENT_FILE__\t%s\t%s\n' "$provider" "$snapshot"
-    tail -c 131072 "$snapshot" 2>/dev/null
-    printf '\n__GPUTERM_AGENT_END__\n'
-  fi
-done
-true"#;
+    print("__GPUTERM_AGENT_END__")"#;
 
-const WINDOWS_METADATA_COMMAND: &str = r#"$ErrorActionPreference='SilentlyContinue'
+const WINDOWS_METADATA_PRELUDE: &str = r#"$ErrorActionPreference='SilentlyContinue'
+function Emit-AgentTail([string]$provider, [string]$path) {
+  if (-not (Test-Path -LiteralPath $path)) { return }
+  Write-Output ("__GPUTERM_AGENT_FILE__`t{0}`t{1}" -f $provider, $path)
+  Get-Content -LiteralPath $path -Tail 300 -ErrorAction SilentlyContinue
+  Write-Output '__GPUTERM_AGENT_END__'
+}
 function Emit-AgentFiles([string]$provider, [string]$root, [string]$filter) {
   if (-not (Test-Path -LiteralPath $root)) { return }
   Get-ChildItem -LiteralPath $root -Recurse -File -Filter $filter |
+    Where-Object { $_.FullName -notmatch '\\subagents\\' } |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 2 |
     ForEach-Object {
@@ -193,136 +236,173 @@ function Emit-AgentFiles([string]$provider, [string]$root, [string]$filter) {
       Write-Output '__GPUTERM_AGENT_END__'
     }
 }
-Emit-AgentFiles 'codex' (Join-Path $HOME '.codex\sessions') 'rollout-*.jsonl'
-Emit-AgentFiles 'claude' (Join-Path $HOME '.claude\projects') '*.jsonl'
-$agyPython = @'
-import glob, json, os, sqlite3
-
-def read_varint(data, pos):
-    value = 0
-    shift = 0
-    while pos < len(data) and shift < 70:
-        byte = data[pos]
-        pos += 1
-        value |= (byte & 0x7f) << shift
-        if byte < 0x80:
-            return value, pos
-        shift += 7
-    raise ValueError("invalid protobuf varint")
-
-def fields(data):
-    result = {}
-    pos = 0
-    while pos < len(data):
-        tag, pos = read_varint(data, pos)
-        number, wire = tag >> 3, tag & 7
-        if number == 0:
-            break
-        if wire == 0:
-            value, pos = read_varint(data, pos)
-        elif wire == 1:
-            value, pos = data[pos:pos + 8], pos + 8
-        elif wire == 2:
-            size, pos = read_varint(data, pos)
-            value, pos = data[pos:pos + size], pos + size
-        elif wire == 5:
-            value, pos = data[pos:pos + 4], pos + 4
-        else:
-            raise ValueError("unsupported protobuf wire type")
-        result.setdefault(number, []).append(value)
-    return result
-
-def child(parent, number):
-    for value in reversed(parent.get(number, [])):
-        if isinstance(value, (bytes, bytearray)):
-            try:
-                return fields(value)
-            except Exception:
-                pass
-    return {}
-
-def integer(parent, number):
-    for value in reversed(parent.get(number, [])):
-        if isinstance(value, int):
-            return value
-    return 0
-
-def text(parent, number):
-    for value in reversed(parent.get(number, [])):
-        if isinstance(value, (bytes, bytearray)):
-            try:
-                decoded = value.decode("utf-8").strip()
-            except Exception:
-                continue
-            if decoded:
-                return decoded
-    return None
-
-root = os.path.expanduser("~/.gemini/antigravity-cli/conversations")
-paths = sorted(glob.glob(os.path.join(root, "*.db")), key=os.path.getmtime, reverse=True)[:2]
-for path in paths:
-    total_input = total_output = 0
-    context_used = context_window = 0
-    model = None
-    try:
-        uri = "file:" + path.replace("?", "%3f") + "?mode=ro&immutable=1"
-        connection = sqlite3.connect(uri, uri=True)
-        rows = connection.execute("SELECT data FROM gen_metadata ORDER BY idx").fetchall()
-        connection.close()
-        for (blob,) in rows:
-            outer = fields(bytes(blob))
-            generation = child(outer, 1)
-            usage = child(generation, 4)
-            if not usage:
-                continue
-            current_input = integer(usage, 2) + integer(usage, 5) + integer(usage, 6)
-            current_output = integer(usage, 3)
-            total_input += current_input
-            total_output += current_output
-            context_used = current_input
-            config = child(generation, 15)
-            context_window = integer(config, 2) or context_window
-            model = text(generation, 21) or model
-    except Exception:
-        continue
-    if not (total_input or total_output or context_used or model):
-        continue
-    payload = {
-        "conversation_id": os.path.splitext(os.path.basename(path))[0],
-        "model": model,
-        "input_tokens": total_input or None,
-        "output_tokens": total_output or None,
-        "total_tokens": (total_input + total_output) or None,
-        "context_window": {
-            "context_used_tokens": context_used or None,
-            "context_window_size": context_window or None,
-        },
-    }
-    print("__GPUTERM_AGENT_FILE__\tagy\t" + path)
-    print(json.dumps(payload, separators=(",", ":")))
-    print("__GPUTERM_AGENT_END__")
-'@
-$python = Get-Command python3.exe -ErrorAction SilentlyContinue
-if (-not $python) { $python = Get-Command python.exe -ErrorAction SilentlyContinue }
-if ($python) { & $python.Source -c $agyPython 2>$null }
-foreach ($provider in @('agy', 'claude')) {
-  $snapshot = Join-Path $HOME ".cache\gputerm\agent-status\$provider.json"
-  if (Test-Path -LiteralPath $snapshot) {
-    Write-Output ("__GPUTERM_AGENT_FILE__`t{0}`t{1}" -f $provider, $snapshot)
-    Get-Content -LiteralPath $snapshot -Tail 300 -ErrorAction SilentlyContinue
-    Write-Output '__GPUTERM_AGENT_END__'
+function Emit-AgentSnapshots([string]$provider) {
+  $dir = Join-Path $HOME ".cache\gputerm\agent-status\$provider"
+  if (Test-Path -LiteralPath $dir) {
+    Get-ChildItem -LiteralPath $dir -File -Filter '*.json' |
+      Sort-Object LastWriteTime -Descending |
+      Select-Object -First 4 |
+      ForEach-Object { Emit-AgentTail $provider $_.FullName }
   }
+  Emit-AgentTail $provider (Join-Path $HOME ".cache\gputerm\agent-status\$provider.json")
 }
-exit 0"#;
+"#;
+
+/// Builds the metadata scrape for the providers that actually have a process
+/// running. Skipping the other blocks keeps the five-second poll from running
+/// an unnecessary `find` or Python interpreter on the remote host.
+fn metadata_command(os: RemoteOs, providers: &HashSet<Provider>) -> String {
+    let mut script = String::new();
+    if os == RemoteOs::Windows {
+        script.push_str(WINDOWS_METADATA_PRELUDE);
+        if providers.contains(&Provider::Codex) {
+            script.push_str(
+                "Emit-AgentFiles 'codex' (Join-Path $HOME '.codex\\sessions') 'rollout-*.jsonl'\n",
+            );
+        }
+        if providers.contains(&Provider::Claude) {
+            script.push_str(
+                "Emit-AgentFiles 'claude' (Join-Path $HOME '.claude\\projects') '*.jsonl'\n",
+            );
+        }
+        if providers.contains(&Provider::Agy) {
+            script.push_str("$agyPython = @'\n");
+            script.push_str(AGY_USAGE_PYTHON);
+            script.push_str("\n'@\n$python = Get-Command python3.exe -ErrorAction SilentlyContinue\nif (-not $python) { $python = Get-Command python.exe -ErrorAction SilentlyContinue }\nif ($python) { & $python.Source -c $agyPython 2>$null }\n");
+            script.push_str("Emit-AgentSnapshots 'agy'\n");
+        }
+        if providers.contains(&Provider::Claude) {
+            script.push_str("Emit-AgentSnapshots 'claude'\n");
+        }
+        script.push_str("exit 0");
+        return script;
+    }
+    script.push_str(POSIX_METADATA_PRELUDE);
+    if providers.contains(&Provider::Codex) {
+        script.push_str("emit_agent_files codex \"$HOME/.codex/sessions\" 'rollout-*.jsonl'\n");
+    }
+    if providers.contains(&Provider::Claude) {
+        script.push_str("emit_agent_files claude \"$HOME/.claude/projects\" '*.jsonl'\n");
+    }
+    if providers.contains(&Provider::Agy) {
+        script.push_str("if command -v python3 >/dev/null 2>&1; then\npython3 - <<'GPUTERM_AGY_USAGE' 2>/dev/null\n");
+        script.push_str(AGY_USAGE_PYTHON);
+        script.push_str("\nGPUTERM_AGY_USAGE\nfi\n");
+        script.push_str("emit_agent_snapshots agy\n");
+    }
+    if providers.contains(&Provider::Claude) {
+        script.push_str("emit_agent_snapshots claude\n");
+    }
+    script.push_str("true\n");
+    script
+}
 
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRateLimitMetric {
     label: String,
     group: Option<String>,
+    model_names: Vec<String>,
+    remaining_percent: Option<f64>,
     used_percent: Option<f64>,
     window_minutes: Option<u64>,
     resets_at: Option<u64>,
+    /// The window already rolled over, so `used_percent` describes a window
+    /// that no longer exists. The UI reports a reset instead of a balance.
+    stale: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentQuotaHistoryLimit {
+    group: Option<String>,
+    window_minutes: u64,
+    remaining_percent: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentQuotaHistoryPoint {
+    captured_at: u64,
+    status: String,
+    limits: Vec<AgentQuotaHistoryLimit>,
+}
+
+pub type AgentQuotaHistories = Arc<Mutex<HashMap<String, Vec<AgentQuotaHistoryPoint>>>>;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentQuotaSnapshot {
+    status: String,
+    source: String,
+    captured_at: Option<u64>,
+    snapshot_age_seconds: Option<u64>,
+    message: Option<String>,
+    limits: Vec<AgentRateLimitMetric>,
+    history: Vec<AgentQuotaHistoryPoint>,
+}
+
+impl Default for AgentQuotaSnapshot {
+    fn default() -> Self {
+        Self {
+            status: "error".to_string(),
+            source: "none".to_string(),
+            captured_at: None,
+            snapshot_age_seconds: None,
+            message: None,
+            limits: Vec::new(),
+            history: Vec::new(),
+        }
+    }
+}
+
+impl AgentQuotaSnapshot {
+    fn unavailable(provider: Provider) -> Self {
+        let (status, message) = match provider {
+            Provider::Claude => (
+                "setup-required",
+                "Set up the GpuTerm Claude status line to monitor 5-hour and weekly limits.",
+            ),
+            Provider::Agy => (
+                "unsupported",
+                "AGY /usage could not be read automatically. Open /usage in AGY to view the current quota.",
+            ),
+            Provider::Codex => (
+                "error",
+                "Codex account limits are unavailable. A recent session-log snapshot will be used when possible.",
+            ),
+        };
+        Self {
+            status: status.to_string(),
+            source: "none".to_string(),
+            captured_at: None,
+            snapshot_age_seconds: None,
+            message: Some(message.to_string()),
+            limits: Vec::new(),
+            history: Vec::new(),
+        }
+    }
+
+    fn available(
+        source: &str,
+        captured_at: Option<u64>,
+        limits: Vec<AgentRateLimitMetric>,
+        now: u64,
+    ) -> Self {
+        let stale = !limits.is_empty() && limits.iter().all(|limit| limit.stale);
+        Self {
+            status: if stale { "stale" } else { "available" }.to_string(),
+            source: source.to_string(),
+            captured_at,
+            snapshot_age_seconds: captured_at.map(|value| now.saturating_sub(value)),
+            message: stale.then(|| {
+                "The reported quota window has reset; waiting for a fresh provider snapshot."
+                    .to_string()
+            }),
+            limits,
+            history: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -356,9 +436,16 @@ pub struct AgentMetric {
     context_used_percent: Option<f64>,
     context_remaining_tokens: Option<u64>,
     context_remaining_percent: Option<f64>,
+    last_request_input_tokens: Option<u64>,
+    last_request_output_tokens: Option<u64>,
+    last_request_cache_creation_tokens: Option<u64>,
+    last_request_cache_read_tokens: Option<u64>,
     cost_usd: Option<f64>,
     session_duration_seconds: Option<f64>,
-    rate_limits: Vec<AgentRateLimitMetric>,
+    /// Age of the status-line snapshot these numbers came from. Absent when the
+    /// provider's own session records supplied them.
+    snapshot_age_seconds: Option<u64>,
+    quota: AgentQuotaSnapshot,
     subagents: Vec<AgentWorkMetric>,
     background_tasks: Vec<AgentWorkMetric>,
 }
@@ -423,8 +510,17 @@ struct AgentSessionMetadata {
     context_used_percent: Option<f64>,
     context_remaining_tokens: Option<u64>,
     context_remaining_percent: Option<f64>,
+    last_request_input_tokens: Option<u64>,
+    last_request_output_tokens: Option<u64>,
+    last_request_cache_creation_tokens: Option<u64>,
+    last_request_cache_read_tokens: Option<u64>,
     cost_usd: Option<f64>,
     session_duration_seconds: Option<f64>,
+    snapshot_age_seconds: Option<u64>,
+    captured_at: Option<u64>,
+    /// Process id the status-line snapshot belongs to, used to attribute usage
+    /// to the right session when several run at once.
+    pid_hint: Option<u32>,
     rate_limits: Vec<AgentRateLimitMetric>,
     subagents: Vec<AgentWorkMetric>,
     background_tasks: Vec<AgentWorkMetric>,
@@ -433,7 +529,14 @@ struct AgentSessionMetadata {
 #[derive(Default)]
 pub struct AgentMonitorState {
     last_metadata_scan: Option<Instant>,
+    last_metadata_providers: HashSet<Provider>,
     metadata: HashMap<Provider, Vec<AgentSessionMetadata>>,
+    quotas: HashMap<Provider, AgentQuotaSnapshot>,
+    last_quota_refresh: HashMap<Provider, Instant>,
+    forced_quota_refresh: HashSet<Provider>,
+    agy_history_key: Option<String>,
+    agy_histories: Option<AgentQuotaHistories>,
+    agy_history: Vec<AgentQuotaHistoryPoint>,
     windows_cpu: HashMap<u32, f64>,
     windows_cpu_sampled_at: Option<Instant>,
 }
@@ -450,16 +553,20 @@ pub fn collect_remote_agents(
     };
     let output = run_remote_command_for(session, os, command)?;
     let processes = parse_processes(os, &output, state)?;
-    if !processes
-        .iter()
-        .any(|process| provider_for_process(process).is_some())
-    {
+    let providers = detected_providers(&processes);
+    if providers.is_empty() {
         return Ok(Vec::new());
     }
-    refresh_metadata_if_due(state, os, |command| {
+    refresh_metadata_if_due(state, os, &providers, |command| {
         run_remote_command_for(session, os, command)
     });
-    Ok(build_agent_metrics(&processes, &state.metadata))
+    refresh_provider_quotas_remote(session, os, &providers, state);
+    update_quota_snapshots(state, now_epoch_seconds());
+    Ok(build_agent_metrics(
+        &processes,
+        &state.metadata,
+        &state.quotas,
+    ))
 }
 
 pub fn collect_local_agents(
@@ -473,35 +580,774 @@ pub fn collect_local_agents(
     };
     let output = run_local_command_for(os, command)?;
     let processes = parse_processes(os, &output, state)?;
-    if !processes
-        .iter()
-        .any(|process| provider_for_process(process).is_some())
-    {
+    let providers = detected_providers(&processes);
+    if providers.is_empty() {
         return Ok(Vec::new());
     }
-    refresh_metadata_if_due(state, os, |command| run_local_command_for(os, command));
-    Ok(build_agent_metrics(&processes, &state.metadata))
+    refresh_metadata_if_due(state, os, &providers, |command| {
+        run_local_command_for(os, command)
+    });
+    refresh_provider_quotas_local(os, &providers, state);
+    update_quota_snapshots(state, now_epoch_seconds());
+    Ok(build_agent_metrics(
+        &processes,
+        &state.metadata,
+        &state.quotas,
+    ))
 }
 
-fn refresh_metadata_if_due<F>(state: &mut AgentMonitorState, os: RemoteOs, run: F)
-where
+fn detected_providers(processes: &[ProcessSample]) -> HashSet<Provider> {
+    processes.iter().filter_map(provider_for_process).collect()
+}
+
+fn refresh_metadata_if_due<F>(
+    state: &mut AgentMonitorState,
+    os: RemoteOs,
+    providers: &HashSet<Provider>,
+    run: F,
+) where
     F: FnOnce(&str) -> Result<String, String>,
 {
-    let due = state
-        .last_metadata_scan
-        .map(|last| last.elapsed() >= METADATA_REFRESH_INTERVAL)
-        .unwrap_or(true);
+    // A newly started agent should not wait out the throttle before its usage
+    // appears, so a changed provider set forces an immediate scan.
+    let due = *providers != state.last_metadata_providers
+        || state
+            .last_metadata_scan
+            .map(|last| last.elapsed() >= METADATA_REFRESH_INTERVAL)
+            .unwrap_or(true);
     if !due {
         return;
     }
     state.last_metadata_scan = Some(Instant::now());
-    let command = if os == RemoteOs::Windows {
-        WINDOWS_METADATA_COMMAND
-    } else {
-        POSIX_METADATA_COMMAND
+    state.last_metadata_providers = providers.clone();
+    if let Ok(output) = run(&metadata_command(os, providers)) {
+        let now = now_epoch_seconds();
+        state.metadata = parse_metadata_output(&output, now);
+        merge_metadata_quota_fallbacks(state, providers, now);
+    }
+}
+
+impl AgentMonitorState {
+    pub fn configure_agy_history(&mut self, key: String, histories: AgentQuotaHistories) {
+        self.agy_history_key = Some(key);
+        self.agy_histories = Some(histories);
+        sync_agy_history(self, now_epoch_seconds());
+    }
+
+    pub fn force_quota_refresh(&mut self, provider: &str) {
+        if let Some(provider) = Provider::parse(provider) {
+            self.forced_quota_refresh.insert(provider);
+        }
+    }
+}
+
+fn quota_refresh_due(
+    state: &mut AgentMonitorState,
+    provider: Provider,
+    interval: Duration,
+) -> bool {
+    if state.forced_quota_refresh.remove(&provider) {
+        return true;
+    }
+    state
+        .last_quota_refresh
+        .get(&provider)
+        .map(|last| last.elapsed() >= interval)
+        .unwrap_or(true)
+}
+
+fn merge_metadata_quota_fallbacks(
+    state: &mut AgentMonitorState,
+    providers: &HashSet<Provider>,
+    now: u64,
+) {
+    for provider in providers {
+        // AGY account quota comes only from the experimental live `/usage`
+        // probe. Cached status payloads may still enrich session/context
+        // metadata, but must never masquerade as a successful live quota read.
+        if *provider == Provider::Agy {
+            state
+                .quotas
+                .entry(*provider)
+                .or_insert_with(|| AgentQuotaSnapshot::unavailable(*provider));
+            continue;
+        }
+        let Some(sessions) = state.metadata.get(provider) else {
+            state
+                .quotas
+                .entry(*provider)
+                .or_insert_with(|| AgentQuotaSnapshot::unavailable(*provider));
+            continue;
+        };
+        let newest = sessions
+            .iter()
+            .filter(|metadata| !metadata.rate_limits.is_empty())
+            .max_by_key(|metadata| metadata.captured_at.unwrap_or(0));
+        let Some(metadata) = newest else {
+            state
+                .quotas
+                .entry(*provider)
+                .or_insert_with(|| AgentQuotaSnapshot::unavailable(*provider));
+            continue;
+        };
+        let source = match provider {
+            Provider::Codex => "codex-session-log",
+            Provider::Claude => "claude-statusline",
+            Provider::Agy => unreachable!("AGY quota is collected only from the live PTY probe"),
+        };
+        let fallback = AgentQuotaSnapshot::available(
+            source,
+            metadata.captured_at,
+            metadata.rate_limits.clone(),
+            now,
+        );
+        let replace = match state.quotas.get(provider) {
+            None => true,
+            Some(current) if *provider == Provider::Claude => {
+                fallback.captured_at.unwrap_or(0) >= current.captured_at.unwrap_or(0)
+            }
+            Some(current) if *provider == Provider::Codex => current.source != "codex-app-server",
+            Some(_) => false,
+        };
+        if replace {
+            state.quotas.insert(*provider, fallback);
+        }
+    }
+}
+
+fn refresh_provider_quotas_local(
+    os: RemoteOs,
+    providers: &HashSet<Provider>,
+    state: &mut AgentMonitorState,
+) {
+    let now = now_epoch_seconds();
+    if providers.contains(&Provider::Codex)
+        && quota_refresh_due(state, Provider::Codex, CODEX_QUOTA_REFRESH_INTERVAL)
+    {
+        state
+            .last_quota_refresh
+            .insert(Provider::Codex, Instant::now());
+        match query_codex_quota_local(now) {
+            Ok(snapshot) => {
+                state.quotas.insert(Provider::Codex, snapshot);
+            }
+            Err(_) => {
+                // A failed live read must not leave an arbitrarily old
+                // app-server value looking current. Re-evaluate the newest
+                // session-log snapshot as the documented fallback.
+                state.quotas.remove(&Provider::Codex);
+                merge_metadata_quota_fallbacks(state, providers, now);
+            }
+        }
+    }
+    if providers.contains(&Provider::Agy)
+        && quota_refresh_due(state, Provider::Agy, AGY_QUOTA_REFRESH_INTERVAL)
+    {
+        state
+            .last_quota_refresh
+            .insert(Provider::Agy, Instant::now());
+        match query_agy_quota_local(os, now) {
+            Ok(snapshot) => {
+                record_agy_history(state, now, Some(&snapshot));
+                state.quotas.insert(Provider::Agy, snapshot);
+            }
+            Err(error) => {
+                record_agy_history(state, now, None);
+                let mut unavailable = AgentQuotaSnapshot::unavailable(Provider::Agy);
+                unavailable.message = Some(format!(
+                    "AGY /usage automatic read failed: {}. Open /usage in AGY to view the current quota.",
+                    error
+                ));
+                state.quotas.insert(Provider::Agy, unavailable);
+            }
+        }
+    }
+}
+
+fn refresh_provider_quotas_remote(
+    session: &Session,
+    os: RemoteOs,
+    providers: &HashSet<Provider>,
+    state: &mut AgentMonitorState,
+) {
+    let now = now_epoch_seconds();
+    if providers.contains(&Provider::Codex)
+        && quota_refresh_due(state, Provider::Codex, CODEX_QUOTA_REFRESH_INTERVAL)
+    {
+        state
+            .last_quota_refresh
+            .insert(Provider::Codex, Instant::now());
+        match query_codex_quota_remote(session, os, now) {
+            Ok(snapshot) => {
+                state.quotas.insert(Provider::Codex, snapshot);
+            }
+            Err(_) => {
+                state.quotas.remove(&Provider::Codex);
+                merge_metadata_quota_fallbacks(state, providers, now);
+            }
+        }
+    }
+    if providers.contains(&Provider::Agy)
+        && quota_refresh_due(state, Provider::Agy, AGY_QUOTA_REFRESH_INTERVAL)
+    {
+        state
+            .last_quota_refresh
+            .insert(Provider::Agy, Instant::now());
+        match query_agy_quota_remote(session, os, now) {
+            Ok(snapshot) => {
+                record_agy_history(state, now, Some(&snapshot));
+                state.quotas.insert(Provider::Agy, snapshot);
+            }
+            Err(error) => {
+                record_agy_history(state, now, None);
+                let mut unavailable = AgentQuotaSnapshot::unavailable(Provider::Agy);
+                unavailable.message = Some(format!(
+                    "AGY /usage automatic read failed: {}. Open /usage in AGY to view the current quota.",
+                    error
+                ));
+                state.quotas.insert(Provider::Agy, unavailable);
+            }
+        }
+    }
+}
+
+fn update_quota_snapshots(state: &mut AgentMonitorState, now: u64) {
+    sync_agy_history(state, now);
+    for snapshot in state.quotas.values_mut() {
+        snapshot.snapshot_age_seconds = snapshot
+            .captured_at
+            .map(|captured_at| now.saturating_sub(captured_at));
+        for limit in &mut snapshot.limits {
+            limit.stale = limit
+                .resets_at
+                .is_some_and(|resets_at| resets_at.saturating_add(RESET_STALE_GRACE_SECONDS) < now);
+        }
+        let all_windows_expired =
+            !snapshot.limits.is_empty() && snapshot.limits.iter().all(|limit| limit.stale);
+        if all_windows_expired {
+            snapshot.status = "stale".to_string();
+            snapshot.message = Some(
+                "The reported quota window has reset; waiting for a fresh provider snapshot."
+                    .to_string(),
+            );
+        } else if snapshot.status == "stale" {
+            snapshot.status = "available".to_string();
+            snapshot.message = None;
+        }
+    }
+    if let Some(snapshot) = state.quotas.get_mut(&Provider::Agy) {
+        snapshot.history = state.agy_history.clone();
+    }
+}
+
+fn record_agy_history(
+    state: &mut AgentMonitorState,
+    captured_at: u64,
+    snapshot: Option<&AgentQuotaSnapshot>,
+) {
+    let point = AgentQuotaHistoryPoint {
+        captured_at,
+        status: if snapshot.is_some() {
+            "available"
+        } else {
+            "unavailable"
+        }
+        .to_string(),
+        limits: snapshot
+            .into_iter()
+            .flat_map(|snapshot| snapshot.limits.iter())
+            .filter_map(|limit| {
+                let window_minutes = limit.window_minutes?;
+                matches!(window_minutes, 300 | 10_080).then(|| AgentQuotaHistoryLimit {
+                    group: limit.group.clone(),
+                    window_minutes,
+                    remaining_percent: (!limit.stale).then_some(limit.remaining_percent).flatten(),
+                })
+            })
+            .collect(),
     };
-    if let Ok(output) = run(command) {
-        state.metadata = parse_metadata_output(&output);
+    let key = state.agy_history_key.clone();
+    let histories = state.agy_histories.clone();
+    if let (Some(key), Some(histories)) = (key, histories) {
+        if let Ok(mut histories) = histories.lock() {
+            let history = histories.entry(key).or_default();
+            upsert_agy_history_point(history, point, captured_at);
+            state.agy_history = history.clone();
+            return;
+        }
+    }
+    upsert_agy_history_point(&mut state.agy_history, point, captured_at);
+}
+
+fn sync_agy_history(state: &mut AgentMonitorState, now: u64) {
+    let key = state.agy_history_key.clone();
+    let histories = state.agy_histories.clone();
+    if let (Some(key), Some(histories)) = (key, histories) {
+        if let Ok(mut histories) = histories.lock() {
+            let history = histories.entry(key).or_default();
+            trim_agy_history(history, now);
+            state.agy_history = history.clone();
+            return;
+        }
+    }
+    trim_agy_history(&mut state.agy_history, now);
+}
+
+fn upsert_agy_history_point(
+    history: &mut Vec<AgentQuotaHistoryPoint>,
+    point: AgentQuotaHistoryPoint,
+    now: u64,
+) {
+    let bucket = point.captured_at / AGY_QUOTA_HISTORY_BUCKET_SECONDS;
+    if let Some(existing) = history
+        .iter_mut()
+        .find(|existing| existing.captured_at / AGY_QUOTA_HISTORY_BUCKET_SECONDS == bucket)
+    {
+        *existing = point;
+    } else {
+        history.push(point);
+        history.sort_by_key(|point| point.captured_at);
+    }
+    trim_agy_history(history, now);
+}
+
+fn trim_agy_history(history: &mut Vec<AgentQuotaHistoryPoint>, now: u64) {
+    let cutoff = now.saturating_sub(AGY_QUOTA_HISTORY_WINDOW_SECONDS);
+    history.retain(|point| point.captured_at >= cutoff);
+    if history.len() > AGY_QUOTA_HISTORY_MAX_POINTS {
+        history.drain(..history.len() - AGY_QUOTA_HISTORY_MAX_POINTS);
+    }
+}
+
+fn codex_initialize_request() -> &'static str {
+    r#"{"id":1,"method":"initialize","params":{"clientInfo":{"name":"gputerm-monitor","version":"1"},"capabilities":{"experimentalApi":true}}}"#
+}
+
+fn codex_rate_limit_request() -> &'static str {
+    r#"{"id":2,"method":"account/rateLimits/read","params":null}"#
+}
+
+fn query_codex_quota_local(now: u64) -> Result<AgentQuotaSnapshot, String> {
+    #[cfg(target_os = "windows")]
+    let mut command = Command::new("codex");
+    #[cfg(not(target_os = "windows"))]
+    let mut command = {
+        let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into());
+        let mut command = Command::new(shell);
+        command.args(["-lc", "exec codex app-server"]);
+        command
+    };
+    #[cfg(target_os = "windows")]
+    command.arg("app-server");
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to start codex app-server: {}", error))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "codex app-server stdin unavailable".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "codex app-server stdout unavailable".to_string())?;
+    let (sender, receiver) = mpsc::channel::<String>();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let result = (|| {
+        writeln!(stdin, "{}", codex_initialize_request())
+            .and_then(|_| stdin.flush())
+            .map_err(|error| format!("failed to initialize codex app-server: {}", error))?;
+        wait_for_json_response(&receiver, 1, CODEX_QUOTA_TIMEOUT)?;
+        writeln!(stdin, "{}", codex_rate_limit_request())
+            .and_then(|_| stdin.flush())
+            .map_err(|error| format!("failed to request Codex limits: {}", error))?;
+        let response = wait_for_json_response(&receiver, 2, CODEX_QUOTA_TIMEOUT)?;
+        parse_codex_quota_response(&response, now)
+    })();
+    drop(stdin);
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+fn wait_for_json_response(
+    receiver: &mpsc::Receiver<String>,
+    id: u64,
+    timeout: Duration,
+) -> Result<Value, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!("provider response {} timed out", id));
+        }
+        let line = receiver
+            .recv_timeout(remaining)
+            .map_err(|_| format!("provider response {} timed out", id))?;
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if value_u64(&value, "id") == Some(id) {
+            if let Some(error) = value.get("error") {
+                return Err(format!("provider request failed: {}", error));
+            }
+            return Ok(value);
+        }
+    }
+}
+
+fn query_codex_quota_remote(
+    session: &Session,
+    os: RemoteOs,
+    now: u64,
+) -> Result<AgentQuotaSnapshot, String> {
+    let previous_timeout = session.timeout();
+    session.set_timeout(CODEX_QUOTA_TIMEOUT.as_millis() as u32);
+    let result = (|| {
+        let mut channel = session
+            .channel_session()
+            .map_err(|error| format!("failed to open Codex quota channel: {}", error))?;
+        let command = if os == RemoteOs::Windows {
+            "codex app-server"
+        } else {
+            "exec \"${SHELL:-/bin/sh}\" -lc 'exec codex app-server'"
+        };
+        channel
+            .exec(command)
+            .map_err(|error| format!("failed to start remote codex app-server: {}", error))?;
+        writeln!(channel, "{}", codex_initialize_request())
+            .and_then(|_| channel.flush())
+            .map_err(|error| format!("failed to initialize remote codex app-server: {}", error))?;
+        read_channel_json_response(&mut channel, 1)?;
+        writeln!(channel, "{}", codex_rate_limit_request())
+            .and_then(|_| channel.flush())
+            .map_err(|error| format!("failed to request remote Codex limits: {}", error))?;
+        let response = read_channel_json_response(&mut channel, 2)?;
+        let _ = channel.send_eof();
+        let _ = channel.close();
+        parse_codex_quota_response(&response, now)
+    })();
+    session.set_timeout(previous_timeout);
+    result
+}
+
+fn read_channel_json_response(channel: &mut Channel, id: u64) -> Result<Value, String> {
+    let mut pending = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    loop {
+        let count = channel
+            .read(&mut buffer)
+            .map_err(|error| format!("provider response read failed: {}", error))?;
+        if count == 0 {
+            return Err(format!("provider response {} closed early", id));
+        }
+        pending.extend_from_slice(&buffer[..count]);
+        while let Some(position) = pending.iter().position(|byte| *byte == b'\n') {
+            let line = pending.drain(..=position).collect::<Vec<_>>();
+            let Ok(value) = serde_json::from_slice::<Value>(&line) else {
+                continue;
+            };
+            if value_u64(&value, "id") == Some(id) {
+                if let Some(error) = value.get("error") {
+                    return Err(format!("provider request failed: {}", error));
+                }
+                return Ok(value);
+            }
+        }
+    }
+}
+
+fn parse_codex_quota_response(response: &Value, now: u64) -> Result<AgentQuotaSnapshot, String> {
+    let result = response
+        .get("result")
+        .ok_or_else(|| "Codex rate-limit response has no result".to_string())?;
+    let mut snapshots = Vec::<(&str, &Value)>::new();
+    if let Some(by_id) = result.get("rateLimitsByLimitId").and_then(Value::as_object) {
+        for (limit_id, snapshot) in by_id {
+            snapshots.push((limit_id.as_str(), snapshot));
+        }
+    }
+    if snapshots.is_empty() {
+        if let Some(snapshot) = result.get("rateLimits") {
+            snapshots.push(("codex", snapshot));
+        }
+    }
+    let grouped = snapshots.len() > 1;
+    let mut limits = Vec::new();
+    for (limit_id, snapshot) in snapshots {
+        let group = value_string(snapshot, "limitName")
+            .or_else(|| value_string(snapshot, "limitId"))
+            .or_else(|| grouped.then(|| limit_id.to_string()));
+        let mut parsed = parse_rate_limits(snapshot.as_object().map(|_| snapshot), now);
+        if grouped || group.as_deref().is_some_and(|value| value != "codex") {
+            for limit in &mut parsed {
+                limit.group = group.clone();
+            }
+        }
+        limits.extend(parsed);
+    }
+    if limits.is_empty() {
+        return Err("Codex account returned no rate-limit windows".to_string());
+    }
+    Ok(AgentQuotaSnapshot::available(
+        "codex-app-server",
+        Some(now),
+        limits,
+        now,
+    ))
+}
+
+fn query_agy_quota_local(os: RemoteOs, now: u64) -> Result<AgentQuotaSnapshot, String> {
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 44,
+            cols: 140,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|error| format!("failed to open AGY PTY: {}", error))?;
+    let mut command = if os == RemoteOs::Windows {
+        CommandBuilder::new("agy")
+    } else {
+        let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into());
+        let mut command = CommandBuilder::new(shell);
+        command.args(["-lc", "exec agy"]);
+        command
+    };
+    command.env("TERM", "xterm-256color");
+    let mut child = pair
+        .slave
+        .spawn_command(command)
+        .map_err(|error| format!("failed to start AGY: {}", error))?;
+    drop(pair.slave);
+    let mut writer = pair
+        .master
+        .take_writer()
+        .map_err(|error| format!("failed to open AGY input: {}", error))?;
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|error| format!("failed to open AGY output: {}", error))?;
+    let (sender, receiver) = mpsc::channel::<Vec<u8>>();
+    thread::spawn(move || {
+        let mut buffer = [0_u8; 4096];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(count) => {
+                    if sender.send(buffer[..count].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    let result = (|| {
+        wait_for_agy_startup(&receiver, AGY_STARTUP_TIMEOUT)?;
+        write_agy_usage_command(&mut writer)
+            .map_err(|error| format!("failed to request AGY /usage: {}", error))?;
+        let output = collect_pty_probe_output(&receiver, AGY_QUOTA_TIMEOUT);
+        parse_agy_usage_output(&String::from_utf8_lossy(&output), now)
+    })();
+    let _ = writer.write_all(b"\x1b\x03");
+    let _ = writer.flush();
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+fn wait_for_agy_startup(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    let mut output = Vec::new();
+    let mut last_visible_output = None;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return last_visible_output
+                .map(|_| ())
+                .ok_or_else(|| "AGY produced no startup output".to_string());
+        }
+        match receiver.recv_timeout(remaining.min(Duration::from_millis(100))) {
+            Ok(chunk) => {
+                output.extend_from_slice(&chunk);
+                if output.len() > 64 * 1024 {
+                    let keep_from = output.len() - 64 * 1024;
+                    output.drain(..keep_from);
+                }
+                if !strip_terminal_control(&String::from_utf8_lossy(&output))
+                    .trim()
+                    .is_empty()
+                {
+                    last_visible_output = Some(Instant::now());
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if last_visible_output
+                    .is_some_and(|last_output| last_output.elapsed() >= Duration::from_millis(200))
+                {
+                    return Ok(());
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("AGY closed before accepting /usage".to_string());
+            }
+        }
+    }
+}
+
+fn write_agy_usage_command(writer: &mut impl Write) -> std::io::Result<()> {
+    writer.write_all(AGY_USAGE_COMMAND)?;
+    writer.flush()
+}
+
+fn collect_pty_probe_output(receiver: &mpsc::Receiver<Vec<u8>>, timeout: Duration) -> Vec<u8> {
+    let deadline = Instant::now() + timeout;
+    let mut output = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match receiver.recv_timeout(remaining.min(Duration::from_millis(250))) {
+            Ok(chunk) => {
+                output.extend_from_slice(&chunk);
+                let cleaned = strip_terminal_control(&String::from_utf8_lossy(&output));
+                if agy_usage_output_complete(&cleaned) {
+                    thread::sleep(Duration::from_millis(300));
+                    while let Ok(chunk) = receiver.try_recv() {
+                        output.extend_from_slice(&chunk);
+                    }
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    output
+}
+
+fn agy_usage_output_complete(output: &str) -> bool {
+    parse_agy_usage_output(output, 0).is_ok()
+}
+
+fn query_agy_quota_remote(
+    session: &Session,
+    os: RemoteOs,
+    now: u64,
+) -> Result<AgentQuotaSnapshot, String> {
+    let previous_timeout = session.timeout();
+    session.set_timeout(1_000);
+    let result = (|| {
+        let mut channel = session
+            .channel_session()
+            .map_err(|error| format!("failed to open AGY quota channel: {}", error))?;
+        channel
+            .request_pty("xterm-256color", None, Some((140, 44, 0, 0)))
+            .map_err(|error| format!("failed to request AGY PTY: {}", error))?;
+        let command = if os == RemoteOs::Windows {
+            "agy"
+        } else {
+            "exec \"${SHELL:-/bin/sh}\" -lc 'exec agy'"
+        };
+        channel
+            .exec(command)
+            .map_err(|error| format!("failed to start remote AGY: {}", error))?;
+        session.set_blocking(false);
+        let result = (|| {
+            wait_for_remote_agy_startup(&mut channel, AGY_STARTUP_TIMEOUT)?;
+            session.set_blocking(true);
+            write_agy_usage_command(&mut channel)
+                .map_err(|error| format!("failed to request remote AGY /usage: {}", error))?;
+            session.set_blocking(false);
+            let deadline = Instant::now() + AGY_QUOTA_TIMEOUT;
+            let mut output = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            while Instant::now() < deadline {
+                match channel.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        output.extend_from_slice(&buffer[..count]);
+                        let cleaned = strip_terminal_control(&String::from_utf8_lossy(&output));
+                        if agy_usage_output_complete(&cleaned) {
+                            break;
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(50));
+                    }
+                    Err(error) => {
+                        return Err(format!("failed to read remote AGY /usage: {}", error))
+                    }
+                }
+            }
+            parse_agy_usage_output(&String::from_utf8_lossy(&output), now)
+        })();
+        session.set_blocking(true);
+        let _ = channel.write_all(b"\x1b\x03");
+        let _ = channel.send_eof();
+        let _ = channel.close();
+        result
+    })();
+    session.set_blocking(true);
+    session.set_timeout(previous_timeout);
+    result
+}
+
+fn wait_for_remote_agy_startup(channel: &mut Channel, timeout: Duration) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    let mut output = Vec::new();
+    let mut last_visible_output = None;
+    let mut buffer = [0_u8; 4096];
+    loop {
+        if Instant::now() >= deadline {
+            return last_visible_output
+                .map(|_| ())
+                .ok_or_else(|| "remote AGY produced no startup output".to_string());
+        }
+        match channel.read(&mut buffer) {
+            Ok(0) => return Err("remote AGY closed before accepting /usage".to_string()),
+            Ok(count) => {
+                output.extend_from_slice(&buffer[..count]);
+                if output.len() > 64 * 1024 {
+                    let keep_from = output.len() - 64 * 1024;
+                    output.drain(..keep_from);
+                }
+                if !strip_terminal_control(&String::from_utf8_lossy(&output))
+                    .trim()
+                    .is_empty()
+                {
+                    last_visible_output = Some(Instant::now());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if last_visible_output
+                    .is_some_and(|last_output| last_output.elapsed() >= Duration::from_millis(200))
+                {
+                    return Ok(());
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => return Err(format!("failed to read remote AGY startup: {}", error)),
+        }
     }
 }
 
@@ -522,7 +1368,7 @@ fn parse_posix_processes(output: &str) -> Vec<ProcessSample> {
         .lines()
         .filter_map(|line| {
             let fields = line.split_whitespace().collect::<Vec<_>>();
-            if fields.len() < 8 {
+            if fields.len() < 7 {
                 return None;
             }
             Some(ProcessSample {
@@ -535,8 +1381,8 @@ fn parse_posix_processes(output: &str) -> Vec<ProcessSample> {
                     .ok()
                     .map(|kib| kib.saturating_mul(1024)),
                 elapsed_seconds: parse_elapsed(fields[5]),
-                name: fields[6].to_string(),
-                command: fields[7..].join(" "),
+                name: String::new(),
+                command: fields[6..].join(" "),
             })
         })
         .collect()
@@ -595,27 +1441,50 @@ fn parse_windows_processes(
     Ok(samples)
 }
 
+/// Executable names this process could be known by: the reported process name
+/// plus two readings of argv[0] — cut at the first flag, which survives paths
+/// containing spaces, and the first whitespace token, which survives
+/// subcommands such as `codex exec`.
+fn executable_candidates(process: &ProcessSample) -> Vec<String> {
+    let command = process.command.trim();
+    let until_flag = command
+        .split_once(" -")
+        .map(|(head, _)| head)
+        .unwrap_or(command);
+    let first_token = command.split_whitespace().next().unwrap_or_default();
+    [process.name.as_str(), until_flag, first_token]
+        .into_iter()
+        .filter_map(|value| {
+            let value = value.trim().trim_matches('"');
+            let name = value.rsplit(['/', '\\']).next().unwrap_or(value).trim();
+            let name = name
+                .strip_suffix(".exe")
+                .or_else(|| name.strip_suffix(".EXE"))
+                .unwrap_or(name);
+            (!name.is_empty()).then(|| name.to_string())
+        })
+        .collect()
+}
+
 fn provider_for_process(process: &ProcessSample) -> Option<Provider> {
-    let executable = process
-        .name
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(&process.name)
-        .trim_end_matches(".exe")
-        .to_ascii_lowercase();
+    // Matched case-sensitively: a desktop shell such as
+    // `/Applications/Claude.app/Contents/MacOS/Claude` launches the agent binary
+    // `.../claude` and must not be mistaken for it.
+    let candidates = executable_candidates(process);
+    let named = |executable: &str| candidates.iter().any(|name| name == executable);
     let command = process.command.to_ascii_lowercase();
 
-    if executable == "agy" {
+    if named("agy") {
         return Some(Provider::Agy);
     }
-    if executable == "codex"
+    if named("codex")
         || command.contains("@openai/codex")
         || command.contains("/codex/bin/codex")
         || command.contains("\\codex\\bin\\codex")
     {
         return Some(Provider::Codex);
     }
-    if executable == "claude"
+    if named("claude")
         || command.contains("@anthropic-ai/claude-code")
         || command.contains("/claude-code/cli.js")
         || command.contains("\\claude-code\\cli.js")
@@ -628,6 +1497,7 @@ fn provider_for_process(process: &ProcessSample) -> Option<Provider> {
 fn build_agent_metrics(
     processes: &[ProcessSample],
     metadata: &HashMap<Provider, Vec<AgentSessionMetadata>>,
+    quotas: &HashMap<Provider, AgentQuotaSnapshot>,
 ) -> Vec<AgentMetric> {
     let by_pid = processes
         .iter()
@@ -660,24 +1530,32 @@ fn build_agent_metrics(
     roots.sort_by_key(|(pid, provider)| (provider.key(), *pid));
 
     let root_pids = roots.iter().map(|(pid, _)| *pid).collect::<HashSet<_>>();
-    let mut provider_offsets = HashMap::<Provider, usize>::new();
-    roots
-        .into_iter()
-        .filter_map(|(root_pid, provider)| {
-            let root = by_pid.get(&root_pid)?;
-            let mut stack = vec![root_pid];
+    // Subtrees are resolved before attribution: a snapshot names the agent
+    // process, which may sit below a launcher that also looks like the agent.
+    let trees = roots
+        .iter()
+        .map(|(root_pid, provider)| {
+            let mut stack = vec![*root_pid];
             let mut included = Vec::new();
             while let Some(pid) = stack.pop() {
                 included.push(pid);
                 if let Some(child_pids) = children.get(&pid) {
                     for child in child_pids {
-                        if *child != root_pid && root_pids.contains(child) {
+                        if *child != *root_pid && root_pids.contains(child) {
                             continue;
                         }
                         stack.push(*child);
                     }
                 }
             }
+            (*root_pid, *provider, included)
+        })
+        .collect::<Vec<_>>();
+    let assignments = assign_metadata(&trees, metadata);
+    trees
+        .into_iter()
+        .filter_map(|(root_pid, provider, included)| {
+            let root = by_pid.get(&root_pid)?;
             let cpu_values = included
                 .iter()
                 .filter_map(|pid| by_pid.get(pid).and_then(|process| process.cpu_percent))
@@ -686,13 +1564,7 @@ fn build_agent_metrics(
                 .iter()
                 .filter_map(|pid| by_pid.get(pid).and_then(|process| process.rss_bytes))
                 .collect::<Vec<_>>();
-            let offset = provider_offsets.entry(provider).or_default();
-            let provider_metadata = metadata
-                .get(&provider)
-                .and_then(|sessions| sessions.get(*offset))
-                .cloned()
-                .unwrap_or_default();
-            *offset += 1;
+            let provider_metadata = assignments.get(&root_pid).cloned().unwrap_or_default();
             let cpu_percent = (!cpu_values.is_empty()).then(|| cpu_values.iter().sum::<f64>());
             let active = cpu_percent.unwrap_or(0.0) >= 0.5;
             Some(AgentMetric {
@@ -720,13 +1592,22 @@ fn build_agent_metrics(
                 context_used_percent: provider_metadata.context_used_percent,
                 context_remaining_tokens: provider_metadata.context_remaining_tokens,
                 context_remaining_percent: provider_metadata.context_remaining_percent,
+                last_request_input_tokens: provider_metadata.last_request_input_tokens,
+                last_request_output_tokens: provider_metadata.last_request_output_tokens,
+                last_request_cache_creation_tokens: provider_metadata
+                    .last_request_cache_creation_tokens,
+                last_request_cache_read_tokens: provider_metadata.last_request_cache_read_tokens,
                 cost_usd: provider_metadata.cost_usd,
                 // Claude status-line snapshots expose an API/session duration.
                 // The process elapsed time remains a useful read-only fallback.
                 session_duration_seconds: provider_metadata
                     .session_duration_seconds
                     .or_else(|| root.elapsed_seconds.map(|seconds| seconds as f64)),
-                rate_limits: provider_metadata.rate_limits,
+                snapshot_age_seconds: provider_metadata.snapshot_age_seconds,
+                quota: quotas
+                    .get(&provider)
+                    .cloned()
+                    .unwrap_or_else(|| AgentQuotaSnapshot::unavailable(provider)),
                 subagents: provider_metadata.subagents,
                 background_tasks: provider_metadata.background_tasks,
             })
@@ -734,21 +1615,67 @@ fn build_agent_metrics(
         .collect()
 }
 
-fn parse_metadata_output(output: &str) -> HashMap<Provider, Vec<AgentSessionMetadata>> {
+/// Attributes parsed sessions to agent process trees. A status-line snapshot
+/// records the agent's own pid, so trees containing that pid are matched first;
+/// anything left over falls back to file-recency order, which is all the provider
+/// session records alone can support.
+fn assign_metadata(
+    trees: &[(u32, Provider, Vec<u32>)],
+    metadata: &HashMap<Provider, Vec<AgentSessionMetadata>>,
+) -> HashMap<u32, AgentSessionMetadata> {
+    let mut assigned = HashMap::<u32, AgentSessionMetadata>::new();
+    let mut claimed = HashMap::<Provider, HashSet<usize>>::new();
+    for (root_pid, provider, included) in trees {
+        let Some(sessions) = metadata.get(provider) else {
+            continue;
+        };
+        let matched = sessions
+            .iter()
+            .position(|session| session.pid_hint.is_some_and(|pid| included.contains(&pid)));
+        if let Some(index) = matched {
+            claimed.entry(*provider).or_default().insert(index);
+            assigned.insert(*root_pid, sessions[index].clone());
+        }
+    }
+    for (root_pid, provider, _) in trees {
+        if assigned.contains_key(root_pid) {
+            continue;
+        }
+        let Some(sessions) = metadata.get(provider) else {
+            continue;
+        };
+        let used = claimed.entry(*provider).or_default();
+        // A snapshot naming a pid that is live in another tree belongs to that
+        // session, so it is never handed to an unrelated process.
+        let next = (0..sessions.len()).find(|index| {
+            !used.contains(index)
+                && sessions[*index].pid_hint.map_or(true, |pid| {
+                    !trees.iter().any(|(_, _, included)| included.contains(&pid))
+                })
+        });
+        if let Some(index) = next {
+            used.insert(index);
+            assigned.insert(*root_pid, sessions[index].clone());
+        }
+    }
+    assigned
+}
+
+fn parse_metadata_output(output: &str, now: u64) -> HashMap<Provider, Vec<AgentSessionMetadata>> {
     let mut grouped = HashMap::<Provider, Vec<AgentSessionMetadata>>::new();
     let mut provider = None;
     let mut lines = Vec::<String>::new();
     for line in output.lines() {
         if let Some(marker) = line.strip_prefix("__GPUTERM_AGENT_FILE__\t") {
             if let Some(current) = provider.take() {
-                insert_provider_metadata(&mut grouped, current, &lines);
+                insert_provider_metadata(&mut grouped, current, &lines, now);
             }
             let key = marker.split('\t').next().unwrap_or("");
             provider = Provider::parse(key);
             lines.clear();
         } else if line.trim() == "__GPUTERM_AGENT_END__" {
             if let Some(current) = provider.take() {
-                insert_provider_metadata(&mut grouped, current, &lines);
+                insert_provider_metadata(&mut grouped, current, &lines, now);
             }
             lines.clear();
         } else if provider.is_some() {
@@ -756,7 +1683,7 @@ fn parse_metadata_output(output: &str) -> HashMap<Provider, Vec<AgentSessionMeta
         }
     }
     if let Some(current) = provider {
-        insert_provider_metadata(&mut grouped, current, &lines);
+        insert_provider_metadata(&mut grouped, current, &lines, now);
     }
     grouped
 }
@@ -765,8 +1692,9 @@ fn insert_provider_metadata(
     grouped: &mut HashMap<Provider, Vec<AgentSessionMetadata>>,
     provider: Provider,
     lines: &[String],
+    now: u64,
 ) {
-    let metadata = parse_provider_metadata(provider, lines);
+    let metadata = parse_provider_metadata(provider, lines, now);
     if !metadata_has_values(&metadata) {
         return;
     }
@@ -796,6 +1724,10 @@ fn metadata_has_values(metadata: &AgentSessionMetadata) -> bool {
         || metadata.context_used_percent.is_some()
         || metadata.context_remaining_tokens.is_some()
         || metadata.context_remaining_percent.is_some()
+        || metadata.last_request_input_tokens.is_some()
+        || metadata.last_request_output_tokens.is_some()
+        || metadata.last_request_cache_creation_tokens.is_some()
+        || metadata.last_request_cache_read_tokens.is_some()
         || metadata.cost_usd.is_some()
         || metadata.session_duration_seconds.is_some()
         || !metadata.rate_limits.is_empty()
@@ -823,8 +1755,15 @@ fn merge_metadata(base: &mut AgentSessionMetadata, newer: AgentSessionMetadata) 
     prefer_new!(context_used_percent);
     prefer_new!(context_remaining_tokens);
     prefer_new!(context_remaining_percent);
+    prefer_new!(last_request_input_tokens);
+    prefer_new!(last_request_output_tokens);
+    prefer_new!(last_request_cache_creation_tokens);
+    prefer_new!(last_request_cache_read_tokens);
     prefer_new!(cost_usd);
     prefer_new!(session_duration_seconds);
+    prefer_new!(snapshot_age_seconds);
+    prefer_new!(captured_at);
+    prefer_new!(pid_hint);
     if !newer.rate_limits.is_empty() {
         base.rate_limits = newer.rate_limits;
     }
@@ -837,19 +1776,19 @@ fn merge_metadata(base: &mut AgentSessionMetadata, newer: AgentSessionMetadata) 
     finalize_context(base);
 }
 
-fn parse_provider_metadata(provider: Provider, lines: &[String]) -> AgentSessionMetadata {
+fn parse_provider_metadata(provider: Provider, lines: &[String], now: u64) -> AgentSessionMetadata {
     let values = lines
         .iter()
         .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
         .collect::<Vec<_>>();
     match provider {
-        Provider::Codex => parse_codex_metadata(&values),
-        Provider::Claude => parse_claude_metadata(&values),
-        Provider::Agy => parse_agy_metadata(&values),
+        Provider::Codex => parse_codex_metadata(&values, now),
+        Provider::Claude => parse_claude_metadata(&values, now),
+        Provider::Agy => parse_agy_metadata(&values, now),
     }
 }
 
-fn parse_codex_metadata(values: &[Value]) -> AgentSessionMetadata {
+fn parse_codex_metadata(values: &[Value], now: u64) -> AgentSessionMetadata {
     let mut metadata = AgentSessionMetadata::default();
     for value in values {
         let payload = value.get("payload").unwrap_or(value);
@@ -880,7 +1819,13 @@ fn parse_codex_metadata(values: &[Value]) -> AgentSessionMetadata {
             metadata.context_window_tokens = value_u64(info, "model_context_window");
             metadata.context_used_percent =
                 ratio_percent(metadata.context_used_tokens, metadata.context_window_tokens);
-            metadata.rate_limits = parse_rate_limits(payload.get("rate_limits"));
+            // A later `token_count` event may omit the snapshot; keeping the
+            // previous one avoids blanking an already known weekly quota.
+            let rate_limits = parse_rate_limits(payload.get("rate_limits"), now);
+            if !rate_limits.is_empty() {
+                metadata.rate_limits = rate_limits;
+                metadata.captured_at = event_epoch_seconds(value).or(Some(now));
+            }
         }
         if event_type == "turn_context" {
             metadata.model = value_string(payload, "model").or(metadata.model);
@@ -890,13 +1835,25 @@ fn parse_codex_metadata(values: &[Value]) -> AgentSessionMetadata {
     metadata
 }
 
-fn parse_claude_metadata(values: &[Value]) -> AgentSessionMetadata {
+/// Reads Claude Code session records and status-line snapshots.
+///
+/// `context_window.*` describes the live context window, not cumulative session
+/// totals (Claude Code v2.1.132 onwards), so it only feeds the context gauge.
+/// Cumulative token counts are deliberately left unset: the transcript tail this
+/// monitor samples covers the newest records only, and reporting that partial
+/// sum as a session total would be wrong rather than merely incomplete.
+fn parse_claude_metadata(values: &[Value], now: u64) -> AgentSessionMetadata {
     let mut metadata = AgentSessionMetadata::default();
     let mut seen_messages = HashSet::new();
-    let mut input = 0_u64;
-    let mut output = 0_u64;
-    let mut saw_usage = false;
+    let mut latest_message_context = None;
     for value in values {
+        // Subagent records describe a worker's own context rather than the
+        // session the user started, so they never contribute to its numbers.
+        if value.get("isSidechain").and_then(Value::as_bool) == Some(true)
+            || value.get("agentId").is_some()
+        {
+            continue;
+        }
         metadata.session_id = value_string(value, "sessionId")
             .or_else(|| value_string(value, "session_id"))
             .or(metadata.session_id);
@@ -908,6 +1865,16 @@ fn parse_claude_metadata(values: &[Value]) -> AgentSessionMetadata {
             .or_else(|| pointer_string(value, "/model/id"))
             .or_else(|| pointer_string(value, "/message/model"))
             .or(metadata.model);
+        metadata.pid_hint = value_u64(value, "pid")
+            .and_then(|pid| u32::try_from(pid).ok())
+            .or(metadata.pid_hint);
+        let captured_at = value_u64(value, "captured_at")
+            .or_else(|| value_u64(value, "capturedAt"))
+            .or_else(|| event_epoch_seconds(value));
+        metadata.captured_at = captured_at.or(metadata.captured_at);
+        metadata.snapshot_age_seconds = captured_at
+            .map(|captured| now.saturating_sub(captured))
+            .or(metadata.snapshot_age_seconds);
         let cost = value.get("cost").unwrap_or(value);
         metadata.cost_usd = value_f64(cost, "total_cost_usd")
             .or_else(|| value_f64(cost, "totalCostUsd"))
@@ -919,8 +1886,43 @@ fn parse_claude_metadata(values: &[Value]) -> AgentSessionMetadata {
             .or_else(|| value_f64(cost, "durationMs"))
             .map(|milliseconds| milliseconds / 1000.0)
             .or(metadata.session_duration_seconds);
+        if let Some(context) = value
+            .get("context_window")
+            .or_else(|| value.get("contextWindow"))
+        {
+            metadata.context_window_tokens = value_u64(context, "context_window_size")
+                .or_else(|| value_u64(context, "contextWindowSize"))
+                .or(metadata.context_window_tokens);
+            metadata.context_used_tokens = value_u64(context, "total_input_tokens")
+                .or_else(|| value_u64(context, "totalInputTokens"))
+                .or(metadata.context_used_tokens);
+            metadata.context_used_percent = value_f64(context, "used_percentage")
+                .or_else(|| value_f64(context, "usedPercentage"))
+                .or(metadata.context_used_percent);
+            metadata.context_remaining_percent = value_f64(context, "remaining_percentage")
+                .or_else(|| value_f64(context, "remainingPercentage"))
+                .or(metadata.context_remaining_percent);
+            metadata.context_remaining_tokens = value_u64(context, "remaining_tokens")
+                .or_else(|| value_u64(context, "remainingTokens"))
+                .or(metadata.context_remaining_tokens);
+            if let Some(usage) = context
+                .get("current_usage")
+                .or_else(|| context.get("currentUsage"))
+            {
+                apply_last_request_usage(&mut metadata, usage);
+            }
+        }
+        let rate_limits = parse_rate_limits(
+            value.get("rate_limits").or_else(|| value.get("rateLimits")),
+            now,
+        );
+        if !rate_limits.is_empty() {
+            metadata.rate_limits = rate_limits;
+        }
         let message = value.get("message").unwrap_or(value);
         let message_id = value_string(message, "id");
+        // The collector emits a file's first line and its tail, so a short file
+        // repeats a record. Only the usage read below needs the guard.
         if message_id
             .as_ref()
             .is_some_and(|id| !seen_messages.insert(id.clone()))
@@ -928,67 +1930,45 @@ fn parse_claude_metadata(values: &[Value]) -> AgentSessionMetadata {
             continue;
         }
         if let Some(usage) = message.get("usage") {
-            input = input.saturating_add(value_u64(usage, "input_tokens").unwrap_or(0));
-            input =
-                input.saturating_add(value_u64(usage, "cache_creation_input_tokens").unwrap_or(0));
-            input = input.saturating_add(value_u64(usage, "cache_read_input_tokens").unwrap_or(0));
-            output = output.saturating_add(value_u64(usage, "output_tokens").unwrap_or(0));
-            saw_usage = true;
-            metadata.context_used_tokens = value_u64(usage, "input_tokens")
-                .and_then(|base| {
-                    base.checked_add(value_u64(usage, "cache_creation_input_tokens").unwrap_or(0))
-                })
-                .and_then(|base| {
-                    base.checked_add(value_u64(usage, "cache_read_input_tokens").unwrap_or(0))
-                });
-        }
-        let context = value
-            .get("context_window")
-            .or_else(|| value.get("contextWindow"))
-            .unwrap_or(value);
-        metadata.input_tokens = value_u64(context, "total_input_tokens")
-            .or_else(|| value_u64(context, "totalInputTokens"))
-            .or(metadata.input_tokens);
-        metadata.output_tokens = value_u64(context, "total_output_tokens")
-            .or_else(|| value_u64(context, "totalOutputTokens"))
-            .or(metadata.output_tokens);
-        metadata.context_window_tokens = value_u64(context, "context_window_size")
-            .or_else(|| value_u64(context, "contextWindowSize"))
-            .or(metadata.context_window_tokens);
-        metadata.context_used_tokens = value_u64(context, "total_input_tokens")
-            .or_else(|| value_u64(context, "totalInputTokens"))
-            .or(metadata.context_used_tokens);
-        metadata.context_used_percent = value_f64(context, "used_percentage")
-            .or_else(|| value_f64(context, "usedPercentage"))
-            .or(metadata.context_used_percent);
-        metadata.context_remaining_percent = value_f64(context, "remaining_percentage")
-            .or_else(|| value_f64(context, "remainingPercentage"))
-            .or(metadata.context_remaining_percent);
-        metadata.context_remaining_tokens = value_u64(context, "remaining_tokens")
-            .or_else(|| value_u64(context, "remainingTokens"))
-            .or(metadata.context_remaining_tokens);
-        let rate_limits =
-            parse_rate_limits(value.get("rate_limits").or_else(|| value.get("rateLimits")));
-        if !rate_limits.is_empty() {
-            metadata.rate_limits = rate_limits;
+            apply_last_request_usage(&mut metadata, usage);
+            latest_message_context = Some(
+                value_u64(usage, "input_tokens")
+                    .unwrap_or(0)
+                    .saturating_add(value_u64(usage, "cache_creation_input_tokens").unwrap_or(0))
+                    .saturating_add(value_u64(usage, "cache_read_input_tokens").unwrap_or(0)),
+            );
         }
     }
-    if saw_usage {
-        metadata.input_tokens = Some(input);
-        metadata.output_tokens = Some(output);
+    // Without a status-line snapshot the newest assistant record is the only
+    // context measurement available.
+    if metadata.context_used_tokens.is_none() {
+        metadata.context_used_tokens = latest_message_context;
     }
-    metadata.total_tokens = match (metadata.input_tokens, metadata.output_tokens) {
-        (Some(input), Some(output)) => Some(input.saturating_add(output)),
-        _ => None,
-    };
     finalize_context(&mut metadata);
     metadata
 }
 
-fn parse_agy_metadata(values: &[Value]) -> AgentSessionMetadata {
+/// Records the token breakdown of the most recent API call. Claude reports this
+/// per request; it is not a session total.
+fn apply_last_request_usage(metadata: &mut AgentSessionMetadata, usage: &Value) {
+    metadata.last_request_input_tokens =
+        value_u64(usage, "input_tokens").or(metadata.last_request_input_tokens);
+    metadata.last_request_output_tokens =
+        value_u64(usage, "output_tokens").or(metadata.last_request_output_tokens);
+    metadata.last_request_cache_creation_tokens = value_u64(usage, "cache_creation_input_tokens")
+        .or(metadata.last_request_cache_creation_tokens);
+    metadata.last_request_cache_read_tokens =
+        value_u64(usage, "cache_read_input_tokens").or(metadata.last_request_cache_read_tokens);
+}
+
+fn parse_agy_metadata(values: &[Value], now: u64) -> AgentSessionMetadata {
     let mut metadata = AgentSessionMetadata::default();
     for value in values {
         let payload = value.get("payload").unwrap_or(value);
+        metadata.captured_at = value_u64(payload, "captured_at")
+            .or_else(|| value_u64(payload, "capturedAt"))
+            .or_else(|| event_epoch_seconds(value))
+            .or(metadata.captured_at);
         metadata.session_id = value_string(payload, "conversation_id")
             .or_else(|| value_string(payload, "conversationId"))
             .or_else(|| value_string(payload, "session_id"))
@@ -1060,6 +2040,7 @@ fn parse_agy_metadata(values: &[Value]) -> AgentSessionMetadata {
                 .get("rate_limits")
                 .or_else(|| payload.get("rateLimits"))
                 .or_else(|| payload.get("quota")),
+            now,
         );
         if !rate_limits.is_empty() {
             metadata.rate_limits = rate_limits;
@@ -1085,27 +2066,52 @@ fn parse_agy_metadata(values: &[Value]) -> AgentSessionMetadata {
     metadata
 }
 
-fn parse_rate_limits(value: Option<&Value>) -> Vec<AgentRateLimitMetric> {
+/// Keys that sit alongside the real quota windows but describe something else,
+/// so they must not be walked as nested limit groups.
+const NON_QUOTA_LIMIT_KEYS: [&str; 12] = [
+    "limit_id",
+    "limit_name",
+    "plan_type",
+    "rate_limit_reached_type",
+    "credits",
+    "limitId",
+    "limitName",
+    "planType",
+    "rateLimitReachedType",
+    "individual_limit",
+    "individualLimit",
+    "rateLimitResetCredits",
+];
+
+/// Reset timestamps within this many seconds of the past are treated as current,
+/// leaving room for clock skew against a remote host.
+const RESET_STALE_GRACE_SECONDS: u64 = 60;
+
+fn parse_rate_limits(value: Option<&Value>, now: u64) -> Vec<AgentRateLimitMetric> {
     let Some(Value::Object(limits)) = value else {
         return Vec::new();
     };
     let mut parsed = Vec::new();
-    parse_rate_limit_entries(limits, None, &mut parsed);
+    parse_rate_limit_entries(limits, None, now, &mut parsed);
     parsed
 }
 
 fn parse_rate_limit_entries(
     limits: &serde_json::Map<String, Value>,
     group: Option<&str>,
+    now: u64,
     parsed: &mut Vec<AgentRateLimitMetric>,
 ) {
     for (label, limit) in limits {
         let Value::Object(object) = limit else {
             continue;
         };
+        if NON_QUOTA_LIMIT_KEYS.contains(&label.as_str()) {
+            continue;
+        }
         let remaining_fraction = value_f64(limit, "remaining_fraction")
             .or_else(|| value_f64(limit, "remainingFraction"));
-        let remaining_percent = value_f64(limit, "remaining_percentage")
+        let explicit_remaining_percent = value_f64(limit, "remaining_percentage")
             .or_else(|| value_f64(limit, "remainingPercentage"))
             .or_else(|| value_f64(limit, "remaining_percent"))
             .or_else(|| value_f64(limit, "remainingPercent"));
@@ -1113,27 +2119,51 @@ fn parse_rate_limit_entries(
             .or_else(|| value_f64(limit, "usedPercent"))
             .or_else(|| value_f64(limit, "used_percentage"))
             .or_else(|| value_f64(limit, "usedPercentage"))
-            .or_else(|| remaining_percent.map(|remaining| (100.0 - remaining).clamp(0.0, 100.0)))
+            .or_else(|| {
+                explicit_remaining_percent.map(|remaining| (100.0 - remaining).clamp(0.0, 100.0))
+            })
             .or_else(|| {
                 remaining_fraction.map(|remaining| (100.0 - remaining * 100.0).clamp(0.0, 100.0))
             });
+        let remaining_percent = explicit_remaining_percent
+            .or_else(|| remaining_fraction.map(|remaining| remaining * 100.0))
+            .or_else(|| used_percent.map(|used| 100.0 - used))
+            .map(|remaining| remaining.clamp(0.0, 100.0));
         let resets_at = value_u64(limit, "resets_at")
             .or_else(|| value_u64(limit, "resetsAt"))
             .or_else(|| value_u64(limit, "reset_at"))
             .or_else(|| value_u64(limit, "resetAt"))
             .or_else(|| value_u64(limit, "refreshes_at"))
-            .or_else(|| value_u64(limit, "refreshesAt"));
+            .or_else(|| value_u64(limit, "refreshesAt"))
+            // Some providers report the window relative to now instead.
+            .or_else(|| {
+                value_u64(limit, "resets_in_seconds")
+                    .or_else(|| value_u64(limit, "resetsInSeconds"))
+                    .or_else(|| value_u64(limit, "reset_after_seconds"))
+                    .or_else(|| value_u64(limit, "resetAfterSeconds"))
+                    .map(|seconds| now.saturating_add(seconds))
+            });
         let window_minutes = value_u64(limit, "window_minutes")
             .or_else(|| value_u64(limit, "windowMinutes"))
+            .or_else(|| value_u64(limit, "window_duration_mins"))
+            .or_else(|| value_u64(limit, "windowDurationMins"))
             .or_else(|| infer_rate_limit_window(label));
 
         if used_percent.is_some() || resets_at.is_some() {
+            // A window that already rolled over makes its recorded balance
+            // meaningless; the UI reports the reset rather than a stale number.
+            let stale = resets_at.is_some_and(|resets_at| {
+                now > 0 && resets_at.saturating_add(RESET_STALE_GRACE_SECONDS) < now
+            });
             parsed.push(AgentRateLimitMetric {
                 label: label.clone(),
                 group: group.map(str::to_owned),
+                model_names: Vec::new(),
+                remaining_percent,
                 used_percent,
                 window_minutes,
                 resets_at,
+                stale,
             });
             continue;
         }
@@ -1142,8 +2172,24 @@ fn parse_rate_limit_entries(
             .or_else(|| value_string(limit, "displayName"))
             .or_else(|| value_string(limit, "name"))
             .unwrap_or_else(|| label.clone());
-        parse_rate_limit_entries(object, Some(&nested_group), parsed);
+        parse_rate_limit_entries(object, Some(&nested_group), now, parsed);
     }
+}
+
+fn now_epoch_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
+fn event_epoch_seconds(value: &Value) -> Option<u64> {
+    let raw = value_string(value, "timestamp")
+        .or_else(|| value_string(value, "captured_at"))
+        .or_else(|| value_string(value, "capturedAt"))?;
+    chrono::DateTime::parse_from_rfc3339(&raw)
+        .ok()
+        .and_then(|value| u64::try_from(value.timestamp()).ok())
 }
 
 fn infer_rate_limit_window(label: &str) -> Option<u64> {
@@ -1163,6 +2209,636 @@ fn infer_rate_limit_window(label: &str) -> Option<u64> {
     } else {
         None
     }
+}
+
+fn strip_terminal_control(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            0x1b if index + 1 < bytes.len() && bytes[index + 1] == b'[' => {
+                index += 2;
+                let mut final_byte = None;
+                while index < bytes.len() {
+                    let byte = bytes[index];
+                    index += 1;
+                    if (0x40..=0x7e).contains(&byte) {
+                        final_byte = Some(byte);
+                        break;
+                    }
+                }
+                if final_byte.is_some_and(|byte| matches!(byte, b'A' | b'B' | b'E' | b'F' | b'H' | b'f'))
+                    && !output.ends_with(b"\n")
+                {
+                    output.push(b'\n');
+                }
+            }
+            0x1b if index + 1 < bytes.len() && bytes[index + 1] == b']' => {
+                index += 2;
+                while index < bytes.len() {
+                    if bytes[index] == 0x07 {
+                        index += 1;
+                        break;
+                    }
+                    if bytes[index] == 0x1b && index + 1 < bytes.len() && bytes[index + 1] == b'\\'
+                    {
+                        index += 2;
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+            0x1b => {
+                index += if index + 1 < bytes.len() { 2 } else { 1 };
+            }
+            b'\r' => {
+                output.push(b'\n');
+                index += 1;
+            }
+            0x08 | 0x7f => {
+                output.pop();
+                index += 1;
+            }
+            byte if byte == b'\n' || byte == b'\t' || byte >= 0x20 => {
+                output.push(byte);
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+fn parse_agy_usage_output(input: &str, now: u64) -> Result<AgentQuotaSnapshot, String> {
+    let cleaned = strip_terminal_control(input);
+    let mut group = None::<String>;
+    let mut collecting_models = None::<String>;
+    let mut model_text_by_group = HashMap::<String, String>::new();
+    let mut pending = None::<PendingAgyLimit>;
+    let mut limits_by_key = HashMap::<(String, u64), AgentRateLimitMetric>::new();
+    let mut last_limit_key = None::<(String, u64)>;
+
+    for raw_line in cleaned.lines() {
+        let line = raw_line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if line.is_empty() {
+            continue;
+        }
+        let uppercase = line.to_ascii_uppercase();
+        if uppercase.contains("GEMINI MODELS") {
+            group = Some("Gemini models".to_string());
+            collecting_models = None;
+            pending = None;
+            continue;
+        }
+        if uppercase.contains("CLAUDE AND GPT MODELS") || uppercase.contains("CLAUDE & GPT MODELS")
+        {
+            group = Some("Claude and GPT models".to_string());
+            collecting_models = None;
+            pending = None;
+            continue;
+        }
+        if uppercase.contains("MODELS WITHIN THIS GROUP") {
+            if let Some(group) = group.clone() {
+                let model_text = line
+                    .split_once(':')
+                    .map(|(_, models)| models.trim())
+                    .unwrap_or_default();
+                model_text_by_group.insert(group.clone(), model_text.to_string());
+                collecting_models = Some(group);
+            }
+            continue;
+        }
+        if uppercase.contains("WEEKLY LIMIT") {
+            collecting_models = None;
+            pending = group.clone().map(|group| PendingAgyLimit {
+                label: "weekly_limit".to_string(),
+                group,
+                window_minutes: 7 * 24 * 60,
+                precise_remaining_percent: None,
+                resets_at: None,
+            });
+            continue;
+        } else if uppercase.contains("FIVE HOUR LIMIT") || uppercase.contains("5 HOUR LIMIT") {
+            collecting_models = None;
+            pending = group.clone().map(|group| PendingAgyLimit {
+                label: "five_hour_limit".to_string(),
+                group,
+                window_minutes: 5 * 60,
+                precise_remaining_percent: None,
+                resets_at: None,
+            });
+            continue;
+        }
+
+        if let Some(model_group) = collecting_models.as_ref() {
+            let model_text = model_text_by_group.entry(model_group.clone()).or_default();
+            if !model_text.is_empty() {
+                model_text.push(' ');
+            }
+            model_text.push_str(&line);
+            continue;
+        }
+
+        let Some(pending_limit) = pending.as_mut() else {
+            if let Some(seconds) = parse_refresh_seconds(&line) {
+                if let Some(last) = last_limit_key
+                    .as_ref()
+                    .and_then(|key| limits_by_key.get_mut(key))
+                {
+                    last.resets_at = Some(now.saturating_add(seconds));
+                }
+            }
+            continue;
+        };
+
+        if let Some(seconds) = parse_refresh_seconds(&line) {
+            pending_limit.resets_at = Some(now.saturating_add(seconds));
+        }
+        let rounded_remaining = extract_remaining_percent(&line);
+        let quota_available = line.to_ascii_lowercase().contains("quota available");
+        if let Some(precise) = extract_display_percent(&line) {
+            pending_limit.precise_remaining_percent = Some(precise.clamp(0.0, 100.0));
+        }
+        if rounded_remaining.is_none() && !quota_available {
+            continue;
+        }
+
+        let remaining_percent = pending_limit
+            .precise_remaining_percent
+            .or(rounded_remaining)
+            .or(quota_available.then_some(100.0))
+            .map(|remaining| remaining.clamp(0.0, 100.0));
+        let Some(remaining_percent) = remaining_percent else {
+            continue;
+        };
+        let key = (
+            pending_limit.group.clone(),
+            pending_limit.window_minutes,
+        );
+        let model_names = model_text_by_group
+            .get(&pending_limit.group)
+            .map(|models| parse_agy_model_names(models))
+            .unwrap_or_default();
+        limits_by_key.insert(
+            key.clone(),
+            AgentRateLimitMetric {
+                label: pending_limit.label.clone(),
+                group: Some(pending_limit.group.clone()),
+                model_names,
+                remaining_percent: Some(remaining_percent),
+                used_percent: Some((100.0 - remaining_percent).clamp(0.0, 100.0)),
+                window_minutes: Some(pending_limit.window_minutes),
+                resets_at: pending_limit.resets_at,
+                stale: false,
+            },
+        );
+        last_limit_key = Some(key);
+        pending = None;
+    }
+
+    let mut limits = limits_by_key.into_values().collect::<Vec<_>>();
+    limits.sort_by_key(|limit| {
+        let group_order = match limit.group.as_deref() {
+            Some("Gemini models") => 0,
+            Some("Claude and GPT models") => 1,
+            _ => 2,
+        };
+        let window_order = match limit.window_minutes {
+            Some(10_080) => 0,
+            Some(300) => 1,
+            _ => 2,
+        };
+        (group_order, window_order)
+    });
+    if !has_complete_agy_quota(&limits) {
+        return Err(
+            "the AGY /usage layout did not contain both model groups and all four quota windows"
+                .to_string(),
+        );
+    }
+    Ok(AgentQuotaSnapshot::available(
+        "agy-usage-tui",
+        Some(now),
+        limits,
+        now,
+    ))
+}
+
+fn has_complete_agy_quota(limits: &[AgentRateLimitMetric]) -> bool {
+    ["Gemini models", "Claude and GPT models"]
+        .iter()
+        .all(|group| {
+            [300, 10_080].iter().all(|window| {
+                limits.iter().any(|limit| {
+                    limit.group.as_deref() == Some(*group)
+                        && limit.window_minutes == Some(*window)
+                })
+            })
+        })
+}
+
+struct PendingAgyLimit {
+    label: String,
+    group: String,
+    window_minutes: u64,
+    precise_remaining_percent: Option<f64>,
+    resets_at: Option<u64>,
+}
+
+fn parse_agy_model_names(input: &str) -> Vec<String> {
+    input
+        .split(',')
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn extract_display_percent(line: &str) -> Option<f64> {
+    let lowercase = line.to_ascii_lowercase();
+    line.match_indices('%')
+        .filter(|(percent, _)| {
+            !lowercase[percent + 1..]
+                .trim_start()
+                .starts_with("remaining")
+        })
+        .filter_map(|(percent, _)| parse_percent_before(line, percent))
+        .next_back()
+}
+
+fn parse_percent_before(line: &str, percent: usize) -> Option<f64> {
+    let prefix = line[..percent].trim_end();
+    let bytes = prefix.as_bytes();
+    let mut start = bytes.len();
+    while start > 0
+        && (bytes[start - 1].is_ascii_digit() || matches!(bytes[start - 1], b'.' | b','))
+    {
+        start -= 1;
+    }
+    (start < bytes.len())
+        .then(|| prefix[start..].replace(',', ".").parse::<f64>().ok())
+        .flatten()
+}
+
+fn extract_remaining_percent(line: &str) -> Option<f64> {
+    let lowercase = line.to_ascii_lowercase();
+    let end = lowercase.find("% remaining")?;
+    let prefix = &line[..end];
+    let bytes = prefix.as_bytes();
+    let mut start = bytes.len();
+    while start > 0
+        && (bytes[start - 1].is_ascii_digit() || matches!(bytes[start - 1], b'.' | b','))
+    {
+        start -= 1;
+    }
+    prefix[start..].replace(',', ".").parse::<f64>().ok()
+}
+
+fn parse_refresh_seconds(line: &str) -> Option<u64> {
+    let lowercase = line.to_ascii_lowercase();
+    let marker = lowercase.find("refreshes in")?;
+    let tail = &lowercase[marker + "refreshes in".len()..];
+    let mut total = 0_u64;
+    let mut found = false;
+    for token in tail.split_whitespace() {
+        let trimmed = token.trim_matches(|character: char| !character.is_ascii_alphanumeric());
+        let (digits, multiplier) = if let Some(value) = trimmed.strip_suffix('d') {
+            (value, 86_400)
+        } else if let Some(value) = trimmed.strip_suffix('h') {
+            (value, 3_600)
+        } else if let Some(value) = trimmed.strip_suffix('m') {
+            (value, 60)
+        } else if let Some(value) = trimmed.strip_suffix('s') {
+            (value, 1)
+        } else {
+            continue;
+        };
+        if let Ok(value) = digits.parse::<u64>() {
+            total = total.saturating_add(value.saturating_mul(multiplier));
+            found = true;
+        }
+    }
+    found.then_some(total)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeQuotaSetupResult {
+    status: String,
+    message: String,
+}
+
+#[tauri::command]
+pub fn refresh_agent_quota(
+    state: State<'_, AppState>,
+    session_id: String,
+    provider: String,
+) -> Result<(), String> {
+    let provider = Provider::parse(&provider)
+        .ok_or_else(|| format!("Unsupported coding-agent provider: {}", provider))?;
+    let active = state
+        .active_connections
+        .lock()
+        .map_err(|_| "Active session state is unavailable".to_string())?
+        .contains_key(&session_id);
+    if !active {
+        return Err("No active terminal session is available".to_string());
+    }
+    let mut requests = state
+        .agent_quota_refreshes
+        .lock()
+        .map_err(|_| "Agent quota refresh state is unavailable".to_string())?;
+    requests
+        .entry(session_id)
+        .or_default()
+        .insert(provider.key().to_string());
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn configure_claude_quota_monitor(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<ClaudeQuotaSetupResult, String> {
+    let is_local = state
+        .active_connections
+        .lock()
+        .map_err(|_| "Active session state is unavailable".to_string())?
+        .get(&session_id)
+        .map(|connection| connection.profile.is_local)
+        .ok_or_else(|| "No active terminal session is available".to_string())?;
+    let refreshes = Arc::clone(&state.agent_quota_refreshes);
+    let result = if is_local {
+        tauri::async_runtime::spawn_blocking(configure_claude_quota_local)
+            .await
+            .map_err(|error| format!("Claude monitor setup task failed: {}", error))??
+    } else {
+        let target = target_for_active_session(&state, &session_id)?;
+        let ops = Arc::clone(&state.ops_sessions);
+        let os_cache = Arc::clone(&state.remote_os_cache);
+        tauri::async_runtime::spawn_blocking(move || {
+            with_ops_session(&ops, &target, 10_000, |session| {
+                let os = os_cache
+                    .lock()
+                    .ok()
+                    .and_then(|cache| cache.get(&target.session_id).copied())
+                    .or_else(|| detect_remote_os(session))
+                    .unwrap_or(RemoteOs::Linux);
+                configure_claude_quota_remote(session, os)
+            })
+        })
+        .await
+        .map_err(|error| format!("Remote Claude monitor setup task failed: {}", error))??
+    };
+    if matches!(result.status.as_str(), "configured" | "alreadyConfigured") {
+        if let Ok(mut requests) = refreshes.lock() {
+            requests
+                .entry(session_id)
+                .or_default()
+                .insert(Provider::Claude.key().to_string());
+        }
+    }
+    Ok(result)
+}
+
+fn configure_claude_quota_local() -> Result<ClaudeQuotaSetupResult, String> {
+    let os = local_os();
+    if !local_claude_helper_runtime_available(os) {
+        return Ok(ClaudeQuotaSetupResult {
+            status: "unsupported".to_string(),
+            message: "Claude quota setup needs Python 3 on this host. Install Python 3, then run Set up again.".to_string(),
+        });
+    }
+    let Some(home) = std::env::var_os(if os == RemoteOs::Windows {
+        "USERPROFILE"
+    } else {
+        "HOME"
+    }) else {
+        return Ok(ClaudeQuotaSetupResult {
+            status: "unsupported".to_string(),
+            message: "Claude quota setup cannot locate this user's home directory.".to_string(),
+        });
+    };
+    let home = PathBuf::from(home);
+    let claude_dir = home.join(".claude");
+    let settings_path = claude_dir.join("settings.json");
+    let (helper_name, desired_command, helper_contents) = claude_helper_for_os(os);
+    let helper_path = claude_dir.join(helper_name);
+    fs::create_dir_all(&claude_dir)
+        .map_err(|error| format!("failed to create Claude config directory: {}", error))?;
+    let (mut settings, existing) = read_claude_settings(&settings_path)?;
+    if let Some(command) = existing.as_deref() {
+        if !command.contains("gputerm-claude-statusline") {
+            return Ok(ClaudeQuotaSetupResult {
+                status: "conflict".to_string(),
+                message: format!(
+                    "Claude already uses a custom status line (`{}`). It was not overwritten. Add {} to that status-line pipeline manually.",
+                    command, desired_command
+                ),
+            });
+        }
+    }
+    write_claude_helper(&helper_path, helper_contents)?;
+    set_claude_status_line(&mut settings, desired_command);
+    backup_and_write_json(&settings_path, &settings)?;
+    Ok(ClaudeQuotaSetupResult {
+        status: if existing.is_some() {
+            "alreadyConfigured"
+        } else {
+            "configured"
+        }
+        .to_string(),
+        message: "Claude quota monitoring is configured. The 5-hour and weekly limits appear after Claude's next response.".to_string(),
+    })
+}
+
+fn configure_claude_quota_remote(
+    session: &Session,
+    os: RemoteOs,
+) -> Result<ClaudeQuotaSetupResult, String> {
+    let runtime_command = if os == RemoteOs::Windows {
+        "$python = Get-Command python.exe -ErrorAction SilentlyContinue\nif ($python) { Write-Output 'supported' } else { Write-Output 'unsupported' }\nexit 0"
+    } else {
+        "if command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then printf supported; else printf unsupported; fi"
+    };
+    if run_remote_command_for(session, os, runtime_command)?.trim() != "supported" {
+        return Ok(ClaudeQuotaSetupResult {
+            status: "unsupported".to_string(),
+            message: "Claude quota setup needs Python 3 on this host. Install Python 3, then run Set up again.".to_string(),
+        });
+    }
+    let current_command = if os == RemoteOs::Windows {
+        "$path = Join-Path $HOME '.claude\\settings.json'\nif (Test-Path -LiteralPath $path) { Get-Content -LiteralPath $path -Raw } else { Write-Output '{}' }\nexit 0"
+    } else {
+        "if [ -r \"$HOME/.claude/settings.json\" ]; then cat \"$HOME/.claude/settings.json\"; else printf '{}'; fi"
+    };
+    let current = run_remote_command_for(session, os, current_command)?;
+    let mut settings = serde_json::from_str::<Value>(&current)
+        .map_err(|error| format!("Claude settings.json is not valid JSON: {}", error))?;
+    let existing = claude_status_line_command(&settings);
+    let (helper_name, desired_command, helper_contents) = claude_helper_for_os(os);
+    if let Some(command) = existing.as_deref() {
+        if !command.contains("gputerm-claude-statusline") {
+            return Ok(ClaudeQuotaSetupResult {
+                status: "conflict".to_string(),
+                message: format!(
+                    "Claude already uses a custom status line (`{}`). It was not overwritten. Add {} to that status-line pipeline manually.",
+                    command, desired_command
+                ),
+            });
+        }
+    }
+    set_claude_status_line(&mut settings, desired_command);
+    let helper = base64::engine::general_purpose::STANDARD.encode(helper_contents);
+    let settings_json = serde_json::to_vec_pretty(&settings)
+        .map_err(|error| format!("failed to encode Claude settings: {}", error))?;
+    let settings_encoded = base64::engine::general_purpose::STANDARD.encode(settings_json);
+    let command = if os == RemoteOs::Windows {
+        format!(
+            "$ErrorActionPreference='Stop'\n\
+             $dir = Join-Path $HOME '.claude'\n\
+             New-Item -ItemType Directory -Force -Path $dir | Out-Null\n\
+             $helper = Join-Path $dir '{helper_name}'\n\
+             $settingsPath = Join-Path $dir 'settings.json'\n\
+             if (Test-Path -LiteralPath $settingsPath) {{ Copy-Item -LiteralPath $settingsPath -Destination (Join-Path $dir 'settings.json.gputerm-backup') -Force }}\n\
+             [IO.File]::WriteAllBytes($helper, [Convert]::FromBase64String('{helper}'))\n\
+             [IO.File]::WriteAllBytes((Join-Path $dir 'settings.json.gputerm-new'), [Convert]::FromBase64String('{settings}'))\n\
+             Move-Item -LiteralPath (Join-Path $dir 'settings.json.gputerm-new') -Destination $settingsPath -Force\n\
+             exit 0",
+            helper_name = helper_name,
+            helper = helper,
+            settings = settings_encoded,
+        )
+    } else {
+        format!(
+        "set -eu\n\
+         mkdir -p \"$HOME/.claude\"\n\
+         umask 077\n\
+         printf '%s' '{helper}' > \"$HOME/.claude/.gputerm-helper.b64\"\n\
+         (base64 --decode \"$HOME/.claude/.gputerm-helper.b64\" 2>/dev/null || base64 -D \"$HOME/.claude/.gputerm-helper.b64\") > \"$HOME/.claude/{helper_name}\"\n\
+         chmod 700 \"$HOME/.claude/{helper_name}\"\n\
+         printf '%s' '{settings}' > \"$HOME/.claude/.gputerm-settings.b64\"\n\
+         (base64 --decode \"$HOME/.claude/.gputerm-settings.b64\" 2>/dev/null || base64 -D \"$HOME/.claude/.gputerm-settings.b64\") > \"$HOME/.claude/settings.json.gputerm-new\"\n\
+         if [ -f \"$HOME/.claude/settings.json\" ]; then cp \"$HOME/.claude/settings.json\" \"$HOME/.claude/settings.json.gputerm-backup\"; fi\n\
+         mv \"$HOME/.claude/settings.json.gputerm-new\" \"$HOME/.claude/settings.json\"\n\
+         rm -f \"$HOME/.claude/.gputerm-helper.b64\" \"$HOME/.claude/.gputerm-settings.b64\"\n",
+        helper = helper,
+        helper_name = helper_name,
+        settings = settings_encoded,
+        )
+    };
+    run_remote_command_for(session, os, &command)?;
+    Ok(ClaudeQuotaSetupResult {
+        status: if existing.is_some() {
+            "alreadyConfigured"
+        } else {
+            "configured"
+        }
+        .to_string(),
+        message: "Claude quota monitoring is configured. The 5-hour and weekly limits appear after Claude's next response.".to_string(),
+    })
+}
+
+fn local_claude_helper_runtime_available(os: RemoteOs) -> bool {
+    let candidates: &[&str] = if os == RemoteOs::Windows {
+        &["python"]
+    } else {
+        &["python3", "python"]
+    };
+    candidates.iter().any(|candidate| {
+        let mut command = Command::new(candidate);
+        command
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000);
+        }
+        command.status().is_ok_and(|status| status.success())
+    })
+}
+
+fn read_claude_settings(path: &Path) -> Result<(Value, Option<String>), String> {
+    let settings = match fs::read_to_string(path) {
+        Ok(contents) => serde_json::from_str::<Value>(&contents)
+            .map_err(|error| format!("Claude settings.json is not valid JSON: {}", error))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Value::Object(serde_json::Map::new())
+        }
+        Err(error) => return Err(format!("failed to read Claude settings: {}", error)),
+    };
+    let command = claude_status_line_command(&settings);
+    Ok((settings, command))
+}
+
+fn claude_status_line_command(settings: &Value) -> Option<String> {
+    settings
+        .pointer("/statusLine/command")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+        .map(str::to_string)
+}
+
+fn set_claude_status_line(settings: &mut Value, command: &str) {
+    if !settings.is_object() {
+        *settings = Value::Object(serde_json::Map::new());
+    }
+    settings.as_object_mut().unwrap().insert(
+        "statusLine".to_string(),
+        serde_json::json!({
+            "type": "command",
+            "command": command,
+            "padding": 0
+        }),
+    );
+}
+
+fn claude_helper_for_os(os: RemoteOs) -> (&'static str, &'static str, &'static str) {
+    if os == RemoteOs::Windows {
+        (
+            "gputerm-claude-statusline.py",
+            "python \"%USERPROFILE%\\.claude\\gputerm-claude-statusline.py\"",
+            include_str!("../../../scripts/gputerm-claude-statusline.py"),
+        )
+    } else {
+        (
+            "gputerm-claude-statusline.sh",
+            "~/.claude/gputerm-claude-statusline.sh",
+            include_str!("../../../scripts/gputerm-claude-statusline.sh"),
+        )
+    }
+}
+
+fn write_claude_helper(path: &Path, contents: &str) -> Result<(), String> {
+    fs::write(path, contents)
+        .map_err(|error| format!("failed to install Claude status-line helper: {}", error))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("failed to make Claude helper executable: {}", error))?;
+    }
+    Ok(())
+}
+
+fn backup_and_write_json(path: &Path, value: &Value) -> Result<(), String> {
+    if path.exists() {
+        let backup = path.with_file_name("settings.json.gputerm-backup");
+        fs::copy(path, backup)
+            .map_err(|error| format!("failed to back up Claude settings: {}", error))?;
+    }
+    let temporary = path.with_file_name("settings.json.gputerm-new");
+    let encoded = serde_json::to_vec_pretty(value)
+        .map_err(|error| format!("failed to encode Claude settings: {}", error))?;
+    fs::write(&temporary, encoded)
+        .map_err(|error| format!("failed to write Claude settings: {}", error))?;
+    fs::rename(&temporary, path)
+        .map_err(|error| format!("failed to replace Claude settings: {}", error))
 }
 
 fn finalize_context(metadata: &mut AgentSessionMetadata) {
@@ -1280,14 +2956,21 @@ fn parse_elapsed(value: &str) -> Option<u64> {
 mod tests {
     use super::*;
 
+    /// Fixed clock for the parsers, well ahead of the fixture reset timestamps.
+    const TEST_NOW: u64 = 1_799_000_000;
+
+    fn parse_metadata(provider: Provider, lines: &[String]) -> AgentSessionMetadata {
+        parse_provider_metadata(provider, lines, TEST_NOW)
+    }
+
     #[test]
     fn detects_agents_and_aggregates_child_resources() {
         let processes = parse_posix_processes(
-            "100 1 alice 2.0 100000 01:00 codex /usr/bin/codex\n\
-             101 100 alice 4.0 50000 00:30 node node worker.js\n\
-             200 1 bob 1.0 70000 00:20 node node /x/@anthropic-ai/claude-code/cli.js\n",
+            "100 1 alice 2.0 100000 01:00 /usr/bin/codex\n\
+             101 100 alice 4.0 50000 00:30 node worker.js\n\
+             200 1 bob 1.0 70000 00:20 node /x/@anthropic-ai/claude-code/cli.js\n",
         );
-        let metrics = build_agent_metrics(&processes, &HashMap::new());
+        let metrics = build_agent_metrics(&processes, &HashMap::new(), &HashMap::new());
         assert_eq!(metrics.len(), 2);
         let codex = metrics
             .iter()
@@ -1303,9 +2986,9 @@ mod tests {
         let lines = vec![
             r#"{"type":"session_meta","payload":{"id":"session-1","cwd":"/work","model_provider":"openai"}}"#.to_string(),
             r#"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#.to_string(),
-            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200,"output_tokens":300,"total_tokens":1500},"last_token_usage":{"total_tokens":500},"model_context_window":10000},"rate_limits":{"primary":{"used_percent":42,"window_minutes":10080,"resets_at":1234}}}}"#.to_string(),
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200,"output_tokens":300,"total_tokens":1500},"last_token_usage":{"total_tokens":500},"model_context_window":10000},"rate_limits":{"primary":{"used_percent":42,"window_minutes":10080,"resets_at":1800500000}}}}"#.to_string(),
         ];
-        let metadata = parse_provider_metadata(Provider::Codex, &lines);
+        let metadata = parse_metadata(Provider::Codex, &lines);
         assert_eq!(metadata.session_id.as_deref(), Some("session-1"));
         assert_eq!(metadata.model.as_deref(), Some("gpt-5.4"));
         assert_eq!(metadata.total_tokens, Some(1500));
@@ -1318,7 +3001,7 @@ mod tests {
     #[test]
     fn parses_agy_status_payload_without_prompt_content() {
         let lines = vec![r#"{"conversation_id":"agy-1","model":{"display_name":"Gemini"},"agent_state":"working","input_tokens":80,"output_tokens":20,"total_tokens":100,"context_window":{"context_used_tokens":100,"context_window_size":1000},"quota":{"premium":{"remaining_fraction":0.7}},"subagents":[{"name":"tests","role":"worker","status":"active"}],"background_tasks":[{"name":"npm test","status":"running"}],"prompt":"do not expose this prompt"}"#.to_string()];
-        let metadata = parse_provider_metadata(Provider::Agy, &lines);
+        let metadata = parse_metadata(Provider::Agy, &lines);
         assert_eq!(metadata.status.as_deref(), Some("working"));
         assert_eq!(metadata.model.as_deref(), Some("Gemini"));
         assert_eq!(metadata.total_tokens, Some(100));
@@ -1330,11 +3013,12 @@ mod tests {
         assert_eq!(metadata.background_tasks.len(), 1);
 
         let processes =
-            parse_posix_processes("100 1 alice 2.0 100000 01:00 agy agy --api-key do-not-expose\n");
+            parse_posix_processes("100 1 alice 2.0 100000 01:00 agy --api-key do-not-expose\n");
         let mut sessions = HashMap::new();
         sessions.insert(Provider::Agy, vec![metadata]);
         let serialized =
-            serde_json::to_string(&build_agent_metrics(&processes, &sessions)).unwrap();
+            serde_json::to_string(&build_agent_metrics(&processes, &sessions, &HashMap::new()))
+                .unwrap();
         assert!(!serialized.contains("do not expose this prompt"));
         assert!(!serialized.contains("do-not-expose"));
     }
@@ -1356,7 +3040,7 @@ mod tests {
             }
         }"#
         .to_string()];
-        let metadata = parse_provider_metadata(Provider::Agy, &lines);
+        let metadata = parse_metadata(Provider::Agy, &lines);
         assert_eq!(metadata.rate_limits.len(), 4);
         let gemini_weekly = metadata
             .rate_limits
@@ -1379,15 +3063,22 @@ mod tests {
     }
 
     #[test]
-    fn parses_claude_usage_without_double_counting_duplicate_messages() {
+    fn parses_claude_context_and_rate_limits_without_faking_session_totals() {
         let lines = vec![
             r#"{"sessionId":"claude-1","message":{"id":"msg-1","model":"claude-sonnet","usage":{"input_tokens":100,"cache_read_input_tokens":50,"output_tokens":20}}}"#.to_string(),
             r#"{"sessionId":"claude-1","message":{"id":"msg-1","model":"claude-sonnet","usage":{"input_tokens":100,"cache_read_input_tokens":50,"output_tokens":20}}}"#.to_string(),
-            r#"{"total_cost_usd":0.42,"total_duration_ms":5000,"context_window":{"total_input_tokens":150,"total_output_tokens":20,"context_window_size":1000,"used_percentage":15,"remaining_percentage":85},"rate_limits":{"five_hour":{"used_percentage":23.5,"resets_at":1738425600},"seven_day":{"used_percentage":41.2,"resets_at":1738857600}}}"#.to_string(),
+            r#"{"total_cost_usd":0.42,"total_duration_ms":5000,"context_window":{"total_input_tokens":150,"total_output_tokens":20,"context_window_size":1000,"used_percentage":15,"remaining_percentage":85},"rate_limits":{"five_hour":{"used_percentage":23.5,"resets_at":1800300000},"seven_day":{"used_percentage":41.2,"resets_at":1800900000}}}"#.to_string(),
         ];
-        let metadata = parse_provider_metadata(Provider::Claude, &lines);
-        assert_eq!(metadata.input_tokens, Some(150));
-        assert_eq!(metadata.output_tokens, Some(20));
+        let metadata = parse_metadata(Provider::Claude, &lines);
+        // `context_window.*` is the live context, so it must not be reported as
+        // a cumulative session total.
+        assert_eq!(metadata.input_tokens, None);
+        assert_eq!(metadata.output_tokens, None);
+        assert_eq!(metadata.total_tokens, None);
+        assert_eq!(metadata.context_used_tokens, Some(150));
+        assert_eq!(metadata.last_request_input_tokens, Some(100));
+        assert_eq!(metadata.last_request_cache_read_tokens, Some(50));
+        assert_eq!(metadata.last_request_output_tokens, Some(20));
         assert_eq!(metadata.cost_usd, Some(0.42));
         assert_eq!(metadata.session_duration_seconds, Some(5.0));
         assert_eq!(metadata.context_remaining_tokens, Some(850));
@@ -1407,12 +3098,528 @@ mod tests {
             "{\"conversation_id\":\"same\",\"agent_state\":\"working\",\"quota\":{\"premium\":{\"remaining_percentage\":75}}}\n",
             "__GPUTERM_AGENT_END__\n",
         );
-        let grouped = parse_metadata_output(output);
+        let grouped = parse_metadata_output(output, TEST_NOW);
         let sessions = grouped.get(&Provider::Agy).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].input_tokens, Some(100));
         assert_eq!(sessions[0].status.as_deref(), Some("working"));
         assert_eq!(sessions[0].rate_limits[0].used_percent, Some(25.0));
+    }
+
+    #[test]
+    fn detects_agents_launched_from_long_absolute_paths() {
+        // macOS truncates the `comm` column, so detection has to work from the
+        // command line alone.
+        let processes = parse_posix_processes(concat!(
+            "100 1 alice 1.0 1000 01:00 /Users/a/Library/Application Support/Claude/claude-code/2.1.219/claude.app/Contents/MacOS/claude --output-format stream-json\n",
+            "101 1 alice 1.0 1000 01:00 /Applications/ChatGPT.app/Contents/Resources/codex -c features.code_mode_host=true app-server\n",
+            "102 1 alice 1.0 1000 01:00 codex exec --sandbox read-only\n",
+            "103 1 alice 1.0 1000 01:00 /Applications/Claude.app/Contents/MacOS/Claude\n",
+            "104 1 alice 1.0 1000 01:00 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer) --type=renderer\n",
+        ));
+        let detected = processes
+            .iter()
+            .filter_map(|process| {
+                provider_for_process(process).map(|provider| (process.pid, provider))
+            })
+            .collect::<HashMap<_, _>>();
+        assert_eq!(detected.get(&100), Some(&Provider::Claude));
+        assert_eq!(detected.get(&101), Some(&Provider::Codex));
+        assert_eq!(detected.get(&102), Some(&Provider::Codex));
+        // The desktop shell and its renderer helpers are not agent sessions.
+        assert_eq!(detected.get(&103), None);
+        assert_eq!(detected.get(&104), None);
+    }
+
+    #[test]
+    fn ignores_subagent_records_so_they_cannot_overwrite_the_session() {
+        // The collector can surface a session transcript and a worker
+        // transcript that share a session id; only the session's own records
+        // may describe its context.
+        let output = concat!(
+            "__GPUTERM_AGENT_FILE__\tclaude\tsession.jsonl\n",
+            "{\"sessionId\":\"claude-1\",\"cwd\":\"/work\",\"message\":{\"id\":\"msg-1\",\"usage\":{\"input_tokens\":90000,\"cache_read_input_tokens\":10000,\"output_tokens\":500}}}\n",
+            "__GPUTERM_AGENT_END__\n",
+            "__GPUTERM_AGENT_FILE__\tclaude\tsubagents/agent-1.jsonl\n",
+            "{\"sessionId\":\"claude-1\",\"isSidechain\":true,\"agentId\":\"agent-1\",\"message\":{\"id\":\"msg-2\",\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":0,\"output_tokens\":5}}}\n",
+            "__GPUTERM_AGENT_END__\n",
+        );
+        let grouped = parse_metadata_output(output, TEST_NOW);
+        let sessions = grouped.get(&Provider::Claude).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].context_used_tokens, Some(100_000));
+        assert_eq!(sessions[0].last_request_output_tokens, Some(500));
+    }
+
+    #[test]
+    fn attributes_snapshots_to_their_own_process() {
+        // Pid 201 is a launcher wrapping the agent at 200, as the Claude desktop
+        // app does, so the snapshot names a pid below the tree root.
+        let processes = parse_posix_processes(
+            "201 1 alice 0.1 1000 00:21 launcher /x/@anthropic-ai/claude-code/cli.js\n\
+             200 201 alice 1.0 70000 00:20 node /x/@anthropic-ai/claude-code/cli.js\n\
+             100 1 alice 1.0 70000 00:40 node /x/@anthropic-ai/claude-code/cli.js\n",
+        );
+        let mut sessions = HashMap::new();
+        sessions.insert(
+            Provider::Claude,
+            vec![
+                AgentSessionMetadata {
+                    session_id: Some("newest".to_string()),
+                    pid_hint: Some(200),
+                    context_used_tokens: Some(200),
+                    ..Default::default()
+                },
+                AgentSessionMetadata {
+                    session_id: Some("older".to_string()),
+                    pid_hint: Some(100),
+                    context_used_tokens: Some(100),
+                    ..Default::default()
+                },
+            ],
+        );
+        let metrics = build_agent_metrics(&processes, &sessions, &HashMap::new());
+        let by_pid = metrics
+            .iter()
+            .map(|metric| (metric.root_pid, metric))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(by_pid[&100].session_id.as_deref(), Some("older"));
+        assert_eq!(by_pid[&100].context_used_tokens, Some(100));
+        assert_eq!(by_pid[&201].session_id.as_deref(), Some("newest"));
+        assert_eq!(by_pid[&201].context_used_tokens, Some(200));
+        assert!(
+            !by_pid.contains_key(&200),
+            "the launcher tree owns the agent"
+        );
+    }
+
+    #[test]
+    fn keeps_codex_quota_when_a_later_event_omits_it() {
+        let lines = vec![
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":1000},"model_context_window":10000},"rate_limits":{"limit_id":"codex","plan_type":"plus","credits":{"has_credits":false,"balance":"0"},"primary":{"used_percent":2,"window_minutes":300,"resets_at":1799500000},"secondary":{"used_percent":17,"window_minutes":10080,"resets_at":1799900000}}}}"#.to_string(),
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":2000},"model_context_window":10000}}}"#.to_string(),
+        ];
+        let metadata = parse_metadata(Provider::Codex, &lines);
+        assert_eq!(metadata.total_tokens, Some(2000));
+        assert_eq!(metadata.rate_limits.len(), 2);
+        assert!(metadata
+            .rate_limits
+            .iter()
+            .all(|limit| !limit.stale && limit.used_percent.is_some()));
+    }
+
+    #[test]
+    fn marks_rolled_over_windows_as_stale_and_accepts_relative_resets() {
+        let lines = vec![r#"{"rate_limits":{"five_hour":{"used_percentage":80,"resets_at":1798000000},"seven_day":{"used_percentage":40,"resets_in_seconds":3600}}}"#.to_string()];
+        let metadata = parse_metadata(Provider::Claude, &lines);
+        let five_hour = metadata
+            .rate_limits
+            .iter()
+            .find(|limit| limit.window_minutes == Some(300))
+            .unwrap();
+        assert!(five_hour.stale);
+        let weekly = metadata
+            .rate_limits
+            .iter()
+            .find(|limit| limit.window_minutes == Some(10080))
+            .unwrap();
+        assert!(!weekly.stale);
+        assert_eq!(weekly.resets_at, Some(TEST_NOW + 3600));
+    }
+
+    #[test]
+    fn reports_snapshot_age_from_capture_time() {
+        let lines = vec![r#"{"session_id":"claude-1","captured_at":1798999880,"pid":4242,"rate_limits":{"five_hour":{"used_percentage":10,"resets_at":1799500000}}}"#.to_string()];
+        let metadata = parse_metadata(Provider::Claude, &lines);
+        assert_eq!(metadata.snapshot_age_seconds, Some(120));
+        assert_eq!(metadata.pid_hint, Some(4242));
+    }
+
+    #[test]
+    fn builds_metadata_command_only_for_running_providers() {
+        let claude_only = metadata_command(RemoteOs::Linux, &HashSet::from([Provider::Claude]));
+        assert!(claude_only.contains("emit_agent_files claude"));
+        assert!(claude_only.contains("emit_agent_snapshots claude"));
+        assert!(!claude_only.contains("emit_agent_files codex"));
+        assert!(!claude_only.contains("sqlite3"));
+
+        let agy_only = metadata_command(RemoteOs::Linux, &HashSet::from([Provider::Agy]));
+        assert!(agy_only.contains("sqlite3"));
+        assert!(agy_only.contains("emit_agent_snapshots agy"));
+        assert!(!agy_only.contains("emit_agent_files claude"));
+
+        let windows = metadata_command(RemoteOs::Windows, &HashSet::from([Provider::Claude]));
+        assert!(windows.contains("Emit-AgentFiles 'claude'"));
+        assert!(windows.contains("Emit-AgentSnapshots 'claude'"));
+        assert!(windows.trim_end().ends_with("exit 0"));
+    }
+
+    #[test]
+    fn codex_live_account_response_normalizes_used_to_remaining() {
+        let response = serde_json::json!({
+            "id": 2,
+            "result": {
+                "rateLimits": {
+                    "limitId": "codex",
+                    "primary": {
+                        "usedPercent": 3,
+                        "windowDurationMins": 10080,
+                        "resetsAt": TEST_NOW + 3600
+                    },
+                    "secondary": null
+                },
+                "rateLimitsByLimitId": {
+                    "codex": {
+                        "limitId": "codex",
+                        "primary": {
+                            "usedPercent": 3,
+                            "windowDurationMins": 10080,
+                            "resetsAt": TEST_NOW + 3600
+                        },
+                        "secondary": null
+                    }
+                }
+            }
+        });
+        let quota = parse_codex_quota_response(&response, TEST_NOW).unwrap();
+        assert_eq!(quota.source, "codex-app-server");
+        assert_eq!(quota.limits.len(), 1);
+        assert_eq!(quota.limits[0].window_minutes, Some(10080));
+        assert_eq!(quota.limits[0].used_percent, Some(3.0));
+        assert_eq!(quota.limits[0].remaining_percent, Some(97.0));
+    }
+
+    #[test]
+    fn newest_account_quota_is_shared_instead_of_assigned_by_session() {
+        let older = AgentSessionMetadata {
+            session_id: Some("older".to_string()),
+            captured_at: Some(TEST_NOW - 100),
+            rate_limits: vec![AgentRateLimitMetric {
+                label: "primary".to_string(),
+                remaining_percent: Some(12.0),
+                used_percent: Some(88.0),
+                window_minutes: Some(10080),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let newest = AgentSessionMetadata {
+            session_id: Some("newest".to_string()),
+            captured_at: Some(TEST_NOW - 5),
+            rate_limits: vec![AgentRateLimitMetric {
+                label: "primary".to_string(),
+                remaining_percent: Some(97.0),
+                used_percent: Some(3.0),
+                window_minutes: Some(10080),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut state = AgentMonitorState::default();
+        state.metadata.insert(Provider::Codex, vec![older, newest]);
+        merge_metadata_quota_fallbacks(&mut state, &HashSet::from([Provider::Codex]), TEST_NOW);
+        let quota = state.quotas.get(&Provider::Codex).unwrap();
+        assert_eq!(quota.source, "codex-session-log");
+        assert_eq!(quota.limits[0].remaining_percent, Some(97.0));
+
+        let processes = parse_posix_processes(
+            "100 1 alice 1.0 1000 01:00 codex exec first\n\
+             200 1 alice 1.0 1000 01:00 codex exec second\n",
+        );
+        let metrics = build_agent_metrics(&processes, &state.metadata, &state.quotas);
+        assert_eq!(metrics.len(), 2);
+        assert!(metrics
+            .iter()
+            .all(|metric| metric.quota.limits[0].remaining_percent == Some(97.0)));
+    }
+
+    #[test]
+    fn advances_quota_age_and_marks_windows_expired() {
+        let mut state = AgentMonitorState::default();
+        state.quotas.insert(
+            Provider::Codex,
+            AgentQuotaSnapshot::available(
+                "codex-app-server",
+                Some(TEST_NOW - 180),
+                vec![AgentRateLimitMetric {
+                    label: "primary".to_string(),
+                    remaining_percent: Some(97.0),
+                    resets_at: Some(TEST_NOW + 30),
+                    ..Default::default()
+                }],
+                TEST_NOW - 180,
+            ),
+        );
+
+        update_quota_snapshots(&mut state, TEST_NOW + 120);
+        let quota = state.quotas.get(&Provider::Codex).unwrap();
+        assert_eq!(quota.snapshot_age_seconds, Some(300));
+        assert_eq!(quota.status, "stale");
+        assert!(quota.limits[0].stale);
+    }
+
+    #[test]
+    fn parses_agy_usage_tui_groups_remaining_and_refresh_times() {
+        let output = concat!(
+            "\u{1b}[1mGEMINI MODELS\u{1b}[0m\r\n",
+            "Models within this group: Gemini Flash, Gemini Pro\r\n",
+            "Weekly Limit\r\n",
+            "[||||] 99.90%\r\n",
+            "100% remaining · Refreshes in 95h 58m\r\n",
+            "Five Hour Limit\r\n",
+            "[||||] 100.00%\r\n",
+            "Quota available\r\n",
+            "CLAUDE AND GPT MODELS\r\n",
+            "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS\r\n",
+            "Weekly Limit\r\n",
+            "[||||] 100.00%\r\n",
+            "Quota available\r\n",
+            "Five Hour Limit\r\n",
+            "[||||] 100.00%\r\n",
+            "Quota available\r\n",
+        );
+        let quota = parse_agy_usage_output(output, TEST_NOW).unwrap();
+        assert_eq!(quota.source, "agy-usage-tui");
+        assert_eq!(quota.limits.len(), 4);
+        assert_eq!(quota.limits[0].group.as_deref(), Some("Gemini models"));
+        assert_eq!(quota.limits[0].remaining_percent, Some(99.9));
+        assert_eq!(
+            quota.limits[0].resets_at,
+            Some(TEST_NOW + 95 * 3600 + 58 * 60)
+        );
+        assert_eq!(
+            quota.limits[0].model_names,
+            vec!["Gemini Flash", "Gemini Pro"]
+        );
+        assert_eq!(quota.limits[1].remaining_percent, Some(100.0));
+        assert_eq!(
+            quota.limits[2].group.as_deref(),
+            Some("Claude and GPT models")
+        );
+        assert_eq!(quota.limits[2].remaining_percent, Some(100.0));
+        assert_eq!(
+            quota.limits[2].model_names,
+            vec!["Claude Opus", "Claude Sonnet", "GPT-OSS"]
+        );
+    }
+
+    #[test]
+    fn agy_usage_redraws_keep_the_latest_precise_value_and_wrapped_model_names() {
+        let first = concat!(
+            "GEMINI MODELS\n",
+            "Models within this group: Gemini Flash, Gemini Pro\n",
+            "Weekly Limit\n[||||] 80.25%\n80% remaining\n",
+            "Five Hour Limit\n[||||] 90.50%\n91% remaining\n",
+            "CLAUDE AND GPT MODELS\n",
+            "Models within this group: Claude Opus, Claude\n",
+            "Sonnet, GPT-OSS\n",
+            "Weekly Limit\n[||||] 70.75%\n71% remaining\n",
+            "Five Hour Limit\n[||||] 60.25%\n60% remaining\n",
+        );
+        let redraw = concat!(
+            "GEMINI MODELS\n",
+            "Models within this group: Gemini Flash, Gemini Pro\n",
+            "Weekly Limit\n[||||] 79.95%\n80% remaining\n",
+            "Five Hour Limit\n[||||] 89.75%\n90% remaining\n",
+            "CLAUDE AND GPT MODELS\n",
+            "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS\n",
+            "Weekly Limit\n[||||] 69.50%\n70% remaining\n",
+            "Five Hour Limit\n[||||] 59.95%\n60% remaining\n",
+        );
+        let quota = parse_agy_usage_output(&format!("{}{}", first, redraw), TEST_NOW).unwrap();
+        assert_eq!(quota.limits.len(), 4);
+        assert_eq!(quota.limits[0].remaining_percent, Some(79.95));
+        assert_eq!(quota.limits[1].remaining_percent, Some(89.75));
+        assert_eq!(quota.limits[2].remaining_percent, Some(69.5));
+        assert_eq!(quota.limits[3].remaining_percent, Some(59.95));
+        assert_eq!(
+            quota.limits[2].model_names,
+            vec!["Claude Opus", "Claude Sonnet", "GPT-OSS"]
+        );
+    }
+
+    #[test]
+    fn parses_cursor_positioned_agy_output_and_joined_bar_status_lines() {
+        let output = concat!(
+            "\u{1b}[1;1HGEMINI MODELS",
+            "\u{1b}[2;1HModels within this group: Gemini Flash, Gemini Pro",
+            "\u{1b}[3;1HWeekly Limit",
+            "\u{1b}[4;1H[||||] 99.90% 100% remaining · Refreshes in 95h 58m",
+            "\u{1b}[5;1HFive Hour Limit",
+            "\u{1b}[6;1H[||||] 100.00% Quota available",
+            "\u{1b}[7;1HCLAUDE AND GPT MODELS",
+            "\u{1b}[8;1HModels within this group: Claude Opus, Claude Sonnet, GPT-OSS",
+            "\u{1b}[9;1HWeekly Limit",
+            "\u{1b}[10;1H[||||] 100.00% Quota available",
+            "\u{1b}[11;1HFive Hour Limit",
+            "\u{1b}[12;1H[||||] 100.00% Quota available",
+        );
+        let quota = parse_agy_usage_output(output, TEST_NOW).unwrap();
+        assert_eq!(quota.limits.len(), 4);
+        assert_eq!(quota.limits[0].remaining_percent, Some(99.9));
+        assert_eq!(
+            quota.limits[0].resets_at,
+            Some(TEST_NOW + 95 * 3600 + 58 * 60)
+        );
+        assert!(quota
+            .limits
+            .iter()
+            .all(|limit| !limit.model_names.is_empty()));
+    }
+
+    #[test]
+    fn waits_for_both_agy_model_groups_before_finishing_the_probe() {
+        let gemini_only = concat!(
+            "GEMINI MODELS\n",
+            "Weekly Limit\n100% remaining\n",
+            "Five Hour Limit\n99% remaining\n",
+        );
+        assert!(!agy_usage_output_complete(gemini_only));
+
+        let complete = concat!(
+            "GEMINI MODELS\n",
+            "Weekly Limit\n100% remaining\n",
+            "Five Hour Limit\n99% remaining\n",
+            "CLAUDE AND GPT MODELS\n",
+            "Weekly Limit\nQuota available\n",
+            "Five Hour Limit\nQuota available\n",
+        );
+        assert!(agy_usage_output_complete(complete));
+    }
+
+    #[test]
+    fn agy_startup_requires_visible_output_and_writes_only_slash_usage_once() {
+        let (control_sender, control_receiver) = mpsc::channel();
+        control_sender.send(b"\x1b[?1049h".to_vec()).unwrap();
+        assert!(wait_for_agy_startup(&control_receiver, Duration::from_millis(2)).is_err());
+
+        let (ready_sender, ready_receiver) = mpsc::channel();
+        ready_sender
+            .send(b"\x1b[?1049hAGY ready".to_vec())
+            .unwrap();
+        assert!(wait_for_agy_startup(&ready_receiver, Duration::from_millis(2)).is_ok());
+
+        let mut written = Vec::new();
+        write_agy_usage_command(&mut written).unwrap();
+        assert_eq!(written, b"/usage\r");
+    }
+
+    #[test]
+    fn agy_probe_output_collection_stops_at_timeout_without_inventing_data() {
+        let (_sender, receiver) = mpsc::channel::<Vec<u8>>();
+        let output = collect_pty_probe_output(&receiver, Duration::from_millis(2));
+        assert!(output.is_empty());
+        assert!(parse_agy_usage_output("", TEST_NOW).is_err());
+    }
+
+    #[test]
+    fn agy_history_replaces_five_minute_buckets_and_keeps_failure_gaps() {
+        let base = TEST_NOW / AGY_QUOTA_HISTORY_BUCKET_SECONDS * AGY_QUOTA_HISTORY_BUCKET_SECONDS;
+        let mut history = Vec::new();
+        let available = |captured_at, remaining_percent| AgentQuotaHistoryPoint {
+            captured_at,
+            status: "available".to_string(),
+            limits: vec![AgentQuotaHistoryLimit {
+                group: Some("Gemini models".to_string()),
+                window_minutes: 300,
+                remaining_percent: Some(remaining_percent),
+            }],
+        };
+        let unavailable = |captured_at| AgentQuotaHistoryPoint {
+            captured_at,
+            status: "unavailable".to_string(),
+            limits: Vec::new(),
+        };
+
+        upsert_agy_history_point(&mut history, available(base + 1, 90.0), base + 1);
+        upsert_agy_history_point(&mut history, unavailable(base + 20), base + 20);
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].status, "unavailable");
+        assert!(history[0].limits.is_empty());
+
+        upsert_agy_history_point(&mut history, available(base + 40, 88.0), base + 40);
+        upsert_agy_history_point(
+            &mut history,
+            unavailable(base + AGY_QUOTA_HISTORY_BUCKET_SECONDS + 1),
+            base + AGY_QUOTA_HISTORY_BUCKET_SECONDS + 1,
+        );
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].limits[0].remaining_percent, Some(88.0));
+        assert_eq!(history[1].status, "unavailable");
+    }
+
+    #[test]
+    fn agy_history_is_memory_only_bounded_and_shared_across_reconnects() {
+        let histories = AgentQuotaHistories::default();
+        let key = "ssh:alice@example.test:22".to_string();
+        let base = TEST_NOW / AGY_QUOTA_HISTORY_BUCKET_SECONDS * AGY_QUOTA_HISTORY_BUCKET_SECONDS;
+        let quota = AgentQuotaSnapshot::available(
+            "agy-usage-tui",
+            Some(base),
+            vec![
+                AgentRateLimitMetric {
+                    label: "five_hour".to_string(),
+                    group: Some("Gemini models".to_string()),
+                    remaining_percent: Some(91.0),
+                    window_minutes: Some(300),
+                    ..Default::default()
+                },
+                AgentRateLimitMetric {
+                    label: "weekly".to_string(),
+                    group: Some("Gemini models".to_string()),
+                    remaining_percent: Some(84.0),
+                    window_minutes: Some(10_080),
+                    ..Default::default()
+                },
+            ],
+            base,
+        );
+
+        let mut first_connection = AgentMonitorState::default();
+        first_connection.configure_agy_history(key.clone(), histories.clone());
+        record_agy_history(&mut first_connection, base, Some(&quota));
+
+        let mut reconnected = AgentMonitorState::default();
+        reconnected.configure_agy_history(key, histories.clone());
+        assert_eq!(reconnected.agy_history.len(), 1);
+        assert_eq!(reconnected.agy_history[0].limits.len(), 2);
+
+        let mut stored = histories.lock().unwrap();
+        let history = stored.values_mut().next().unwrap();
+        for index in 1..=300 {
+            let captured_at = base + index * AGY_QUOTA_HISTORY_BUCKET_SECONDS;
+            upsert_agy_history_point(
+                history,
+                AgentQuotaHistoryPoint {
+                    captured_at,
+                    status: "unavailable".to_string(),
+                    limits: Vec::new(),
+                },
+                captured_at,
+            );
+        }
+        assert_eq!(history.len(), AGY_QUOTA_HISTORY_MAX_POINTS);
+        assert!(
+            history.last().unwrap().captured_at - history.first().unwrap().captured_at
+                < AGY_QUOTA_HISTORY_WINDOW_SECONDS
+        );
+        assert!(history
+            .iter()
+            .all(|point| point.status == "available" || point.status == "unavailable"));
+    }
+
+    #[test]
+    fn detects_custom_claude_status_line_without_overwriting_it() {
+        let settings = serde_json::json!({
+            "statusLine": {
+                "type": "command",
+                "command": "~/.claude/my-status.sh"
+            }
+        });
+        assert_eq!(
+            claude_status_line_command(&settings).as_deref(),
+            Some("~/.claude/my-status.sh")
+        );
     }
 
     #[test]

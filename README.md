@@ -76,7 +76,7 @@ Nothing is ever installed on your servers: every metric comes from one-shot stan
 - **Collapsible monitoring bar** — close it independently and restore it from the bottom-right; visibility is remembered across launches
 - **NVIDIA, AMD, Intel, and Apple Silicon** GPUs are auto-detected per host; every card carries a vendor tag
 - **Hybrid iGPU + dGPU hosts show both cards** — Linux supplements vendor tools with DRM/sysfs adapter discovery, while Windows attributes counters by DirectX LUID and keeps idle adapters visible even before WDDM creates an activity counter
-- **AGY, Codex, and Claude Code monitoring** — aggregate CPU/RAM and elapsed time across each CLI's complete child-process tree, with remaining context and quota promoted to GPU/RAM-style gauges. Codex weekly limits, Claude 5-hour/weekly limits, and AGY Gemini vs. Claude/GPT model-group limits are normalized when the provider reports them
+- **AI DASH for AGY, Codex, and Claude Code** — the bottom card shows every available 5-hour and weekly balance at once in compact gauges, while the detail view retains context, tokens, and aggregate CPU/RAM across each CLI's complete child-process tree. AGY uses the precise percentage printed beside each `/usage` bar, lists the models in each group, and plots their in-memory 24-hour trend
 - Click any section for a **draggable, resizable detail popover** whose tables expand with the window: per-core CPU usage, top processes, VRAM/power/temperature per GPU, full mount list
 - **Pop any detail view out into its own OS window** — it refreshes independently and closes with its session
 - Remote telemetry runs on a dedicated SSH connection with automatic reconnect; local telemetry executes collectors directly without SSH
@@ -231,7 +231,7 @@ npm run tauri:build
 - **Mode:** GPU + System, GPU only, or System only.
 - **Ignore FS:** comma-separated filesystem types hidden from the disk summary (default: `tmpfs`, `devtmpfs`, `squashfs`, `proc`, `sysfs`, `cgroup`, `cgroup2`, `overlay`, `devfs`, `autofs`). The disk popover can temporarily reveal them.
 - Mount points are prioritized `/` → `/home` → `/data` → `/mnt*` → `/media*` → drive letters → others; disks ≥ 80% are flagged warning, ≥ 90% critical.
-- **Agents:** the System modes include a separate AGY/Codex/Claude Code card. Remaining context and quota are shown first as color gauges; process resources, token totals, session metadata, subagents, and background tasks remain available below. CPU and memory include descendants such as language servers, subagents, and background commands rather than only the launcher process. Codex session records supply the current weekly window, while Claude Code status-line snapshots can supply context plus subscriber 5-hour and 7-day windows. AGY grouped snapshots preserve separate Gemini Models and Claude and GPT Models weekly/5-hour gauges.
+- **AI DASH:** the System modes include a 360 px summary card for AGY, Codex, and Claude Code. Its thin two-column gauges show every available 5-hour and weekly balance simultaneously; unsupported periods show `n/a`, expired windows show `reset`, and warning colors start at 25% and 10% remaining. Duplicate sessions share the newest account snapshot. The detail view keeps context and token data collapsed and includes descendants such as language servers, subagents, and background commands in CPU/memory totals. Codex uses account-wide `account/rateLimits/read` and labels its session-log fallback. Claude Code limits come from [Claude Code usage limits](#claude-code-usage-limits). AGY experimentally reads `/usage` in a hidden PTY every five minutes, preserves the Gemini and Claude/GPT model groups, and plots successful and failed samples over the last 24 hours without estimating missing balances.
 
 </details>
 
@@ -248,13 +248,41 @@ All metrics come from standard tools over SSH — nothing is installed on the se
 | Users | `who` | `who` | `quser` |
 | GPU | `nvidia-smi` (NVIDIA), `rocm-smi --json` (AMD/ROCm), `xpu-smi` / `intel_gpu_top` (Intel), plus `/sys/class/drm/card*/device` for uncovered adapters | `ioreg -c IOAccelerator` (Apple GPU utilization, no root needed) | `nvidia-smi` (NVIDIA, full metrics); WDDM GPU performance counters for AMD/Intel (utilization + VRAM) |
 | Top processes | `ps -eo … --sort=-%cpu` / `--sort=-rss` | `ps -Ao … -r` / `-m` | `Get-Process` (two-sample CPU delta) |
-| AI coding agents | `ps -axo …`; metadata tails plus read-only AGY SQLite generator metadata through Python 3 when available | same | `Win32_Process` + `Get-Process`; metadata tails plus the same optional Python 3 AGY reader |
+| AI DASH | `ps -axo …`; provider metadata; Codex app-server quota lookup; optional AGY `/usage` PTY probe | same | `Win32_Process` + `Get-Process`; provider metadata, Codex account lookup, and optional AGY `/usage` ConPTY probe |
 
-Commands run with a 3-second timeout on a dedicated SSH connection (10 s on Windows to absorb PowerShell start-up). Windows commands are batched into a single PowerShell 5.1 invocation per poll and sent as `-EncodedCommand`, so they work with either cmd.exe or PowerShell as the OpenSSH default shell — nothing is installed and no admin rights are required. For a local Windows session, the same collectors use the system PowerShell directly with `CREATE_NO_WINDOW` and explicit UTF-8 text output, preventing polling consoles from appearing and preserving localized JSON fields. GpuTerm detects the remote OS and available GPU tools per host and shows a vendor tag on every card; `intel_gpu_top` needs root or `CAP_PERFMON`, and Apple GPU power/temperature would need root `powermetrics`, so they show as n/a. Linux DRM/sysfs supplies adapter identity and any driver-exported utilization/VRAM counters for GPUs not covered by a richer vendor collector. If no GPU source is present, the GPU section reports unavailable while everything else keeps working.
+Commands run with a 3-second timeout on a dedicated SSH connection (10 s on Windows to absorb PowerShell start-up); Codex account reads use 5 seconds and the experimental AGY PTY probe uses 15 seconds. Windows commands are batched into a single PowerShell 5.1 invocation per poll and sent as `-EncodedCommand`, so they work with either cmd.exe or PowerShell as the OpenSSH default shell — nothing is installed and no admin rights are required. For a local Windows session, the same collectors use the system PowerShell directly with `CREATE_NO_WINDOW` and explicit UTF-8 text output, preventing polling consoles from appearing and preserving localized JSON fields. GpuTerm detects the remote OS and available GPU tools per host and shows a vendor tag on every card; `intel_gpu_top` needs root or `CAP_PERFMON`, and Apple GPU power/temperature would need root `powermetrics`, so they show as n/a. Linux DRM/sysfs supplies adapter identity and any driver-exported utilization/VRAM counters for GPUs not covered by a richer vendor collector. If no GPU source is present, the GPU section reports unavailable while everything else keeps working.
 
-Agent monitoring is read-only. Process totals are collected every telemetry interval; session metadata is refreshed at most every five seconds from recent Codex (`~/.codex/sessions`) and Claude Code (`~/.claude/projects`) records. For AGY 1.0, GpuTerm uses Python 3's standard `sqlite3` module, when present, to read only `gen_metadata` from the two newest `~/.gemini/antigravity-cli/conversations/*.db` files. It decodes token counters, model name, and context size without selecting steps, prompts, responses, tool arguments, credentials, or environment data. Optional AGY/Claude status-line integrations can publish richer live state to `~/.cache/gputerm/agent-status/{agy,claude}.json`; Claude's official `context_window.remaining_percentage` and subscriber `rate_limits` fields are understood directly. AGY quota objects may be nested by model group and use `weekly_limit` / `five_hour_limit`; GpuTerm preserves those group names and accepts remaining percentage or fraction plus reset timestamps. If a provider does not publish a quota snapshot, the UI says so instead of estimating a balance.
+AI DASH monitoring is read-only except when the user explicitly presses Claude's **Set up** button. Process totals are collected every telemetry interval and session metadata at most every five seconds. Account quotas are kept separately from session context: every live session for one provider receives the same newest account snapshot. Codex queries `account/rateLimits/read` at most once per minute and falls back to the newest timestamped session-log record if the app-server lookup fails. While AGY is running, GpuTerm waits for a hidden PTY to become ready, sends `/usage` exactly once on first detection and then at most once per five minutes, and never sends a plain `usage` command. The precise bar percentage takes precedence over the rounded `remaining` line; model membership and reset countdowns are also normalized. GpuTerm keeps one point per five-minute bucket for the latest 24 hours (maximum 288) in memory only; reconnects in the same app run share that history, failures create visible graph gaps, and app exit discards it. Raw terminal output is discarded after parsing. Prompts, responses, tool arguments, credentials, and environment data are never serialized.
 
 </details>
+
+### Claude Code usage limits
+
+Claude Code never writes its 5-hour and 7-day usage limits to a session transcript — the status-line hook is the only place it publishes them. GpuTerm ships a status line that republishes that data for AI DASH and prints a usable status line of its own:
+
+The easiest setup is **AI DASH → Claude Code → Set up**. GpuTerm backs up `settings.json`, installs the helper on that local or SSH host, and never replaces an unrelated custom status line. The commands below remain available for manual POSIX setup.
+
+```bash
+cp scripts/gputerm-claude-statusline.sh ~/.claude/gputerm-claude-statusline.sh && chmod +x ~/.claude/gputerm-claude-statusline.sh
+```
+
+Then add it to `~/.claude/settings.json`:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "~/.claude/gputerm-claude-statusline.sh",
+    "padding": 0
+  }
+}
+```
+
+The status line prints `Opus · ctx 8% · 5h 76% · wk 59% · $0.12` and writes `~/.cache/gputerm/agent-status/claude/<session-id>.json`. Install it on every host you want to monitor, including remote ones. Automatic Windows setup installs the equivalent `gputerm-claude-statusline.py`; Python 3 is required.
+
+Only these fields are written: session id, working directory, model name and id, `context_window` (including `current_usage`), `cost.total_cost_usd`, `cost.total_duration_ms`, `rate_limits.{five_hour,seven_day}.{used_percentage,resets_at}`, a capture timestamp, and the agent pid when available. Prompts, responses, tool input and output, transcript paths, session names, and repository details are never copied. Snapshots older than seven days are pruned on the next run.
+
+Two conditions come from Claude Code itself: `rate_limits` is present for subscription accounts only, and it appears after the session's first response. Until then the card reports that no quota snapshot was published rather than guessing a balance.
 
 ## Architecture
 
@@ -382,7 +410,7 @@ GpuTerm is free for personal and noncommercial use under [PolyForm Noncommercial
 | Host key mismatch | Verify the server fingerprint out-of-band, then remove the stale entry from `known_hosts.json` |
 | GPU shows unavailable | Confirm a GPU tool is installed (`nvidia-smi`, `rocm-smi`, `xpu-smi`, or `intel_gpu_top`) or Linux `/sys/class/drm` is readable; other metrics still work regardless |
 | Hybrid Windows PC only shows the dGPU | Update to the latest build. Idle Intel/AMD adapters are now retained from `Win32_VideoController` even when WDDM has not created a GPU Engine counter instance yet |
-| Agents card is empty | Confirm `agy`, `codex`, or `claude` is running under a user visible to the telemetry account. CPU/RAM appears from the process tree; AGY token/context metadata additionally needs `python3` or `python` on the monitored host |
+| AI DASH card is empty | Confirm `agy`, `codex`, or `claude` is running under a user visible to the telemetry account. CPU/RAM appears from the process tree; AGY token/context metadata additionally needs `python3` or `python` on the monitored host |
 | Local Windows session flashes console windows or has no monitoring data | Fixed in v1.1.6-beta — update the app; local PowerShell collectors now run without a console and use UTF-8 output |
 | Windows remote shows “The system cannot find the path specified” | Fixed in v1.0.9-beta — older builds misdetected Windows hosts that have a `uname` port on PATH as Linux; update the app |
 | Korean input splits into jamo in the terminal | Fixed for macOS/WebKit clients — update to the latest release |

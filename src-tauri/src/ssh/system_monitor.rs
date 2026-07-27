@@ -1,16 +1,16 @@
-use crate::ssh::agent_monitor::{self, AgentMetric, AgentMonitorState};
+use crate::ssh::agent_monitor::{self, AgentMetric, AgentMonitorState, AgentQuotaHistories};
 use crate::ssh::gpu_monitor::{
-    append_uncovered_linux_drm, parse_gpu_probe, parse_intel_gpu_top_stream,
-    parse_linux_drm_gpus, parse_nvidia_smi_csv, parse_rocm_smi_json, parse_xpu_discovery,
-    parse_xpu_stats, xpu_stats_command, GpuMetric, GpuProbe, GPU_PROBE_COMMAND,
-    INTEL_GPU_TOP_COMMAND, LINUX_DRM_GPU_COMMAND, NVIDIA_SMI_QUERY, XPU_DISCOVERY_COMMAND,
+    append_uncovered_linux_drm, parse_gpu_probe, parse_intel_gpu_top_stream, parse_linux_drm_gpus,
+    parse_nvidia_smi_csv, parse_rocm_smi_json, parse_xpu_discovery, parse_xpu_stats,
+    xpu_stats_command, GpuMetric, GpuProbe, GPU_PROBE_COMMAND, INTEL_GPU_TOP_COMMAND,
+    LINUX_DRM_GPU_COMMAND, NVIDIA_SMI_QUERY, XPU_DISCOVERY_COMMAND,
 };
 use crate::ssh::macos_monitor;
 use crate::ssh::parse_util::{
     kib_to_mib, parse_average_clock, parse_cpu_model, parse_first_u64, parse_loadavg,
     parse_lscpu_value, parse_meminfo_values, required_section, split_sections,
 };
-use crate::ssh::session::{open_ssh_session, AppState, SshTarget};
+use crate::ssh::session::{open_ssh_session, AgentQuotaRefreshes, AppState, SshTarget};
 use crate::ssh::windows_monitor;
 use base64::Engine as _;
 use chrono::{SecondsFormat, Utc};
@@ -253,9 +253,19 @@ pub fn start(
     target: SshTarget,
     stop: Arc<AtomicBool>,
     settings: Arc<Mutex<SystemMonitorSettings>>,
+    quota_refreshes: AgentQuotaRefreshes,
+    quota_histories: AgentQuotaHistories,
 ) {
     thread::spawn(move || {
         let mut backoff = RECONNECT_BACKOFF_INITIAL;
+        let history_key = format!(
+            "ssh:{}@{}:{}",
+            target.username,
+            target.host.to_ascii_lowercase(),
+            target.port
+        );
+        let mut agent_state = AgentMonitorState::default();
+        agent_state.configure_agy_history(history_key, quota_histories);
         while !stop.load(Ordering::SeqCst) {
             // `connection` is bound per reconnect iteration, so its jump-host
             // tunnel (if any) is torn down before the next attempt.
@@ -274,7 +284,6 @@ pub fn start(
 
             let mut previous_cpu = None;
             let mut gpu_probe = None;
-            let mut agent_state = AgentMonitorState::default();
             let mut host_os: Option<RemoteOs> = None;
             let mut consecutive_total_failures = 0_u32;
             while !stop.load(Ordering::SeqCst) {
@@ -296,6 +305,7 @@ pub fn start(
                         session.set_timeout(WINDOWS_COMMAND_TIMEOUT_MS);
                     }
                 }
+                apply_agent_quota_refreshes(&target.session_id, &quota_refreshes, &mut agent_state);
                 let telemetry = collect_remote_telemetry(
                     &target.session_id,
                     session,
@@ -329,11 +339,14 @@ pub fn start_local(
     session_id: String,
     stop: Arc<AtomicBool>,
     settings: Arc<Mutex<SystemMonitorSettings>>,
+    quota_refreshes: AgentQuotaRefreshes,
+    quota_histories: AgentQuotaHistories,
 ) {
     thread::spawn(move || {
         let os = local_os();
         let mut previous_cpu = None;
         let mut agent_state = AgentMonitorState::default();
+        agent_state.configure_agy_history(local_agent_history_key(), quota_histories);
         let mut gpu_probe = (os == RemoteOs::MacOs).then(|| GpuProbe {
             apple: true,
             ..GpuProbe::default()
@@ -344,18 +357,48 @@ pub fn start_local(
                 .lock()
                 .map(|settings| settings.clone())
                 .unwrap_or_default();
-            let telemetry =
-                collect_local_telemetry(
-                    &session_id,
-                    os,
-                    &mut previous_cpu,
-                    &mut gpu_probe,
-                    &mut agent_state,
-                );
+            apply_agent_quota_refreshes(&session_id, &quota_refreshes, &mut agent_state);
+            let telemetry = collect_local_telemetry(
+                &session_id,
+                os,
+                &mut previous_cpu,
+                &mut gpu_probe,
+                &mut agent_state,
+            );
             emit_telemetry(&app, telemetry);
             sleep_with_stop(settings_snapshot.telemetry_interval_secs, &stop);
         }
     });
+}
+
+fn local_agent_history_key() -> String {
+    let username = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "unknown".to_string());
+    let hostname = std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .unwrap_or_else(|_| "localhost".to_string());
+    format!(
+        "local:{}@{}",
+        username.to_ascii_lowercase(),
+        hostname.to_ascii_lowercase()
+    )
+}
+
+fn apply_agent_quota_refreshes(
+    session_id: &str,
+    requests: &AgentQuotaRefreshes,
+    state: &mut AgentMonitorState,
+) {
+    let providers = requests
+        .lock()
+        .ok()
+        .and_then(|mut requests| requests.remove(session_id));
+    if let Some(providers) = providers {
+        for provider in providers {
+            state.force_quota_refresh(&provider);
+        }
+    }
 }
 
 fn emit_connection_error_telemetry(app: &AppHandle, session_id: &str, error: &str) {
