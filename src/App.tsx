@@ -12,14 +12,11 @@ import { SftpBrowser } from "./components/SftpBrowser";
 import { TerminalPane } from "./components/TerminalPane";
 import { useSessionStore } from "./stores/sessionStore";
 import type { RemoteTelemetry, TelemetrySettings } from "./types/gpu";
-import type { SessionProfile, SftpProgressPayload } from "./types/session";
-
-type TerminalClosedPayload = {
-  sessionId: string;
-  terminalId?: string;
-  sessionClosed?: boolean;
-  message?: string | null;
-};
+import type {
+  SessionProfile,
+  SftpProgressPayload,
+  TerminalClosedPayload,
+} from "./types/session";
 
 const SFTP_WIDTH_STORAGE_KEY = "gputerm.sftpWidth";
 const MIN_SFTP_WIDTH = 280;

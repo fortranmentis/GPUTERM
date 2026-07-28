@@ -11,13 +11,9 @@ import { MemoryDetailContent } from "./MemoryUsagePopover";
 import { UsersDetailContent } from "./UsersPopover";
 import type { RemoteTelemetry, TelemetrySettings } from "../types/gpu";
 import type { ResourceDetails } from "../types/resourceDetails";
+import type { TerminalClosedPayload } from "../types/session";
 
 type DetailResource = "cpu" | "memory" | "gpu" | "disk" | "users" | "agents";
-
-type TerminalClosedPayload = {
-  sessionId: string;
-  sessionClosed?: boolean;
-};
 
 const RESOURCE_META: Record<DetailResource, { title: string; icon: ReactNode }> = {
   cpu: { title: "CPU details", icon: <Cpu size={16} /> },

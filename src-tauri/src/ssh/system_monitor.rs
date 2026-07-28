@@ -18,11 +18,11 @@ use serde::{Deserialize, Serialize};
 use ssh2::Session;
 use std::ffi::OsString;
 use std::io::Read;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
 
 #[cfg(target_os = "windows")]
@@ -38,6 +38,14 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// script samples counters for 500 ms, so Windows remotes get a longer
 /// libssh2 session timeout than the Unix paths.
 pub(crate) const WINDOWS_COMMAND_TIMEOUT_MS: u32 = 10_000;
+/// Upper bound for one local collector run. Generous enough for a slow
+/// PowerShell start-up, small enough that a wedged command cannot stall the
+/// telemetry thread indefinitely.
+const LOCAL_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
+const LOCAL_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(25);
+/// Head-room so the remote `timeout` wrapper, not libssh2's read timeout,
+/// is what bounds a command.
+const SESSION_TIMEOUT_SLACK_MS: u64 = 3_000;
 const DEFAULT_INTERVAL_SECS: u64 = 2;
 const DEFAULT_IGNORED_FS_TYPES: &[&str] = &[
     "tmpfs", "devtmpfs", "squashfs", "proc", "sysfs", "cgroup", "cgroup2", "overlay", "devfs",
@@ -307,7 +315,7 @@ pub fn start(
                 }
                 apply_agent_quota_refreshes(&target.session_id, &quota_refreshes, &mut agent_state);
                 let telemetry = collect_remote_telemetry(
-                    &target.session_id,
+                    &target,
                     session,
                     host_os.unwrap_or(RemoteOs::Linux),
                     &mut previous_cpu,
@@ -445,7 +453,7 @@ fn emit_telemetry(app: &AppHandle, telemetry: RemoteTelemetry) {
 }
 
 fn collect_remote_telemetry(
-    session_id: &str,
+    target: &SshTarget,
     session: &Session,
     os: RemoteOs,
     previous_cpu: &mut Option<CpuStatSample>,
@@ -454,7 +462,7 @@ fn collect_remote_telemetry(
 ) -> RemoteTelemetry {
     if os == RemoteOs::Windows {
         return collect_windows_telemetry(
-            session_id,
+            target,
             session,
             previous_cpu,
             gpu_probe,
@@ -533,7 +541,7 @@ fn collect_remote_telemetry(
             Vec::new()
         }
     };
-    let agents = match agent_monitor::collect_remote_agents(session, os, agent_state) {
+    let agents = match agent_monitor::collect_remote_agents(session, target, os, agent_state) {
         Ok(metrics) => metrics,
         Err(error) => {
             errors.agents = Some(error);
@@ -542,7 +550,7 @@ fn collect_remote_telemetry(
     };
 
     RemoteTelemetry {
-        session_id: session_id.to_string(),
+        session_id: target.session_id.clone(),
         timestamp: timestamp(),
         hostname,
         cpu,
@@ -1000,7 +1008,7 @@ fn collect_windows_gpu_metrics(
 /// memory, disks, and users (PowerShell start-up is too slow for one command
 /// per section); GPUs keep their own commands like the Unix path.
 fn collect_windows_telemetry(
-    session_id: &str,
+    target: &SshTarget,
     session: &Session,
     previous_cpu: &mut Option<CpuStatSample>,
     gpu_probe: &mut Option<GpuProbe>,
@@ -1060,7 +1068,8 @@ fn collect_windows_telemetry(
         }
     };
     let agents =
-        match agent_monitor::collect_remote_agents(session, RemoteOs::Windows, agent_state) {
+        match agent_monitor::collect_remote_agents(session, target, RemoteOs::Windows, agent_state)
+        {
             Ok(metrics) => metrics,
             Err(error) => {
                 errors.agents = Some(error);
@@ -1069,7 +1078,7 @@ fn collect_windows_telemetry(
         };
 
     RemoteTelemetry {
-        session_id: session_id.to_string(),
+        session_id: target.session_id.clone(),
         timestamp: timestamp(),
         hostname,
         cpu,
@@ -1113,20 +1122,48 @@ pub fn parse_who_output(output: &str) -> Vec<RemoteUserSession> {
 }
 
 pub(crate) fn run_remote_command(session: &Session, command: &str) -> Result<String, String> {
+    run_remote_command_with_budget(session, command, COMMAND_TIMEOUT_SECS)
+}
+
+/// Runs one POSIX collector with an explicit time budget.
+///
+/// The remote `timeout` wrapper and libssh2's own read timeout are raised
+/// together: if the session timeout were left at the default it would fire
+/// first, abandoning the channel mid-read and reporting a transport error
+/// instead of the intended timeout. The session timeout is always restored, so
+/// later calls keep the short default.
+pub(crate) fn run_remote_command_with_budget(
+    session: &Session,
+    command: &str,
+    budget_secs: u64,
+) -> Result<String, String> {
     // `timeout` is missing on macOS <= 12, so fall back to a bare shell there;
     // libssh2's session timeout still bounds the fallback branch.
     let quoted = shell_quote(command);
     let wrapped = format!(
         "command -v timeout >/dev/null 2>&1 && exec timeout {secs}s sh -lc {quoted}; exec sh -lc {quoted}",
-        secs = COMMAND_TIMEOUT_SECS,
+        secs = budget_secs,
         quoted = quoted
     );
-    let (stdout, stderr, exit_status) = exec_remote(session, &wrapped)?;
+
+    let previous_timeout = session.timeout();
+    let session_timeout = budget_secs
+        .saturating_mul(1000)
+        .saturating_add(SESSION_TIMEOUT_SLACK_MS)
+        .min(u32::MAX as u64) as u32;
+    if session_timeout != previous_timeout {
+        session.set_timeout(session_timeout);
+    }
+    let result = exec_remote(session, &wrapped);
+    if session_timeout != previous_timeout {
+        session.set_timeout(previous_timeout);
+    }
+    let (stdout, stderr, exit_status) = result?;
 
     if exit_status == 124 {
         return Err(format!(
             "telemetry command timed out after {}s",
-            COMMAND_TIMEOUT_SECS
+            budget_secs
         ));
     }
 
@@ -1154,11 +1191,50 @@ pub(crate) fn run_remote_command_for(
 /// Only stdout crosses into the parser and no shell output is exposed to the
 /// terminal session itself.
 pub(crate) fn run_local_command_for(os: RemoteOs, command: &str) -> Result<String, String> {
-    let mut process = local_collector_command(os, command);
-    let output = process
-        .output()
+    run_local_command_with_timeout(os, command, LOCAL_COMMAND_TIMEOUT)
+}
+
+/// Runs a local collector with an upper bound on how long it may take.
+///
+/// `Command::output` waits forever, so one wedged collector (a hung mount, a
+/// stuck PowerShell) would stall the telemetry thread for the life of the
+/// session. The child is killed once the budget is gone.
+pub(crate) fn run_local_command_with_timeout(
+    os: RemoteOs,
+    command: &str,
+    timeout: Duration,
+) -> Result<String, String> {
+    let mut child = local_collector_command(os, command)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| format!("failed to start local telemetry command: {}", error))?;
 
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "local telemetry command timed out after {}s",
+                        timeout.as_secs()
+                    ));
+                }
+                thread::sleep(LOCAL_COMMAND_POLL_INTERVAL);
+            }
+            Err(error) => {
+                let _ = child.kill();
+                return Err(format!("local telemetry command failed: {}", error));
+            }
+        }
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("local telemetry command failed: {}", error))?;
     if !output.status.success() {
         return Err(non_zero_exit_error(
             &String::from_utf8_lossy(&output.stderr),

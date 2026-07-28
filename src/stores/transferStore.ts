@@ -76,7 +76,9 @@ function progressStatus(
   fallback: TransferStatus,
 ): TransferStatus {
   if (payload.error) {
-    return payload.error === "Transfer canceled" ? "canceled" : "failed";
+    // The backend flags cancellation explicitly; matching on the message text
+    // would silently reclassify user cancels as failures if it were reworded.
+    return payload.canceled ? "canceled" : "failed";
   }
   if (payload.done) {
     return "done";

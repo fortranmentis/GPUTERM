@@ -470,7 +470,13 @@ fn write_credential_index(path: &Path, known: &HashSet<String>) -> Result<(), St
     write_json_file(path, &ids, "credential metadata")
 }
 
-fn write_json_file(path: &Path, value: &impl Serialize, label: &str) -> Result<(), String> {
+/// Writes JSON through a 0600 temp file, fsync and rename so a crash cannot
+/// leave a truncated or half-written config behind.
+pub(crate) fn write_json_file(
+    path: &Path,
+    value: &impl Serialize,
+    label: &str,
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             format!(

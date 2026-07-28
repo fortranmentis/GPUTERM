@@ -53,6 +53,8 @@ Nothing is ever installed on your servers: every metric comes from one-shot stan
 - Password, private key (with passphrase), and SSH agent authentication
 - UTF-8 safe streaming — multibyte characters (한글, 日本語, emoji) survive chunked reads
 - **CJK input works correctly** — Korean IME composition in the terminal is handled with the same backspace-rewrite protocol native terminals use, fixing the jamo-splitting bug in WebKit-based webviews
+- **Scrollback search** — `Ctrl`/`Cmd`+`F` opens an in-pane find bar with match count, `Enter`/`Shift`+`Enter` to step through hits, `Escape` to return focus to the shell
+- **Disconnect is visible and recoverable** — a pane whose shell or channel ends shows the reason the backend reported and a **Reconnect** button instead of silently refusing input
 - MOTD and early output are buffered and replayed, never lost to connection races
 - Serialized burst input plus a fully nonblocking SSH/TCP transport keeps simultaneous keys, modifier chords, and key repeat responsive without racing the terminal reader
 - Terminal writes avoid libssh2's incoming-data flush path, while writes, remote PTY resize, and SSH keepalive retry nonblocking operations without packet interleaving
@@ -278,7 +280,7 @@ Then add it to `~/.claude/settings.json`:
 }
 ```
 
-The status line prints `Opus · ctx 8% · 5h 76% · wk 59% · $0.12` and writes `~/.cache/gputerm/agent-status/claude/<session-id>.json`. Install it on every host you want to monitor, including remote ones. Automatic Windows setup installs the equivalent `gputerm-claude-statusline.py`; Python 3 is required.
+The status line prints `Opus · ctx 8% · 5h 76% · wk 59% · $0.12` and writes `~/.cache/gputerm/agent-status/claude/<session-id>.json`. Install it on every host you want to monitor, including remote ones. Automatic Windows setup installs `gputerm-claude-statusline.ps1` and registers an absolute, forward-slash path through `powershell.exe`, so it works whether Claude Code chooses Git Bash or PowerShell. Windows PowerShell 5.1 is built into supported Windows versions; Python is not required for the Windows helper.
 
 Only these fields are written: session id, working directory, model name and id, `context_window` (including `current_usage`), `cost.total_cost_usd`, `cost.total_duration_ms`, `rate_limits.{five_hour,seven_day}.{used_percentage,resets_at}`, a capture timestamp, and the agent pid when available. Prompts, responses, tool input and output, transcript paths, session names, and repository details are never copied. Snapshots older than seven days are pruned on the next run.
 
@@ -319,10 +321,14 @@ Passwords and key passphrases are **never written in plaintext**. Private key co
 
 ```bash
 npm run test                                    # frontend tests (Vitest)
+npm run typecheck                               # TypeScript, no emit
+npm run lint                                    # ESLint (React hooks rules)
 cargo test --manifest-path src-tauri/Cargo.toml # backend tests
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets  # lints
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings  # lints
 npm run build                                   # TypeScript + Vite production build
 ```
+
+`.github/workflows/ci.yml` runs all of the above on every push and pull request, plus a `cargo check` against the MSRV declared in `src-tauri/Cargo.toml`.
 
 <details>
 <summary>Project layout</summary>
@@ -411,6 +417,7 @@ GpuTerm is free for personal and noncommercial use under [PolyForm Noncommercial
 | GPU shows unavailable | Confirm a GPU tool is installed (`nvidia-smi`, `rocm-smi`, `xpu-smi`, or `intel_gpu_top`) or Linux `/sys/class/drm` is readable; other metrics still work regardless |
 | Hybrid Windows PC only shows the dGPU | Update to the latest build. Idle Intel/AMD adapters are now retained from `Win32_VideoController` even when WDDM has not created a GPU Engine counter instance yet |
 | AI DASH card is empty | Confirm `agy`, `codex`, or `claude` is running under a user visible to the telemetry account. CPU/RAM appears from the process tree; AGY token/context metadata additionally needs `python3` or `python` on the monitored host |
+| Windows Claude setup succeeds but limits stay `n/a` | Run **Set up** again to replace the older `%USERPROFILE%` Python command, restart Claude Code, accept workspace trust, and send one message. Claude publishes subscription limits only after its first response |
 | Local Windows session flashes console windows or has no monitoring data | Fixed in v1.1.6-beta — update the app; local PowerShell collectors now run without a console and use UTF-8 output |
 | Windows remote shows “The system cannot find the path specified” | Fixed in v1.0.9-beta — older builds misdetected Windows hosts that have a `uname` port on PATH as Linux; update the app |
 | Korean input splits into jamo in the terminal | Fixed for macOS/WebKit clients — update to the latest release |

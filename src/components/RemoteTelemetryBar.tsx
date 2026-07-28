@@ -190,6 +190,9 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
   }, [activeSessionId, connected, openResource, settings.telemetryIntervalSecs]);
 
   const updateSettings = async (nextSettings: TelemetrySettings) => {
+    // Applied optimistically for a responsive control, but restored on failure:
+    // otherwise the dropdown claims a polling interval the backend never took.
+    const previousSettings = settings;
     setTelemetrySettings(nextSettings);
     try {
       const saved = await invoke<TelemetrySettings>("update_telemetry_settings", {
@@ -197,6 +200,7 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
       });
       setTelemetrySettings(saved);
     } catch (error) {
+      setTelemetrySettings(previousSettings);
       setMessage({ kind: "error", text: String(error) });
     }
   };
@@ -446,18 +450,20 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
           buttonRef={agentsButtonRef}
           title="AI DASH"
           icon={<Bot size={16} />}
+          titleAccessory={
+            telemetry.agents.length > 0 ? (
+              <span className="agent-summary-session-count">
+                {telemetry.agents.length}{" "}
+                {telemetry.agents.length === 1 ? "session" : "sessions"}
+              </span>
+            ) : null
+          }
           className="agent-summary-section"
           expanded={openResource === "agents"}
           onClick={() => openDetail("agents")}
         >
           {telemetry.agents.length > 0 ? (
-            <>
-              <strong>
-                {telemetry.agents.length}{" "}
-                {telemetry.agents.length === 1 ? "session" : "sessions"}
-              </strong>
-              <AgentQuotaSummary rows={agentQuotaRows} />
-            </>
+            <AgentQuotaSummary rows={agentQuotaRows} />
           ) : (
             <span>{telemetry.errors.agents ?? "No AI agents running"}</span>
           )}
@@ -532,6 +538,7 @@ function TelemetryButton({
   buttonRef,
   title,
   icon,
+  titleAccessory,
   className,
   expanded,
   onClick,
@@ -540,6 +547,7 @@ function TelemetryButton({
   buttonRef: RefObject<HTMLButtonElement | null>;
   title: string;
   icon: ReactNode;
+  titleAccessory?: ReactNode;
   className?: string;
   expanded: boolean;
   onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
@@ -553,7 +561,11 @@ function TelemetryButton({
       aria-expanded={expanded}
       onClick={onClick}
     >
-      <div className="telemetry-section-title">{icon}<span>{title}</span></div>
+      <div className="telemetry-section-title">
+        {icon}
+        <span>{title}</span>
+        {titleAccessory}
+      </div>
       <div className="telemetry-section-body">{children}</div>
     </button>
   );

@@ -6,9 +6,12 @@
 //! snapshots, and AGY worker state. Prompt, response, tool input/output, and
 //! authentication fields are never serialized into GpuTerm telemetry.
 
-use crate::ssh::session::{target_for_active_session, with_ops_session, AppState};
+use crate::ssh::session::{
+    open_ssh_session, target_for_active_session, with_ops_session, AppState, SshTarget,
+};
 use crate::ssh::system_monitor::{
-    detect_remote_os, local_os, run_local_command_for, run_remote_command_for, RemoteOs,
+    detect_remote_os, local_os, run_local_command_for, run_local_command_with_timeout,
+    run_remote_command_for, run_remote_command_with_budget, RemoteOs,
 };
 use base64::Engine as _;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
@@ -26,6 +29,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::State;
 
 const METADATA_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+/// Time budget for one metadata scrape. Larger than the telemetry default
+/// because the scrape walks provider session directories.
+const METADATA_COMMAND_TIMEOUT_SECS: u64 = 10;
 const CODEX_QUOTA_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const AGY_QUOTA_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const CODEX_QUOTA_TIMEOUT: Duration = Duration::from_secs(5);
@@ -76,11 +82,14 @@ emit_agent_files() {
   provider="$1"
   root="$2"
   pattern="$3"
+  depth="$4"
   [ -d "$root" ] || return 0
   # Subagent transcripts live under */subagents/ and describe a worker's own
   # context rather than the session the user started. Excluding them keeps a
-  # worker's counters from overwriting the parent session's.
-  find "$root" -type f -name "$pattern" ! -path '*/subagents/*' -exec ls -t {} + 2>/dev/null | head -n 2 |
+  # worker's counters from overwriting the parent session's. The depth bound
+  # keeps the walk proportional to the provider's layout instead of the whole
+  # tree, which on a long-lived host is most of the scrape cost.
+  find "$root" -maxdepth "$depth" -type f -name "$pattern" ! -path '*/subagents/*' -exec ls -t {} + 2>/dev/null | head -n 2 |
   while IFS= read -r file; do
     [ -r "$file" ] || continue
     printf '__GPUTERM_AGENT_FILE__\t%s\t%s\n' "$provider" "$file"
@@ -223,9 +232,9 @@ function Emit-AgentTail([string]$provider, [string]$path) {
   Get-Content -LiteralPath $path -Tail 300 -ErrorAction SilentlyContinue
   Write-Output '__GPUTERM_AGENT_END__'
 }
-function Emit-AgentFiles([string]$provider, [string]$root, [string]$filter) {
+function Emit-AgentFiles([string]$provider, [string]$root, [string]$filter, [int]$depth) {
   if (-not (Test-Path -LiteralPath $root)) { return }
-  Get-ChildItem -LiteralPath $root -Recurse -File -Filter $filter |
+  Get-ChildItem -LiteralPath $root -Recurse -Depth $depth -File -Filter $filter |
     Where-Object { $_.FullName -notmatch '\\subagents\\' } |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 2 |
@@ -257,12 +266,12 @@ fn metadata_command(os: RemoteOs, providers: &HashSet<Provider>) -> String {
         script.push_str(WINDOWS_METADATA_PRELUDE);
         if providers.contains(&Provider::Codex) {
             script.push_str(
-                "Emit-AgentFiles 'codex' (Join-Path $HOME '.codex\\sessions') 'rollout-*.jsonl'\n",
+                "Emit-AgentFiles 'codex' (Join-Path $HOME '.codex\\sessions') 'rollout-*.jsonl' 3\n",
             );
         }
         if providers.contains(&Provider::Claude) {
             script.push_str(
-                "Emit-AgentFiles 'claude' (Join-Path $HOME '.claude\\projects') '*.jsonl'\n",
+                "Emit-AgentFiles 'claude' (Join-Path $HOME '.claude\\projects') '*.jsonl' 1\n",
             );
         }
         if providers.contains(&Provider::Agy) {
@@ -279,10 +288,12 @@ fn metadata_command(os: RemoteOs, providers: &HashSet<Provider>) -> String {
     }
     script.push_str(POSIX_METADATA_PRELUDE);
     if providers.contains(&Provider::Codex) {
-        script.push_str("emit_agent_files codex \"$HOME/.codex/sessions\" 'rollout-*.jsonl'\n");
+        // ~/.codex/sessions/<year>/<month>/<day>/rollout-*.jsonl
+        script.push_str("emit_agent_files codex \"$HOME/.codex/sessions\" 'rollout-*.jsonl' 4\n");
     }
     if providers.contains(&Provider::Claude) {
-        script.push_str("emit_agent_files claude \"$HOME/.claude/projects\" '*.jsonl'\n");
+        // ~/.claude/projects/<project>/<session>.jsonl
+        script.push_str("emit_agent_files claude \"$HOME/.claude/projects\" '*.jsonl' 2\n");
     }
     if providers.contains(&Provider::Agy) {
         script.push_str("if command -v python3 >/dev/null 2>&1; then\npython3 - <<'GPUTERM_AGY_USAGE' 2>/dev/null\n");
@@ -537,12 +548,14 @@ pub struct AgentMonitorState {
     agy_history_key: Option<String>,
     agy_histories: Option<AgentQuotaHistories>,
     agy_history: Vec<AgentQuotaHistoryPoint>,
+    quota_probes: Arc<QuotaProbes>,
     windows_cpu: HashMap<u32, f64>,
     windows_cpu_sampled_at: Option<Instant>,
 }
 
 pub fn collect_remote_agents(
     session: &Session,
+    target: &SshTarget,
     os: RemoteOs,
     state: &mut AgentMonitorState,
 ) -> Result<Vec<AgentMetric>, String> {
@@ -558,9 +571,17 @@ pub fn collect_remote_agents(
         return Ok(Vec::new());
     }
     refresh_metadata_if_due(state, os, &providers, |command| {
-        run_remote_command_for(session, os, command)
+        // The scrape walks provider session directories, which takes longer than
+        // a single-value telemetry probe. Sharing the 3 s budget made a large
+        // ~/.claude/projects tree fail every time, silently leaving the card
+        // without metadata.
+        if os == RemoteOs::Windows {
+            run_remote_command_for(session, os, command)
+        } else {
+            run_remote_command_with_budget(session, command, METADATA_COMMAND_TIMEOUT_SECS)
+        }
     });
-    refresh_provider_quotas_remote(session, os, &providers, state);
+    refresh_provider_quotas_remote(target, os, &providers, state);
     update_quota_snapshots(state, now_epoch_seconds());
     Ok(build_agent_metrics(
         &processes,
@@ -585,7 +606,11 @@ pub fn collect_local_agents(
         return Ok(Vec::new());
     }
     refresh_metadata_if_due(state, os, &providers, |command| {
-        run_local_command_for(os, command)
+        run_local_command_with_timeout(
+            os,
+            command,
+            Duration::from_secs(METADATA_COMMAND_TIMEOUT_SECS),
+        )
     });
     refresh_provider_quotas_local(os, &providers, state);
     update_quota_snapshots(state, now_epoch_seconds());
@@ -715,30 +740,103 @@ fn merge_metadata_quota_fallbacks(
     }
 }
 
+/// Latest account-quota probe results, published by background threads.
+///
+/// The provider CLIs these probes drive can take tens of seconds (AGY allows a
+/// 5 s start-up plus a 15 s read). Running them inline froze every telemetry
+/// card — CPU, GPU, memory — for that whole time, so the probe now happens off
+/// the poll thread and each tick simply picks up whatever has landed.
+#[derive(Default)]
+struct QuotaProbes {
+    finished: Mutex<Vec<(Provider, Result<AgentQuotaSnapshot, String>)>>,
+    in_flight: Mutex<HashSet<Provider>>,
+}
+
+/// Starts a probe unless one for the same provider is still running.
+fn spawn_quota_probe<F>(probes: &Arc<QuotaProbes>, provider: Provider, probe: F)
+where
+    F: FnOnce() -> Result<AgentQuotaSnapshot, String> + Send + 'static,
+{
+    match probes.in_flight.lock() {
+        Ok(mut in_flight) => {
+            if !in_flight.insert(provider) {
+                return;
+            }
+        }
+        Err(_) => return,
+    }
+    let probes = Arc::clone(probes);
+    thread::spawn(move || {
+        let result = probe();
+        if let Ok(mut finished) = probes.finished.lock() {
+            finished.push((provider, result));
+        }
+        if let Ok(mut in_flight) = probes.in_flight.lock() {
+            in_flight.remove(&provider);
+        }
+    });
+}
+
+/// Folds completed probe results into the monitor state.
+///
+/// All state mutation stays on the poll thread, so the bookkeeping (history,
+/// fallbacks, unavailable messages) is identical to the previous inline version.
+fn apply_finished_quota_probes(
+    state: &mut AgentMonitorState,
+    providers: &HashSet<Provider>,
+    now: u64,
+) {
+    let finished = state
+        .quota_probes
+        .finished
+        .lock()
+        .map(|mut finished| std::mem::take(&mut *finished))
+        .unwrap_or_default();
+    for (provider, result) in finished {
+        match (provider, result) {
+            (Provider::Agy, Ok(snapshot)) => {
+                record_agy_history(state, now, Some(&snapshot));
+                state.quotas.insert(Provider::Agy, snapshot);
+            }
+            (Provider::Agy, Err(error)) => {
+                record_agy_history(state, now, None);
+                let mut unavailable = AgentQuotaSnapshot::unavailable(Provider::Agy);
+                unavailable.message = Some(format!(
+                    "AGY /usage automatic read failed: {}. Open /usage in AGY to view the current quota.",
+                    error
+                ));
+                state.quotas.insert(Provider::Agy, unavailable);
+            }
+            (provider, Ok(snapshot)) => {
+                state.quotas.insert(provider, snapshot);
+            }
+            (provider, Err(_)) => {
+                // A failed live read must not leave an arbitrarily old
+                // app-server value looking current. Re-evaluate the newest
+                // session-log snapshot as the documented fallback.
+                state.quotas.remove(&provider);
+                merge_metadata_quota_fallbacks(state, providers, now);
+            }
+        }
+    }
+}
+
 fn refresh_provider_quotas_local(
     os: RemoteOs,
     providers: &HashSet<Provider>,
     state: &mut AgentMonitorState,
 ) {
     let now = now_epoch_seconds();
+    apply_finished_quota_probes(state, providers, now);
     if providers.contains(&Provider::Codex)
         && quota_refresh_due(state, Provider::Codex, CODEX_QUOTA_REFRESH_INTERVAL)
     {
         state
             .last_quota_refresh
             .insert(Provider::Codex, Instant::now());
-        match query_codex_quota_local(now) {
-            Ok(snapshot) => {
-                state.quotas.insert(Provider::Codex, snapshot);
-            }
-            Err(_) => {
-                // A failed live read must not leave an arbitrarily old
-                // app-server value looking current. Re-evaluate the newest
-                // session-log snapshot as the documented fallback.
-                state.quotas.remove(&Provider::Codex);
-                merge_metadata_quota_fallbacks(state, providers, now);
-            }
-        }
+        spawn_quota_probe(&state.quota_probes, Provider::Codex, move || {
+            query_codex_quota_local(now_epoch_seconds())
+        });
     }
     if providers.contains(&Provider::Agy)
         && quota_refresh_due(state, Provider::Agy, AGY_QUOTA_REFRESH_INTERVAL)
@@ -746,46 +844,33 @@ fn refresh_provider_quotas_local(
         state
             .last_quota_refresh
             .insert(Provider::Agy, Instant::now());
-        match query_agy_quota_local(os, now) {
-            Ok(snapshot) => {
-                record_agy_history(state, now, Some(&snapshot));
-                state.quotas.insert(Provider::Agy, snapshot);
-            }
-            Err(error) => {
-                record_agy_history(state, now, None);
-                let mut unavailable = AgentQuotaSnapshot::unavailable(Provider::Agy);
-                unavailable.message = Some(format!(
-                    "AGY /usage automatic read failed: {}. Open /usage in AGY to view the current quota.",
-                    error
-                ));
-                state.quotas.insert(Provider::Agy, unavailable);
-            }
-        }
+        spawn_quota_probe(&state.quota_probes, Provider::Agy, move || {
+            query_agy_quota_local(os, now_epoch_seconds())
+        });
     }
 }
 
 fn refresh_provider_quotas_remote(
-    session: &Session,
+    target: &SshTarget,
     os: RemoteOs,
     providers: &HashSet<Provider>,
     state: &mut AgentMonitorState,
 ) {
     let now = now_epoch_seconds();
+    apply_finished_quota_probes(state, providers, now);
     if providers.contains(&Provider::Codex)
         && quota_refresh_due(state, Provider::Codex, CODEX_QUOTA_REFRESH_INTERVAL)
     {
         state
             .last_quota_refresh
             .insert(Provider::Codex, Instant::now());
-        match query_codex_quota_remote(session, os, now) {
-            Ok(snapshot) => {
-                state.quotas.insert(Provider::Codex, snapshot);
-            }
-            Err(_) => {
-                state.quotas.remove(&Provider::Codex);
-                merge_metadata_quota_fallbacks(state, providers, now);
-            }
-        }
+        // Its own connection: the telemetry session must stay free for the
+        // poll, and libssh2 requires one session to be used serially.
+        let target = target.clone();
+        spawn_quota_probe(&state.quota_probes, Provider::Codex, move || {
+            let connection = open_ssh_session(&target)?;
+            query_codex_quota_remote(connection.session(), os, now_epoch_seconds())
+        });
     }
     if providers.contains(&Provider::Agy)
         && quota_refresh_due(state, Provider::Agy, AGY_QUOTA_REFRESH_INTERVAL)
@@ -793,21 +878,11 @@ fn refresh_provider_quotas_remote(
         state
             .last_quota_refresh
             .insert(Provider::Agy, Instant::now());
-        match query_agy_quota_remote(session, os, now) {
-            Ok(snapshot) => {
-                record_agy_history(state, now, Some(&snapshot));
-                state.quotas.insert(Provider::Agy, snapshot);
-            }
-            Err(error) => {
-                record_agy_history(state, now, None);
-                let mut unavailable = AgentQuotaSnapshot::unavailable(Provider::Agy);
-                unavailable.message = Some(format!(
-                    "AGY /usage automatic read failed: {}. Open /usage in AGY to view the current quota.",
-                    error
-                ));
-                state.quotas.insert(Provider::Agy, unavailable);
-            }
-        }
+        let target = target.clone();
+        spawn_quota_probe(&state.quota_probes, Provider::Agy, move || {
+            let connection = open_ssh_session(&target)?;
+            query_agy_quota_remote(connection.session(), os, now_epoch_seconds())
+        });
     }
 }
 
@@ -2135,6 +2210,7 @@ fn parse_rate_limit_entries(
             .or_else(|| value_u64(limit, "resetAt"))
             .or_else(|| value_u64(limit, "refreshes_at"))
             .or_else(|| value_u64(limit, "refreshesAt"))
+            .map(epoch_seconds)
             // Some providers report the window relative to now instead.
             .or_else(|| {
                 value_u64(limit, "resets_in_seconds")
@@ -2181,6 +2257,22 @@ fn now_epoch_seconds() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or(0)
+}
+
+/// Normalizes a provider timestamp to epoch **seconds**.
+///
+/// Providers disagree about the unit, and everything downstream — the staleness
+/// check here and both reset renderers in the webview — assumes seconds. Doing
+/// the conversion once at the parse boundary keeps them from diverging. The
+/// threshold is roughly the year 2286 in seconds, far past any real reset time
+/// and far below any millisecond timestamp.
+fn epoch_seconds(value: u64) -> u64 {
+    const MILLISECOND_THRESHOLD: u64 = 10_000_000_000;
+    if value >= MILLISECOND_THRESHOLD {
+        value / 1000
+    } else {
+        value
+    }
 }
 
 fn event_epoch_seconds(value: &Value) -> Option<u64> {
@@ -2604,7 +2696,7 @@ pub async fn configure_claude_quota_monitor(
 
 fn configure_claude_quota_local() -> Result<ClaudeQuotaSetupResult, String> {
     let os = local_os();
-    if !local_claude_helper_runtime_available(os) {
+    if os != RemoteOs::Windows && !local_claude_helper_runtime_available(os) {
         return Ok(ClaudeQuotaSetupResult {
             status: "unsupported".to_string(),
             message: "Claude quota setup needs Python 3 on this host. Install Python 3, then run Set up again.".to_string(),
@@ -2623,8 +2715,10 @@ fn configure_claude_quota_local() -> Result<ClaudeQuotaSetupResult, String> {
     let home = PathBuf::from(home);
     let claude_dir = home.join(".claude");
     let settings_path = claude_dir.join("settings.json");
-    let (helper_name, desired_command, helper_contents) = claude_helper_for_os(os);
+    let (helper_name, helper_contents) = claude_helper_for_os(os);
     let helper_path = claude_dir.join(helper_name);
+    let desired_command =
+        claude_status_line_command_for(os, helper_path.to_string_lossy().as_ref());
     fs::create_dir_all(&claude_dir)
         .map_err(|error| format!("failed to create Claude config directory: {}", error))?;
     let (mut settings, existing) = read_claude_settings(&settings_path)?;
@@ -2640,7 +2734,7 @@ fn configure_claude_quota_local() -> Result<ClaudeQuotaSetupResult, String> {
         }
     }
     write_claude_helper(&helper_path, helper_contents)?;
-    set_claude_status_line(&mut settings, desired_command);
+    set_claude_status_line(&mut settings, &desired_command);
     backup_and_write_json(&settings_path, &settings)?;
     Ok(ClaudeQuotaSetupResult {
         status: if existing.is_some() {
@@ -2649,7 +2743,7 @@ fn configure_claude_quota_local() -> Result<ClaudeQuotaSetupResult, String> {
             "configured"
         }
         .to_string(),
-        message: "Claude quota monitoring is configured. The 5-hour and weekly limits appear after Claude's next response.".to_string(),
+        message: "Claude quota monitoring is configured. Restart Claude Code, accept workspace trust if prompted, then send one message to publish the 5-hour and weekly limits.".to_string(),
     })
 }
 
@@ -2657,16 +2751,14 @@ fn configure_claude_quota_remote(
     session: &Session,
     os: RemoteOs,
 ) -> Result<ClaudeQuotaSetupResult, String> {
-    let runtime_command = if os == RemoteOs::Windows {
-        "$python = Get-Command python.exe -ErrorAction SilentlyContinue\nif ($python) { Write-Output 'supported' } else { Write-Output 'unsupported' }\nexit 0"
-    } else {
-        "if command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then printf supported; else printf unsupported; fi"
-    };
-    if run_remote_command_for(session, os, runtime_command)?.trim() != "supported" {
-        return Ok(ClaudeQuotaSetupResult {
-            status: "unsupported".to_string(),
-            message: "Claude quota setup needs Python 3 on this host. Install Python 3, then run Set up again.".to_string(),
-        });
+    if os != RemoteOs::Windows {
+        let runtime_command = "if command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then printf supported; else printf unsupported; fi";
+        if run_remote_command_for(session, os, runtime_command)?.trim() != "supported" {
+            return Ok(ClaudeQuotaSetupResult {
+                status: "unsupported".to_string(),
+                message: "Claude quota setup needs Python 3 on this host. Install Python 3, then run Set up again.".to_string(),
+            });
+        }
     }
     let current_command = if os == RemoteOs::Windows {
         "$path = Join-Path $HOME '.claude\\settings.json'\nif (Test-Path -LiteralPath $path) { Get-Content -LiteralPath $path -Raw } else { Write-Output '{}' }\nexit 0"
@@ -2677,7 +2769,29 @@ fn configure_claude_quota_remote(
     let mut settings = serde_json::from_str::<Value>(&current)
         .map_err(|error| format!("Claude settings.json is not valid JSON: {}", error))?;
     let existing = claude_status_line_command(&settings);
-    let (helper_name, desired_command, helper_contents) = claude_helper_for_os(os);
+    let (helper_name, helper_contents) = claude_helper_for_os(os);
+    let desired_command = if os == RemoteOs::Windows {
+        let home = run_remote_command_for(
+            session,
+            os,
+            "Write-Output ([Environment]::GetFolderPath('UserProfile'))\nexit 0",
+        )?;
+        let home = home
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .ok_or_else(|| {
+                "Claude quota setup cannot locate the remote Windows home directory.".to_string()
+            })?;
+        let helper_path = format!(
+            "{}/.claude/{}",
+            home.trim_end_matches(['\\', '/']).replace('\\', "/"),
+            helper_name
+        );
+        claude_status_line_command_for(os, &helper_path)
+    } else {
+        claude_status_line_command_for(os, "")
+    };
     if let Some(command) = existing.as_deref() {
         if !command.contains("gputerm-claude-statusline") {
             return Ok(ClaudeQuotaSetupResult {
@@ -2689,7 +2803,7 @@ fn configure_claude_quota_remote(
             });
         }
     }
-    set_claude_status_line(&mut settings, desired_command);
+    set_claude_status_line(&mut settings, &desired_command);
     let helper = base64::engine::general_purpose::STANDARD.encode(helper_contents);
     let settings_json = serde_json::to_vec_pretty(&settings)
         .map_err(|error| format!("failed to encode Claude settings: {}", error))?;
@@ -2736,16 +2850,15 @@ fn configure_claude_quota_remote(
             "configured"
         }
         .to_string(),
-        message: "Claude quota monitoring is configured. The 5-hour and weekly limits appear after Claude's next response.".to_string(),
+        message: "Claude quota monitoring is configured. Restart Claude Code, accept workspace trust if prompted, then send one message to publish the 5-hour and weekly limits.".to_string(),
     })
 }
 
 fn local_claude_helper_runtime_available(os: RemoteOs) -> bool {
-    let candidates: &[&str] = if os == RemoteOs::Windows {
-        &["python"]
-    } else {
-        &["python3", "python"]
-    };
+    if os == RemoteOs::Windows {
+        return true;
+    }
+    let candidates: &[&str] = &["python3", "python"];
     candidates.iter().any(|candidate| {
         let mut command = Command::new(candidate);
         command
@@ -2793,24 +2906,35 @@ fn set_claude_status_line(settings: &mut Value, command: &str) {
         serde_json::json!({
             "type": "command",
             "command": command,
-            "padding": 0
+            "padding": 0,
+            "refreshInterval": 30
         }),
     );
 }
 
-fn claude_helper_for_os(os: RemoteOs) -> (&'static str, &'static str, &'static str) {
+fn claude_helper_for_os(os: RemoteOs) -> (&'static str, &'static str) {
     if os == RemoteOs::Windows {
         (
-            "gputerm-claude-statusline.py",
-            "python \"%USERPROFILE%\\.claude\\gputerm-claude-statusline.py\"",
-            include_str!("../../../scripts/gputerm-claude-statusline.py"),
+            "gputerm-claude-statusline.ps1",
+            include_str!("../../../scripts/gputerm-claude-statusline.ps1"),
         )
     } else {
         (
             "gputerm-claude-statusline.sh",
-            "~/.claude/gputerm-claude-statusline.sh",
             include_str!("../../../scripts/gputerm-claude-statusline.sh"),
         )
+    }
+}
+
+fn claude_status_line_command_for(os: RemoteOs, helper_path: &str) -> String {
+    if os == RemoteOs::Windows {
+        let helper_path = helper_path.replace('\\', "/").replace('"', "\\\"");
+        format!(
+            "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"",
+            helper_path
+        )
+    } else {
+        "~/.claude/gputerm-claude-statusline.sh".to_string()
     }
 }
 
@@ -3228,6 +3352,21 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_millisecond_reset_timestamps_to_seconds() {
+        // Both reset renderers in the webview and the staleness check here read
+        // seconds, so a millisecond-emitting provider must be converted once at
+        // the parse boundary rather than guessed at each display site.
+        let lines = vec![
+            r#"{"rate_limits":{"five_hour":{"used_percentage":10,"resets_at":1799500000000}}}"#
+                .to_string(),
+        ];
+        let metadata = parse_metadata(Provider::Claude, &lines);
+        let limit = &metadata.rate_limits[0];
+        assert_eq!(limit.resets_at, Some(1_799_500_000));
+        assert!(!limit.stale);
+    }
+
+    #[test]
     fn reports_snapshot_age_from_capture_time() {
         let lines = vec![r#"{"session_id":"claude-1","captured_at":1798999880,"pid":4242,"rate_limits":{"five_hour":{"used_percentage":10,"resets_at":1799500000}}}"#.to_string()];
         let metadata = parse_metadata(Provider::Claude, &lines);
@@ -3619,6 +3758,135 @@ mod tests {
         assert_eq!(
             claude_status_line_command(&settings).as_deref(),
             Some("~/.claude/my-status.sh")
+        );
+    }
+
+    #[test]
+    fn windows_claude_setup_uses_a_shell_independent_powershell_helper() {
+        let (helper_name, helper) = claude_helper_for_os(RemoteOs::Windows);
+        assert_eq!(helper_name, "gputerm-claude-statusline.ps1");
+        assert!(helper.contains("[Console]::In.ReadToEnd()"));
+        assert!(helper.contains(".cache\\gputerm\\agent-status\\claude"));
+        assert!(!helper.contains("gputerm-claude-statusline.py"));
+
+        let command = claude_status_line_command_for(
+            RemoteOs::Windows,
+            r"C:\Users\Test User\.claude\gputerm-claude-statusline.ps1",
+        );
+        assert_eq!(
+            command,
+            "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"C:/Users/Test User/.claude/gputerm-claude-statusline.ps1\""
+        );
+        assert!(!command.contains("%USERPROFILE%"));
+        assert!(!command.contains("python"));
+
+        let mut settings = serde_json::json!({});
+        set_claude_status_line(&mut settings, &command);
+        assert_eq!(
+            settings.pointer("/statusLine/refreshInterval"),
+            Some(&serde_json::json!(30))
+        );
+        assert_eq!(
+            claude_status_line_command(&settings).as_deref(),
+            Some(command.as_str())
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn executes_windows_claude_status_line_and_writes_a_quota_snapshot() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "gputerm-claude-statusline-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        let session_id = format!("gputerm-windows-test-{}-{}", std::process::id(), unique);
+        let snapshot_path = PathBuf::from(std::env::var_os("USERPROFILE").unwrap())
+            .join(".cache")
+            .join("gputerm")
+            .join("agent-status")
+            .join("claude")
+            .join(format!("{}.json", session_id));
+        let script_path = root.join("gputerm-claude-statusline.ps1");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            &script_path,
+            include_str!("../../../scripts/gputerm-claude-statusline.ps1"),
+        )
+        .unwrap();
+
+        let mut child = Command::new("powershell.exe")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(&script_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let payload = serde_json::json!({
+            "session_id": session_id,
+            "model": { "display_name": "Opus" },
+            "context_window": { "used_percentage": 25 },
+            "rate_limits": {
+                "five_hour": { "used_percentage": 20, "resets_at": 2_000_000_000_u64 },
+                "seven_day": { "used_percentage": 40, "resets_at": 2_000_100_000_u64 }
+            }
+        })
+        .to_string();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        let snapshot = fs::read_to_string(&snapshot_path).unwrap();
+        let _ = fs::remove_file(&snapshot_path);
+        let _ = fs::remove_dir_all(&root);
+
+        assert!(
+            output.status.success(),
+            "PowerShell helper failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Opus"));
+        assert!(stdout.contains("5h 80%"));
+        assert!(stdout.contains("wk 60%"));
+        let snapshot: Value = serde_json::from_str(&snapshot).unwrap();
+        assert_eq!(
+            snapshot
+                .pointer("/rate_limits/five_hour/used_percentage")
+                .and_then(Value::as_f64),
+            Some(20.0)
+        );
+        assert_eq!(
+            snapshot
+                .pointer("/rate_limits/seven_day/used_percentage")
+                .and_then(Value::as_f64),
+            Some(40.0)
+        );
+    }
+
+    #[test]
+    fn posix_claude_setup_keeps_the_executable_status_line_helper() {
+        let (helper_name, helper) = claude_helper_for_os(RemoteOs::Linux);
+        assert_eq!(helper_name, "gputerm-claude-statusline.sh");
+        assert!(helper.starts_with("#!/bin/sh"));
+        assert_eq!(
+            claude_status_line_command_for(RemoteOs::Linux, "/ignored"),
+            "~/.claude/gputerm-claude-statusline.sh"
         );
     }
 

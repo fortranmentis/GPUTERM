@@ -17,6 +17,7 @@ import { RemoteFilePanel } from "./RemoteFilePanel";
 import { TransferQueue } from "./TransferQueue";
 import { selectIsActiveConnected, useSessionStore } from "../stores/sessionStore";
 import { useTransferStore } from "../stores/transferStore";
+import { mapWithConcurrencyLimit } from "../utils/concurrency";
 import { startNativeFileDrag } from "../utils/nativeFileDrag";
 import type {
   AppSettings,
@@ -35,6 +36,9 @@ import type {
 
 const LOCAL_DRAG_TYPE = "application/x-gputerm-local-files";
 const REMOTE_DRAG_TYPE = "application/x-gputerm-remote-files";
+// Each transfer opens its own SSH connection, so a folder drop must not
+// launch one handshake per file simultaneously.
+const MAX_CONCURRENT_TRANSFERS = 3;
 
 type LocalDragFile = LocalTransferDragFile;
 type RemoteDragFile = RemoteTransferDragFile;
@@ -117,10 +121,6 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
     ((files: RemoteDragFile[]) => Promise<string[]>) | null
   >(null);
 
-  const selectedEntry = useMemo(
-    () => entries.find((entry) => selectedRemotePaths.includes(entry.path)) ?? null,
-    [entries, selectedRemotePaths],
-  );
   const selectedRemoteEntries = useMemo(
     () =>
       entries.filter(
@@ -268,19 +268,48 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
   };
 
   const deleteSelected = async () => {
-    if (!activeSessionId || !selectedEntry) {
+    if (!activeSessionId || selectedRemoteEntries.length === 0) {
       return;
     }
+    // Deleting is irreversible, so it asks first — the far milder overwrite path
+    // already does. Every selected entry is deleted, not just the first one in
+    // directory order.
+    const summary =
+      selectedRemoteEntries.length === 1
+        ? selectedRemoteEntries[0].name
+        : `${selectedRemoteEntries.length} items`;
+    const confirmed = await confirmDialog(
+      `Delete ${summary} from the remote host? This cannot be undone.`,
+      { title: "Delete remote items", kind: "warning" },
+    );
+    if (!confirmed) {
+      return;
+    }
+
     setLoading(true);
+    const failures: string[] = [];
     try {
-      await invoke("sftp_delete", {
-        request: {
-          sessionId: activeSessionId,
-          remotePath: selectedEntry.path,
-        },
-      });
+      for (const entry of selectedRemoteEntries) {
+        try {
+          await invoke("sftp_delete", {
+            request: { sessionId: activeSessionId, remotePath: entry.path },
+          });
+        } catch (error) {
+          failures.push(`${entry.name}: ${String(error)}`);
+        }
+      }
       await loadDirectory(path);
-      setMessage({ kind: "success", text: "Remote item deleted" });
+      if (failures.length > 0) {
+        setMessage({ kind: "error", text: failures.join("\n") });
+      } else {
+        setMessage({
+          kind: "success",
+          text:
+            selectedRemoteEntries.length === 1
+              ? "Remote item deleted"
+              : `${selectedRemoteEntries.length} remote items deleted`,
+        });
+      }
     } catch (error) {
       setMessage({ kind: "error", text: String(error) });
     } finally {
@@ -348,56 +377,64 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
     // Pin the session at enqueue time: transfers keep targeting it even if
     // the user switches sessions while they run.
     const sessionId = activeSessionId;
-    await Promise.all(
-      uploadable.map(async (file) => {
-        const remotePath = joinRemotePath(targetDirectory, file.name);
-        const task = createTransferTask(
-          "upload",
-          file.name,
-          file.path,
-          remotePath,
-          file.entryType === "file" ? file.size : null,
-          sessionId,
-        );
-        addTask(task);
-        let shouldTransfer = false;
-        try {
-          shouldTransfer = await confirmOverwrite(
-            "sftp_path_exists",
-            {
-              request: {
-                sessionId,
-                remotePath,
-              },
+    // Confirmations run one at a time: mapping them in parallel stacked one
+    // native dialog per dropped file.
+    const approved: Array<{ task: TransferTask; request: SftpTransferRequest }> = [];
+    for (const file of uploadable) {
+      const remotePath = joinRemotePath(targetDirectory, file.name);
+      const task = createTransferTask(
+        "upload",
+        file.name,
+        file.path,
+        remotePath,
+        file.entryType === "file" ? file.size : null,
+        sessionId,
+      );
+      addTask(task);
+      let shouldTransfer = false;
+      try {
+        shouldTransfer = await confirmOverwrite(
+          "sftp_path_exists",
+          {
+            request: {
+              sessionId,
+              remotePath,
             },
-            remotePath,
-          );
-        } catch (error) {
-          updateTask(task.id, {
-            status: "failed",
-            error: String(error),
-          });
-          return;
-        }
-        if (!shouldTransfer) {
-          updateTask(task.id, {
-            status: "canceled",
-            error: "Skipped because target item already exists",
-          });
-          return;
-        }
-        runTransfer("sftp_upload_file", task, {
-          sessionId,
+          },
           remotePath,
-          localPath: file.path,
-          transferId: task.id,
-        }).then(() => {
-          if (useSessionStore.getState().activeSessionId === sessionId) {
-            loadDirectory(path).catch(() => undefined);
-          }
+        );
+      } catch (error) {
+        updateTask(task.id, {
+          status: "failed",
+          error: String(error),
         });
-      }),
-    );
+        continue;
+      }
+      if (!shouldTransfer) {
+        updateTask(task.id, {
+          status: "canceled",
+          error: "Skipped because target item already exists",
+        });
+        continue;
+      }
+      approved.push({
+        task,
+        request: { sessionId, remotePath, localPath: file.path, transferId: task.id },
+      });
+    }
+
+    if (approved.length === 0) {
+      return;
+    }
+    // Left running in the background, as before, but capped so a large drop
+    // does not open one SSH connection per file at once.
+    void mapWithConcurrencyLimit(approved, MAX_CONCURRENT_TRANSFERS, ({ task, request }) =>
+      runTransfer("sftp_upload_file", task, request),
+    ).then(() => {
+      if (useSessionStore.getState().activeSessionId === sessionId) {
+        loadDirectory(path).catch(() => undefined);
+      }
+    });
   };
 
   const enqueueDownloads = async (files: RemoteDragFile[]) => {
@@ -416,47 +453,56 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
     }
 
     const sessionId = activeSessionId;
-    await Promise.all(
-      downloadable.map(async (file) => {
-        const targetLocalPath = joinLocalPath(localPath.trim(), file.name);
-        const task = createTransferTask(
-          "download",
-          file.name,
-          file.path,
+    const approved: Array<{ task: TransferTask; request: SftpTransferRequest }> = [];
+    for (const file of downloadable) {
+      const targetLocalPath = joinLocalPath(localPath.trim(), file.name);
+      const task = createTransferTask(
+        "download",
+        file.name,
+        file.path,
+        targetLocalPath,
+        file.type === "file" ? file.size : null,
+        sessionId,
+      );
+      addTask(task);
+      let shouldTransfer = false;
+      try {
+        shouldTransfer = await confirmOverwrite(
+          "local_path_exists",
+          { path: targetLocalPath },
           targetLocalPath,
-          file.type === "file" ? file.size : null,
-          sessionId,
         );
-        addTask(task);
-        let shouldTransfer = false;
-        try {
-          shouldTransfer = await confirmOverwrite(
-            "local_path_exists",
-            { path: targetLocalPath },
-            targetLocalPath,
-          );
-        } catch (error) {
-          updateTask(task.id, {
-            status: "failed",
-            error: String(error),
-          });
-          return;
-        }
-        if (!shouldTransfer) {
-          updateTask(task.id, {
-            status: "canceled",
-            error: "Skipped because target item already exists",
-          });
-          return;
-        }
-        runTransfer("sftp_download_file", task, {
+      } catch (error) {
+        updateTask(task.id, {
+          status: "failed",
+          error: String(error),
+        });
+        continue;
+      }
+      if (!shouldTransfer) {
+        updateTask(task.id, {
+          status: "canceled",
+          error: "Skipped because target item already exists",
+        });
+        continue;
+      }
+      approved.push({
+        task,
+        request: {
           sessionId,
           remotePath: file.path,
           localPath: targetLocalPath,
           transferId: task.id,
-        }).then(() => loadLocalDirectory(localPath.trim()).catch(() => undefined));
-      }),
-    );
+        },
+      });
+    }
+
+    if (approved.length === 0) {
+      return;
+    }
+    void mapWithConcurrencyLimit(approved, MAX_CONCURRENT_TRANSFERS, ({ task, request }) =>
+      runTransfer("sftp_download_file", task, request),
+    ).then(() => loadLocalDirectory(localPath.trim()).catch(() => undefined));
   };
 
   enqueueUploadsRef.current = enqueueUploads;
@@ -1159,7 +1205,7 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
             type="button"
             aria-label="Delete"
             title="Delete selected remote item"
-            disabled={!connected || loading || !selectedEntry}
+            disabled={!connected || loading || selectedRemoteEntries.length === 0}
             onClick={deleteSelected}
           >
             <Trash2 size={16} />

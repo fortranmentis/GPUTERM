@@ -85,9 +85,11 @@ jobs:
 
       - run: npm ci
 
-      - name: Verify Windows local telemetry collector
+      - name: Verify Windows local telemetry and Claude quota helper
         if: matrix.platform == 'windows-latest'
-        run: cargo test --manifest-path src-tauri/Cargo.toml --lib ssh::system_monitor::tests::executes_windows_local_collector_with_utf8_output
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml --lib ssh::system_monitor::tests::executes_windows_local_collector_with_utf8_output
+          cargo test --manifest-path src-tauri/Cargo.toml --lib ssh::agent_monitor::tests::executes_windows_claude_status_line_and_writes_a_quota_snapshot
 
       - name: Build and upload Windows/Linux installer
         if: matrix.platform != 'macos-latest'

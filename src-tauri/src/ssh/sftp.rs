@@ -9,12 +9,18 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use tauri::{AppHandle, Emitter, State};
 
 const OPS_TIMEOUT_MS: u32 = 10_000;
 const DOWNLOAD_PART_SUFFIX: &str = ".gputerm-part";
 const DRAG_OUT_CACHE_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+/// Read/write unit for transfers.
+const CHUNK_SIZE: usize = 256 * 1024;
+/// Floor on how often an in-flight transfer reports progress to the webview.
+const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(100);
+/// Error text used for a user-requested cancellation.
+const TRANSFER_CANCELED: &str = "Transfer canceled";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -69,6 +75,9 @@ struct SftpProgressPayload {
     total_bytes: Option<u64>,
     done: bool,
     error: Option<String>,
+    /// Set when the user cancelled. The frontend must not have to match on
+    /// `error` text to tell a cancellation from a real failure.
+    canceled: bool,
 }
 
 #[tauri::command]
@@ -126,7 +135,7 @@ pub async fn sftp_list_dir(
 /// remote SFTP paths are materialized into these paths before the native drag
 /// operation starts. Old exports are retained long enough for file managers to
 /// finish copying and are pruned on later exports.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn sftp_create_drag_out_paths(
     remote_paths: Vec<String>,
 ) -> Result<Vec<SftpDragOutPath>, String> {
@@ -448,9 +457,17 @@ fn upload_local_entry(
         return Err(format!("Unsupported local entry: {}", local_path.display()));
     }
 
+    // A directory occupying the destination name is never removed to make room
+    // for a file: the overwrite prompt only told the user something exists, not
+    // that a whole tree would be deleted.
     if let Ok(stat) = sftp.lstat(remote_path) {
         if file_type(&stat) == "directory" {
-            remove_remote_entry(sftp, remote_path, &stat)?;
+            return Err(format!(
+                "Cannot upload {}: a directory of the same name already exists at {}. \
+                 Rename or remove it first.",
+                local_path.display(),
+                remote_path.display()
+            ));
         }
     }
     let mut local_file = fs::File::open(local_path).map_err(|error| {
@@ -559,6 +576,19 @@ fn download_remote_file(
         })?;
     }
 
+    // Checked before any bytes move: a directory holding the destination name
+    // must not be deleted to land a file there.
+    if let Ok(metadata) = fs::symlink_metadata(local_path) {
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            return Err(format!(
+                "Cannot download {}: a directory of the same name already exists at {}. \
+                 Rename or remove it first.",
+                remote_path.display(),
+                local_path.display()
+            ));
+        }
+    }
+
     let mut remote_file = sftp.open(remote_path).map_err(|error| {
         format!(
             "SFTP download open failed for {}: {}",
@@ -607,8 +637,10 @@ fn copy_transfer_stream<R: Read, W: Write>(
     cancel: Option<&AtomicBool>,
     transferred_bytes: &mut u64,
 ) -> Result<(), String> {
-    const CHUNK_SIZE: usize = 1024 * 1024;
-    let mut buffer = [0_u8; CHUNK_SIZE];
+    // Heap-allocated: a stack buffer this size is close to the default thread
+    // stack on some platforms, and this runs under recursive directory walks.
+    let mut buffer = vec![0_u8; CHUNK_SIZE];
+    let mut last_emit = Instant::now();
 
     loop {
         check_transfer_canceled(cancel)?;
@@ -626,15 +658,21 @@ fn copy_transfer_stream<R: Read, W: Write>(
         }
 
         *transferred_bytes += read as u64;
-        emit_progress(
-            app,
-            request,
-            operation,
-            *transferred_bytes,
-            total_bytes,
-            false,
-            None,
-        );
+        // Rate-limited so a multi-gigabyte transfer does not push thousands of
+        // IPC events through the webview. The terminal `done` event is emitted
+        // unconditionally by `finish_transfer`, so no completion is lost.
+        if last_emit.elapsed() >= PROGRESS_EMIT_INTERVAL {
+            last_emit = Instant::now();
+            emit_progress(
+                app,
+                request,
+                operation,
+                *transferred_bytes,
+                total_bytes,
+                false,
+                None,
+            );
+        }
     }
 
     writer
@@ -647,7 +685,7 @@ fn check_transfer_canceled(cancel: Option<&AtomicBool>) -> Result<(), String> {
         .map(|flag| flag.load(Ordering::SeqCst))
         .unwrap_or(false)
     {
-        Err("Transfer canceled".to_string())
+        Err(TRANSFER_CANCELED.to_string())
     } else {
         Ok(())
     }
@@ -775,34 +813,27 @@ fn ensure_remote_directory(sftp: &Sftp, path: &Path) -> Result<(), String> {
         if file_type(&stat) == "directory" {
             return Ok(());
         }
-        remove_remote_entry(sftp, path, &stat)?;
+        // Transfers never change an entry's type on the user's behalf.
+        return Err(format!(
+            "Cannot create remote directory {}: a file of the same name already exists. \
+             Rename or remove it first.",
+            path.display()
+        ));
     }
     sftp.mkdir(path, 0o755)
         .map_err(|error| format!("SFTP mkdir failed for {}: {}", path.display(), error))
 }
 
-fn remove_remote_entry(sftp: &Sftp, path: &Path, stat: &FileStat) -> Result<(), String> {
-    if file_type(stat) == "directory" {
-        for (child_path, child_stat) in remote_directory_entries(sftp, path)? {
-            remove_remote_entry(sftp, &child_path, &child_stat)?;
-        }
-        sftp.rmdir(path).map_err(|error| {
-            format!(
-                "SFTP directory delete failed for {}: {}",
-                path.display(),
-                error
-            )
-        })
-    } else {
-        sftp.unlink(path)
-            .map_err(|error| format!("SFTP file delete failed for {}: {}", path.display(), error))
-    }
-}
-
 fn ensure_local_directory(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => return Ok(()),
-        Ok(_) => remove_local_entry_if_exists(path)?,
+        Ok(_) => {
+            return Err(format!(
+                "Cannot create local directory {}: a file of the same name already exists. \
+                 Rename or remove it first.",
+                path.display()
+            ))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
             return Err(format!(
@@ -821,6 +852,10 @@ fn ensure_local_directory(path: &Path) -> Result<(), String> {
     })
 }
 
+/// Clears a single file so a transfer can take its place. Directories are
+/// refused rather than removed: no transfer may delete a tree to free up a name,
+/// and the callers here only ever target a file or a `.gputerm-part` scratch
+/// path.
 fn remove_local_entry_if_exists(path: &Path) -> Result<(), String> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -835,17 +870,13 @@ fn remove_local_entry_if_exists(path: &Path) -> Result<(), String> {
     };
 
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        fs::remove_dir_all(path).map_err(|error| {
-            format!(
-                "Failed to remove local directory {}: {}",
-                path.display(),
-                error
-            )
-        })
-    } else {
-        fs::remove_file(path)
-            .map_err(|error| format!("Failed to remove local file {}: {}", path.display(), error))
+        return Err(format!(
+            "Refusing to replace the directory {} with a file. Rename or remove it first.",
+            path.display()
+        ));
     }
+    fs::remove_file(path)
+        .map_err(|error| format!("Failed to remove local file {}: {}", path.display(), error))
 }
 
 fn reserve_drag_out_paths(
@@ -991,6 +1022,7 @@ fn emit_progress(
             transferred_bytes,
             total_bytes,
             done,
+            canceled: error.as_deref() == Some(TRANSFER_CANCELED),
             error,
         },
     );
@@ -1027,9 +1059,56 @@ fn file_type(stat: &FileStat) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{local_entry_size, remote_child_path, reserve_drag_out_paths};
+    use super::{
+        ensure_local_directory, local_entry_size, remove_local_entry_if_exists, remote_child_path,
+        reserve_drag_out_paths,
+    };
     use std::fs;
     use std::path::Path;
+
+    #[test]
+    fn refuses_to_replace_a_local_directory_with_a_file() {
+        let root = std::env::temp_dir().join(format!("gputerm-sftp-guard-{}", uuid::Uuid::new_v4()));
+        let occupied = root.join("payload");
+        fs::create_dir_all(occupied.join("nested")).expect("create occupied directory");
+        fs::write(occupied.join("nested/keep.bin"), [7_u8]).expect("write nested file");
+
+        let error = remove_local_entry_if_exists(&occupied).expect_err("must refuse a directory");
+        assert!(error.contains("Refusing to replace the directory"), "{error}");
+        // The tree the user already had is still there.
+        assert!(occupied.join("nested/keep.bin").exists());
+
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn refuses_to_replace_a_local_file_with_a_directory() {
+        let root = std::env::temp_dir().join(format!("gputerm-sftp-guard-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create test directory");
+        let occupied = root.join("payload");
+        fs::write(&occupied, [1_u8, 2, 3]).expect("write occupied file");
+
+        let error = ensure_local_directory(&occupied).expect_err("must refuse a file");
+        assert!(error.contains("a file of the same name already exists"), "{error}");
+        assert_eq!(fs::read(&occupied).expect("file preserved").len(), 3);
+
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn clears_only_a_plain_file_in_the_way() {
+        let root = std::env::temp_dir().join(format!("gputerm-sftp-guard-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create test directory");
+        let stale = root.join("payload.gputerm-part");
+        fs::write(&stale, [9_u8]).expect("write stale part file");
+
+        remove_local_entry_if_exists(&stale).expect("stale part file is removable");
+        assert!(!stale.exists());
+        // A missing path is not an error.
+        remove_local_entry_if_exists(&stale).expect("missing path is a no-op");
+
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
 
     #[test]
     fn local_entry_size_sums_nested_files() {

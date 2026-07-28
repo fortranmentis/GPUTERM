@@ -660,6 +660,82 @@ describe("SftpBrowser local path browse", () => {
     expect(screen.getByText("canceled")).toBeInTheDocument();
   });
 
+  it("deletes every selected remote item after one confirmation", async () => {
+    remoteEntries = [remoteFile("a.dat"), remoteFile("b.dat"), remoteFile("c.dat")];
+    mockConfirm.mockResolvedValue(true);
+
+    render(<SftpBrowser />);
+    await screen.findByText("/srv");
+
+    fireEvent.click(await screen.findByRole("button", { name: /a\.dat/ }));
+    fireEvent.click(screen.getByRole("button", { name: /c\.dat/ }), {
+      ctrlKey: true,
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^delete$/i }));
+
+    await waitFor(() => expect(mockConfirm).toHaveBeenCalledTimes(1));
+    await waitFor(() => {
+      const deleted = mockInvoke.mock.calls
+        .filter(([command]) => command === "sftp_delete")
+        .map(([, args]) => (args as { request: { remotePath: string } }).request.remotePath);
+      expect(deleted).toEqual(["/srv/a.dat", "/srv/c.dat"]);
+    });
+  });
+
+  it("deletes nothing when the confirmation is declined", async () => {
+    remoteEntries = [remoteFile("a.dat")];
+    mockConfirm.mockResolvedValue(false);
+
+    render(<SftpBrowser />);
+    await screen.findByText("/srv");
+
+    fireEvent.click(await screen.findByRole("button", { name: /a\.dat/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^delete$/i }));
+
+    await waitFor(() => expect(mockConfirm).toHaveBeenCalledTimes(1));
+    expect(mockInvoke.mock.calls.some(([command]) => command === "sftp_delete")).toBe(
+      false,
+    );
+  });
+
+  it("confirms multi-file drops one at a time", async () => {
+    const files = [localFile("one.txt"), localFile("two.txt"), localFile("three.txt")];
+    let openDialogs = 0;
+    let maxConcurrentDialogs = 0;
+    mockConfirm.mockImplementation(async () => {
+      openDialogs += 1;
+      maxConcurrentDialogs = Math.max(maxConcurrentDialogs, openDialogs);
+      await Promise.resolve();
+      openDialogs -= 1;
+      return true;
+    });
+    mockInvoke.mockImplementation((command, args) => {
+      if (command === "load_app_settings") {
+        return Promise.resolve({ recentLocalPath: "C:\\Users\\me" });
+      }
+      if (command === "list_local_dir") {
+        return Promise.resolve({ path: (args as { path: string }).path, entries: [] });
+      }
+      if (command === "sftp_list_dir") {
+        return Promise.resolve({ path: "/srv", entries: [] });
+      }
+      if (command === "sftp_path_exists") {
+        return Promise.resolve(true);
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<SftpBrowser />);
+    await screen.findByText("/srv");
+    fireEvent.drop(screen.getByTestId("remote-drop-zone"), {
+      dataTransfer: dragData(LOCAL_DRAG_TYPE, files),
+    });
+
+    await waitFor(() => expect(mockConfirm).toHaveBeenCalledTimes(files.length));
+    // Stacked native dialogs are the bug being guarded against.
+    expect(maxConcurrentDialogs).toBe(1);
+  });
+
   it("marks the task as failed when transfer command fails", async () => {
     const file = localFile("broken.txt");
     mockInvoke.mockImplementation((command, args) => {

@@ -68,6 +68,31 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
     () => sessions.find((session) => session.id === activeSessionId) ?? null,
     [activeSessionId, sessions],
   );
+  // A profile cannot tunnel through itself, nor through a profile whose own
+  // jump chain leads back to it; either one is unresolvable at connect time.
+  // Not reachable today because the form only ever opens blank (see
+  // `startNewProfile`), so this holds the invariant for whenever editing an
+  // existing profile becomes possible.
+  const jumpHostCandidates = useMemo(() => {
+    const byId = new Map(sessions.map((session) => [session.id, session]));
+    const reachesForm = (startId: string) => {
+      const seen = new Set<string>();
+      let current: string | null | undefined = startId;
+      while (current && !seen.has(current)) {
+        if (form.id && current === form.id) {
+          return true;
+        }
+        seen.add(current);
+        current = byId.get(current)?.proxyJumpId ?? null;
+      }
+      return false;
+    };
+    return sessions.filter(
+      (session) =>
+        !session.isLocal && session.id !== form.id && !reachesForm(session.id),
+    );
+  }, [form.id, sessions]);
+
   const targetCredentialStored = Boolean(
     form.id && storedCredentialIds.has(form.id),
   );
@@ -540,13 +565,11 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
                 }
               >
                 <option value="">None (direct)</option>
-                {sessions
-                  .filter((session) => !session.isLocal)
-                  .map((session) => (
-                    <option value={session.id} key={session.id}>
-                      {session.name} ({session.username}@{session.host})
-                    </option>
-                  ))}
+                {jumpHostCandidates.map((session) => (
+                  <option value={session.id} key={session.id}>
+                    {session.name} ({session.username}@{session.host})
+                  </option>
+                ))}
               </select>
             </label>
           )}

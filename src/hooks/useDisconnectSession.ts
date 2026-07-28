@@ -14,13 +14,16 @@ export function useDisconnectSession() {
   const setMessage = useSessionStore((state) => state.setMessage);
 
   return async (sessionId?: string) => {
-    const state = useSessionStore.getState();
-    const id = sessionId ?? state.activeSessionId;
-    if (!id || !state.connectedSessionIds.includes(id)) {
+    const id = sessionId ?? useSessionStore.getState().activeSessionId;
+    if (!id || !useSessionStore.getState().connectedSessionIds.includes(id)) {
       return;
     }
     try {
       await invoke("disconnect_terminal", { sessionId: id });
+      // Re-read after the round trip: the user can switch or connect sessions
+      // while the IPC call is in flight, and acting on the pre-await snapshot
+      // would show a session that is no longer connected.
+      const state = useSessionStore.getState();
       removeConnectedSession(id);
       if (state.activeSessionId === id) {
         const remaining = state.connectedSessionIds.filter(

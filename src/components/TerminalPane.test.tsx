@@ -9,6 +9,8 @@ const terminalMocks = vi.hoisted(() => ({
   open: vi.fn(),
   refresh: vi.fn(),
   write: vi.fn(),
+  findNext: vi.fn(),
+  findPrevious: vi.fn(),
   dataHandlers: [] as Array<(data: string) => void>,
 }));
 const eventHandlers = vi.hoisted(
@@ -35,6 +37,24 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 vi.mock("@xterm/addon-fit", () => ({
   FitAddon: class {
     fit() {}
+  },
+}));
+
+vi.mock("@xterm/addon-search", () => ({
+  SearchAddon: class {
+    findNext(query: string) {
+      terminalMocks.findNext(query);
+      return true;
+    }
+    findPrevious(query: string) {
+      terminalMocks.findPrevious(query);
+      return true;
+    }
+    clearDecorations() {}
+    onDidChangeResults() {
+      return { dispose() {} };
+    }
+    dispose() {}
   },
 }));
 
@@ -120,6 +140,8 @@ describe("TerminalPane multi-session split", () => {
     terminalMocks.open.mockReset();
     terminalMocks.refresh.mockReset();
     terminalMocks.write.mockReset();
+    terminalMocks.findNext.mockReset();
+    terminalMocks.findPrevious.mockReset();
     terminalMocks.dataHandlers.length = 0;
     eventHandlers.clear();
     vi.stubGlobal(
@@ -513,5 +535,90 @@ describe("TerminalPane multi-session split", () => {
     expect(
       screen.getAllByRole("group", { name: "Alpha terminal pane" }),
     ).toHaveLength(2);
+  });
+  it("shows the reported close reason and reconnects the pane", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "connect_terminal") {
+        return Promise.resolve({
+          sessionId: "alpha",
+          terminalId: "terminal-alpha-2",
+          profile: alpha,
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<TerminalPane />);
+    await waitFor(() => expect(eventHandlers.has("terminal-closed")).toBe(true));
+
+    act(() => {
+      eventHandlers.get("terminal-closed")?.({
+        payload: {
+          sessionId: "alpha",
+          terminalId: "terminal-alpha",
+          sessionClosed: true,
+          message: "Remote shell closed",
+        },
+      });
+    });
+
+    // The backend already computes this reason; before, it was discarded and the
+    // pane just stopped accepting input.
+    expect(await screen.findByText("Remote shell closed")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /reconnect/i }));
+
+    await waitFor(() => {
+      const connectCall = mockInvoke.mock.calls.find(
+        ([command]) => command === "connect_terminal",
+      );
+      const request = (connectCall?.[1] as { request: SessionConnectRequest }).request;
+      expect(request).toMatchObject({ id: "alpha", reuseStoredCredentials: true });
+    });
+    await waitFor(() =>
+      expect(screen.queryByText("Remote shell closed")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("searches terminal output from the Ctrl+F bar", async () => {
+    render(<TerminalPane />);
+    await waitFor(() => expect(terminalMocks.open).toHaveBeenCalled());
+
+    expect(
+      screen.queryByRole("searchbox", { name: /search terminal output/i }),
+    ).toBeNull();
+
+    fireEvent.keyDown(window, { key: "f", ctrlKey: true });
+
+    const input = await screen.findByRole("searchbox", {
+      name: /search terminal output/i,
+    });
+    fireEvent.change(input, { target: { value: "error" } });
+    expect(terminalMocks.findNext).toHaveBeenCalledWith("error");
+
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
+    expect(terminalMocks.findPrevious).toHaveBeenCalledWith("error");
+
+    fireEvent.keyDown(input, { key: "Escape" });
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("searchbox", { name: /search terminal output/i }),
+      ).toBeNull(),
+    );
+  });
+
+  it("leaves Ctrl+F to a text field the user is typing in", async () => {
+    render(<TerminalPane />);
+    await waitFor(() => expect(terminalMocks.open).toHaveBeenCalled());
+
+    const field = document.createElement("input");
+    document.body.appendChild(field);
+    field.focus();
+    fireEvent.keyDown(field, { key: "f", ctrlKey: true });
+
+    expect(
+      screen.queryByRole("searchbox", { name: /search terminal output/i }),
+    ).toBeNull();
+    field.remove();
   });
 });

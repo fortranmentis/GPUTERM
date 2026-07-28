@@ -28,12 +28,12 @@ pub struct LocalListResponse {
     entries: Vec<LocalEntry>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn load_app_settings() -> Result<AppSettings, String> {
     read_app_settings()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_recent_local_path(path: String) -> Result<AppSettings, String> {
     let normalized = validate_local_directory(&path)?;
     let mut settings = read_app_settings()?;
@@ -42,7 +42,7 @@ pub fn update_recent_local_path(path: String) -> Result<AppSettings, String> {
     Ok(settings)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_local_dir(path: String) -> Result<LocalListResponse, String> {
     let normalized = validate_local_directory(&path)?;
     let mut entries = Vec::new();
@@ -90,7 +90,7 @@ pub fn list_local_dir(path: String) -> Result<LocalListResponse, String> {
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn describe_local_paths(paths: Vec<String>) -> Result<Vec<LocalEntry>, String> {
     paths
         .into_iter()
@@ -134,7 +134,7 @@ pub fn describe_local_paths(paths: Vec<String>) -> Result<Vec<LocalEntry>, Strin
         .collect()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn local_path_exists(path: String) -> Result<bool, String> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
@@ -172,15 +172,7 @@ fn read_app_settings() -> Result<AppSettings, String> {
 }
 
 fn write_app_settings(settings: &AppSettings) -> Result<(), String> {
-    let path = settings_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("Failed to create settings directory: {}", error))?;
-    }
-    let content = serde_json::to_string_pretty(settings)
-        .map_err(|error| format!("Failed to serialize app settings: {}", error))?;
-    fs::write(&path, content)
-        .map_err(|error| format!("Failed to write app settings {}: {}", path.display(), error))
+    crate::ssh::credentials::write_json_file(&settings_path(), settings, "app settings")
 }
 
 fn settings_path() -> PathBuf {

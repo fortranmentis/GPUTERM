@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -10,9 +11,12 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
 import { Terminal, type IDisposable } from "@xterm/xterm";
 import {
   ArrowLeft,
+  ChevronDown,
+  ChevronUp,
   Columns2,
   KeyRound,
   Laptop,
@@ -21,6 +25,7 @@ import {
   PanelLeft,
   PanelRight,
   PanelTop,
+  PlugZap,
   Plus,
   Server,
   Terminal as TerminalIcon,
@@ -48,6 +53,7 @@ import {
 import type {
   SessionConnectRequest,
   SessionProfile,
+  TerminalClosedPayload,
   TerminalPaneInfo,
   TerminalSessionInfo,
 } from "../types/session";
@@ -58,14 +64,11 @@ type TerminalOutputPayload = {
   data: string;
 };
 
-type TerminalClosedPayload = {
-  sessionId: string;
-  terminalId?: string;
-};
-
 type TermEntry = {
   terminal: Terminal;
   fitAddon: FitAddon;
+  searchAddon: SearchAddon;
+  onSearchResults: IDisposable;
   onData: IDisposable;
   imeWorkaround: { dispose(): void };
   inputQueue: string;
@@ -213,6 +216,19 @@ export function TerminalPane() {
   const lastTerminalViewRevisionRef = useRef<number | null>(null);
   const [paneLayout, setPaneLayout] = useState<TerminalLayoutNode | null>(null);
   const [focusedTerminalId, setFocusedTerminalId] = useState<string | null>(null);
+  // Panes whose shell or channel ended, with the reason the backend reported.
+  // Without this the pane just silently stops accepting input.
+  const [closedPanes, setClosedPanes] = useState<Record<string, string>>({});
+  const [reconnectingPane, setReconnectingPane] = useState<string | null>(null);
+  // Scrollback search for the focused pane. An inline bar rather than a dialog,
+  // so it introduces no new focus trap.
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchMatches, setSearchMatches] = useState<{
+    current: number;
+    total: number;
+  } | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [splitting, setSplitting] = useState(false);
   const [splitPickerOpen, setSplitPickerOpen] = useState(false);
   const [splitPlacement, setSplitPlacement] =
@@ -438,12 +454,24 @@ export function TerminalPane() {
       }
       const terminal = createTerminal();
       const fitAddon = new FitAddon();
+      const searchAddon = new SearchAddon();
       terminal.loadAddon(fitAddon);
+      terminal.loadAddon(searchAddon);
       terminal.open(host);
       const imeWorkaround = attachWebKitHangulImeWorkaround(terminal);
       const entry: TermEntry = {
         terminal,
         fitAddon,
+        searchAddon,
+        // The addon is the authority on match counts; deriving them here would
+        // only ever approximate what it already knows.
+        onSearchResults: searchAddon.onDidChangeResults((results) =>
+          setSearchMatches(
+            results
+              ? { current: results.resultIndex + 1, total: results.resultCount }
+              : null,
+          ),
+        ),
         onData: { dispose() {} },
         imeWorkaround,
         inputQueue: "",
@@ -469,7 +497,9 @@ export function TerminalPane() {
       entry.writable = false;
       entry.inputQueue = "";
       entry.onData.dispose();
+      entry.onSearchResults.dispose();
       entry.imeWorkaround.dispose();
+      entry.searchAddon.dispose();
       entry.terminal.dispose();
       instancesRef.current.delete(terminalId);
     }
@@ -579,6 +609,10 @@ export function TerminalPane() {
           entry.inputQueue = "";
         }
         clearPendingOutput(pendingOutputRef.current, terminalId);
+        setClosedPanes((current) => ({
+          ...current,
+          [terminalId]: event.payload.message ?? "Connection closed",
+        }));
       }),
     );
 
@@ -592,7 +626,9 @@ export function TerminalPane() {
       for (const entry of instancesRef.current.values()) {
         entry.writable = false;
         entry.onData.dispose();
+        entry.onSearchResults.dispose();
         entry.imeWorkaround.dispose();
+        entry.searchAddon.dispose();
         entry.terminal.dispose();
       }
       instancesRef.current.clear();
@@ -815,6 +851,130 @@ export function TerminalPane() {
 
   const disconnect = useDisconnectSession();
 
+  const runSearch = (query: string, direction: "next" | "previous") => {
+    const entry = focusedTerminalId
+      ? instancesRef.current.get(focusedTerminalId)
+      : null;
+    if (!entry) {
+      return;
+    }
+    if (!query) {
+      entry.searchAddon.clearDecorations();
+      setSearchMatches(null);
+      return;
+    }
+    const options = {
+      decorations: {
+        matchOverviewRuler: "#22d3ee",
+        activeMatchColorOverviewRuler: "#67e8f9",
+        matchBackground: "#1e3a46",
+        activeMatchBackground: "#22d3ee",
+      },
+    };
+    const found =
+      direction === "next"
+        ? entry.searchAddon.findNext(query, options)
+        : entry.searchAddon.findPrevious(query, options);
+    if (!found) {
+      setSearchMatches({ current: 0, total: 0 });
+    }
+  };
+
+  const openSearch = useCallback(() => {
+    // The bar renders inside the focused pane, so without one there is nothing
+    // to search and nothing would appear.
+    if (!focusedTerminalId || !instancesRef.current.has(focusedTerminalId)) {
+      return;
+    }
+    setSearchOpen(true);
+    // Deferred so the input exists before focus moves to it.
+    window.setTimeout(() => searchInputRef.current?.select(), 0);
+  }, [focusedTerminalId]);
+
+  const closeSearch = () => {
+    setSearchOpen(false);
+    setSearchMatches(null);
+    for (const entry of instancesRef.current.values()) {
+      entry.searchAddon.clearDecorations();
+    }
+    if (focusedTerminalId) {
+      instancesRef.current.get(focusedTerminalId)?.terminal.focus();
+    }
+  };
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "f") {
+        return;
+      }
+      // Ctrl+F belongs to whatever field the user is typing in — the path box,
+      // the profile form — unless that field is this search bar. The target is
+      // not always an element: with focus nowhere it is the window itself.
+      const { target } = event;
+      if (target instanceof Element) {
+        const field = target.closest("input, textarea, select");
+        if (field && !target.closest(".terminal-search-bar")) {
+          return;
+        }
+      }
+      event.preventDefault();
+      openSearch();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [openSearch]);
+
+  // Reopens a shell for a pane whose connection ended.
+  const reconnectPane = async (terminalId: string) => {
+    const paneSessionId = sessionIdByTerminalId.get(terminalId);
+    const profile = sessions.find((session) => session.id === paneSessionId);
+    if (!paneSessionId || !profile) {
+      setMessage({
+        kind: "error",
+        text: "This pane's profile is no longer available",
+      });
+      return;
+    }
+
+    const source = instancesRef.current.get(terminalId)?.terminal;
+    const request: SessionConnectRequest = {
+      id: profile.id,
+      name: profile.name,
+      host: profile.host,
+      port: profile.port,
+      username: profile.username,
+      isLocal: profile.isLocal ?? false,
+      password: null,
+      privateKeyPath: profile.isLocal ? null : profile.privateKeyPath ?? null,
+      proxyJumpId: profile.isLocal ? null : profile.proxyJumpId ?? null,
+      proxyJumpPassword: null,
+      // Credentials stay in memory for the process lifetime, so a reconnect
+      // does not re-prompt for a password that already worked.
+      reuseStoredCredentials: true,
+      cols: source?.cols ?? 80,
+      rows: source?.rows ?? 24,
+    };
+
+    setReconnectingPane(terminalId);
+    try {
+      const info = await withHostKeyPrompt(() =>
+        invoke<TerminalSessionInfo>("connect_terminal", { request }),
+      );
+      const nextTerminalId = info.terminalId ?? info.sessionId;
+      addConnectedSession(info.sessionId, nextTerminalId);
+      setClosedPanes((current) => {
+        const { [terminalId]: _closed, ...rest } = current;
+        return rest;
+      });
+      focusPane(nextTerminalId, info.sessionId);
+      setMessage({ kind: "success", text: `${info.profile.name} reconnected` });
+    } catch (error) {
+      setMessage({ kind: "error", text: String(error) });
+    } finally {
+      setReconnectingPane(null);
+    }
+  };
+
   const renderTerminalCell = (terminalId: string, visible: boolean) => {
     const paneSessionId = sessionIdByTerminalId.get(terminalId);
     const paneProfile = sessions.find(
@@ -868,6 +1028,88 @@ export function TerminalPane() {
           className="xterm-host"
           ref={(element) => registerTerminalHost(terminalId, element)}
         />
+        {visible && searchOpen && terminalId === focusedTerminalId && (
+          <div
+            className="terminal-search-bar"
+            role="search"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <input
+              ref={searchInputRef}
+              value={searchQuery}
+              type="search"
+              autoFocus
+              aria-label="Search terminal output"
+              placeholder="Find in terminal"
+              onChange={(event) => {
+                setSearchQuery(event.target.value);
+                runSearch(event.target.value, "next");
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  runSearch(searchQuery, event.shiftKey ? "previous" : "next");
+                } else if (event.key === "Escape") {
+                  event.preventDefault();
+                  closeSearch();
+                }
+              }}
+            />
+            <span className="terminal-search-status" aria-live="polite">
+              {searchQuery === ""
+                ? ""
+                : searchMatches == null
+                  ? "…"
+                  : searchMatches.total === 0
+                    ? "No matches"
+                    : `${searchMatches.current}/${searchMatches.total}`}
+            </span>
+            <button
+              type="button"
+              aria-label="Previous match"
+              title="Previous match (Shift+Enter)"
+              disabled={searchQuery === ""}
+              onClick={() => runSearch(searchQuery, "previous")}
+            >
+              <ChevronUp size={14} />
+            </button>
+            <button
+              type="button"
+              aria-label="Next match"
+              title="Next match (Enter)"
+              disabled={searchQuery === ""}
+              onClick={() => runSearch(searchQuery, "next")}
+            >
+              <ChevronDown size={14} />
+            </button>
+            <button
+              type="button"
+              aria-label="Close search"
+              title="Close search (Escape)"
+              onClick={closeSearch}
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
+        {visible && closedPanes[terminalId] && (
+          <div className="terminal-pane-closed" role="status">
+            <strong>Disconnected</strong>
+            <span>{closedPanes[terminalId]}</span>
+            <button
+              className="primary-button"
+              type="button"
+              disabled={reconnectingPane === terminalId}
+              onClick={(event) => {
+                event.stopPropagation();
+                void reconnectPane(terminalId);
+              }}
+            >
+              <PlugZap size={15} />
+              {reconnectingPane === terminalId ? "Reconnecting…" : "Reconnect"}
+            </button>
+          </div>
+        )}
       </div>
     );
   };

@@ -134,14 +134,20 @@ pub(crate) fn parse_swapusage(output: &str) -> (Option<u64>, Option<u64>, Option
         if *eq != "=" {
             continue;
         }
-        let (number, unit) = value.split_at(value.len().saturating_sub(1));
+        // Split on the trailing unit character rather than the last byte:
+        // `split_at` would panic on a multi-byte character, and a panic here
+        // kills the telemetry thread for the whole session with no recovery.
+        let Some(unit) = value.chars().last() else {
+            continue;
+        };
+        let number = &value[..value.len() - unit.len_utf8()];
         let Ok(amount) = number.parse::<f64>() else {
             continue;
         };
         let mib = match unit {
-            "K" => amount / 1024.0,
-            "M" => amount,
-            "G" => amount * 1024.0,
+            'K' => amount / 1024.0,
+            'M' => amount,
+            'G' => amount * 1024.0,
             _ => continue,
         };
         values.insert(*key, mib.round() as u64);
@@ -394,6 +400,26 @@ mod tests {
         assert_eq!(total, Some(2048));
         assert_eq!(used, Some(1059));
         assert_eq!(free, Some(989));
+    }
+
+    #[test]
+    fn swapusage_survives_unexpected_remote_output() {
+        // A panic here would kill the telemetry thread for the whole session,
+        // and the thread is never restarted, so odd output must only be ignored.
+        for output in [
+            "total = 2048.00Ｍ  used = 1024.00Ｍ",
+            "total = 2048.00° used = ?",
+            "total = = = ",
+            "total",
+            "",
+            "total = 2048.00M  used = ✓  free = 1024.00M",
+        ] {
+            let _ = parse_swapusage(output);
+        }
+        // A valid row inside otherwise unusable output is still read.
+        let (total, _, free) = parse_swapusage("total = 2048.00M  used = ✓  free = 1024.00M");
+        assert_eq!(total, Some(2048));
+        assert_eq!(free, Some(1024));
     }
 
     #[test]

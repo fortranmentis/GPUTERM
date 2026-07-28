@@ -537,6 +537,33 @@ describe("RemoteTelemetryBar disk summary", () => {
     }
   });
 
+  it("restores the previous interval when saving telemetry settings fails", async () => {
+    useSessionStore.setState({
+      telemetrySettings: {
+        telemetryIntervalSecs: 2,
+        displayMode: "gpu-system",
+        diskIgnoreFsTypes: [],
+      },
+    });
+    mockInvoke.mockImplementation((command) => {
+      if (command === "update_telemetry_settings") {
+        return Promise.reject("settings file is read-only");
+      }
+      return Promise.resolve(resourceDetails);
+    });
+
+    render(<RemoteTelemetryBar />);
+    const interval = screen.getByRole("combobox", { name: /interval/i });
+    fireEvent.change(interval, { target: { value: "10" } });
+
+    // The control must not keep claiming an interval the backend refused.
+    await waitFor(() =>
+      expect(useSessionStore.getState().telemetrySettings.telemetryIntervalSecs).toBe(2),
+    );
+    expect(interval).toHaveValue("2");
+    expect(useSessionStore.getState().message?.kind).toBe("error");
+  });
+
   it("clears the previous GPU selection when the active session changes", async () => {
     const sessionOneGpu0 = {
       ...resourceDetails.gpus[0],
@@ -690,6 +717,10 @@ describe("RemoteTelemetryBar disk summary", () => {
 
     render(<RemoteTelemetryBar />);
     const card = screen.getByRole("button", { name: /ai dash/i });
+    const sessionCount = within(card).getByText("3 sessions");
+    expect(sessionCount).toHaveClass("agent-summary-session-count");
+    expect(sessionCount.parentElement).toHaveClass("telemetry-section-title");
+    expect(card.querySelector(".telemetry-section-body > strong")).not.toBeInTheDocument();
     expect(within(card).getByText("AGY · Gemini")).toBeInTheDocument();
     expect(within(card).getByText("AGY · Claude/GPT")).toBeInTheDocument();
     expect(within(card).getByText("Claude Code")).toBeInTheDocument();

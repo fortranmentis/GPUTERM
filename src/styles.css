@@ -1056,6 +1056,95 @@ button:disabled {
   display: none;
 }
 
+/* Shown when a pane's shell or channel ends, so a dead pane is never just
+   silently unresponsive. */
+.terminal-pane-closed {
+  position: absolute;
+  z-index: 5;
+  right: 12px;
+  bottom: 12px;
+  left: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(248, 113, 113, 0.42);
+  border-radius: 7px;
+  background: rgba(20, 12, 14, 0.94);
+}
+
+.terminal-pane-closed > strong {
+  color: #fca5a5;
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.terminal-pane-closed > span {
+  flex: 1 1 180px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.terminal-pane-closed > button {
+  flex: none;
+}
+
+/* Scrollback search, anchored to the focused pane. */
+.terminal-search-bar {
+  position: absolute;
+  z-index: 6;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid rgba(34, 211, 238, 0.28);
+  border-radius: 7px;
+  background: rgba(12, 18, 26, 0.96);
+}
+
+.terminal-search-bar > input {
+  width: 180px;
+  padding: 4px 7px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 5px;
+  background: #080b10;
+  color: #d6dde7;
+  font-size: 12px;
+}
+
+.terminal-search-bar > input:focus-visible {
+  border-color: rgba(34, 211, 238, 0.6);
+  outline: none;
+}
+
+.terminal-search-bar > button {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.terminal-search-bar > button:hover:not(:disabled) {
+  border-color: rgba(34, 211, 238, 0.3);
+  color: #a5f3fc;
+}
+
+.terminal-search-bar > .terminal-search-status {
+  min-width: 54px;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+}
+
 .terminal-split-session-label {
   position: absolute;
   z-index: 3;
@@ -1810,22 +1899,31 @@ button.agent-summary-section {
 
 .agent-summary-section .telemetry-section-body {
   justify-content: flex-start;
-  gap: 3px;
+  gap: 0;
 }
 
-.agent-summary-section .telemetry-section-body > strong {
-  font-size: 12px;
-  line-height: 1.1;
+.telemetry-section-title .agent-summary-session-count {
+  margin-left: auto;
+  overflow: visible;
+  color: #cbd5e1;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 750;
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: nowrap;
 }
 
 .agent-summary-grid {
   display: grid;
   width: 100%;
+  max-width: 100%;
   min-width: 0;
-  grid-template-columns: minmax(92px, 1.15fr) repeat(2, minmax(82px, 1fr));
+  grid-template-columns: minmax(0, 1.15fr) repeat(2, minmax(0, 1fr));
   grid-auto-rows: minmax(15px, auto);
   align-items: center;
   gap: 2px 8px;
+  overflow: hidden;
 }
 
 .agent-summary-row {
@@ -1862,9 +1960,11 @@ button.agent-summary-section {
 
 .telemetry-section-body .agent-summary-gauge {
   display: grid;
-  grid-template-columns: minmax(24px, auto) minmax(30px, 1fr);
+  width: 100%;
+  grid-template-columns: max-content minmax(0, 1fr);
   align-items: center;
   gap: 4px;
+  overflow: hidden;
 }
 
 .telemetry-section-body .agent-summary-gauge-reading {

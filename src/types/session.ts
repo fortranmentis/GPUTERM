@@ -81,5 +81,21 @@ export type SftpProgressPayload = {
   transferredBytes: number;
   totalBytes: number | null;
   done: boolean;
+  /** Set when the user cancelled, so callers need not match on `error` text. */
+  canceled: boolean;
   error?: string | null;
+};
+
+/**
+ * Emitted when a terminal's channel or shell ends. Mirrors the Rust
+ * `TerminalClosedPayload`, which always populates every field — declared here
+ * once so the three listeners cannot drift apart or drop `message`.
+ */
+export type TerminalClosedPayload = {
+  sessionId: string;
+  terminalId: string;
+  /** The whole SSH session ended, not just this pane. */
+  sessionClosed: boolean;
+  /** Human-readable reason, e.g. "Remote shell closed". */
+  message: string | null;
 };

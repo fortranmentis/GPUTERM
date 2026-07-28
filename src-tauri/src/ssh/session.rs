@@ -119,12 +119,12 @@ pub struct SshTarget {
     pub proxy: Option<Box<SshTarget>>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn load_sessions() -> Result<Vec<SessionProfile>, String> {
     read_profiles()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_session(profile: SessionProfile) -> Result<Vec<SessionProfile>, String> {
     upsert_profile(normalize_profile(profile))
 }
@@ -138,8 +138,14 @@ pub async fn delete_session(
     tauri::async_runtime::spawn_blocking(move || {
         let mut profiles = read_profiles()?;
         profiles.retain(|profile| profile.id != id);
-        credentials.clear_password(&id)?;
+        // Vault clean-up is best effort: a locked or not-yet-initialized vault
+        // must not make profile deletion impossible. Any leftover entry is
+        // unreachable once the profile is gone.
+        let vault_error = credentials.clear_password(&id).err();
         write_profiles(&profiles)?;
+        if let Some(error) = vault_error {
+            eprintln!("GpuTerm: could not clear stored credential for a deleted profile: {error}");
+        }
         Ok(profiles)
     })
     .await
@@ -823,7 +829,7 @@ fn evaluate_host_key(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn trust_host_key(
     host: String,
     port: u16,
@@ -942,25 +948,7 @@ fn read_profiles() -> Result<Vec<SessionProfile>, String> {
 }
 
 fn write_profiles(profiles: &[SessionProfile]) -> Result<(), String> {
-    let path = sessions_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            format!(
-                "Failed to create config directory {}: {}",
-                parent.display(),
-                error
-            )
-        })?;
-    }
-    let content = serde_json::to_string_pretty(profiles)
-        .map_err(|error| format!("Failed to serialize sessions: {}", error))?;
-    fs::write(&path, content).map_err(|error| {
-        format!(
-            "Failed to write sessions file {}: {}",
-            path.display(),
-            error
-        )
-    })
+    crate::ssh::credentials::write_json_file(&sessions_path(), &profiles, "sessions file")
 }
 
 fn read_known_hosts() -> Result<KnownHosts, String> {
@@ -986,25 +974,7 @@ fn read_known_hosts() -> Result<KnownHosts, String> {
 }
 
 fn write_known_hosts(known_hosts: &KnownHosts) -> Result<(), String> {
-    let path = known_hosts_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            format!(
-                "Failed to create config directory {}: {}",
-                parent.display(),
-                error
-            )
-        })?;
-    }
-    let content = serde_json::to_string_pretty(known_hosts)
-        .map_err(|error| format!("Failed to serialize known_hosts: {}", error))?;
-    fs::write(&path, content).map_err(|error| {
-        format!(
-            "Failed to write known_hosts file {}: {}",
-            path.display(),
-            error
-        )
-    })
+    crate::ssh::credentials::write_json_file(&known_hosts_path(), known_hosts, "known_hosts file")
 }
 
 fn sessions_path() -> PathBuf {

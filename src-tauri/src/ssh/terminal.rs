@@ -410,9 +410,16 @@ pub async fn create_terminal_split(
     })
 }
 
+/// Writes queued input to a terminal.
+///
+/// `async` on purpose: Tauri runs synchronous commands on the main thread, and
+/// the nonblocking write helper retries for up to `NONBLOCKING_OPERATION_TIMEOUT`
+/// when the SSH channel stalls, which would freeze the whole window. The
+/// webview serializes input per terminal, so moving the write onto the blocking
+/// pool cannot reorder keystrokes.
 #[tauri::command]
-pub fn terminal_write(
-    state: State<AppState>,
+pub async fn terminal_write(
+    state: State<'_, AppState>,
     terminal_id: String,
     data: String,
 ) -> Result<(), String> {
@@ -436,7 +443,7 @@ pub fn terminal_write(
         return Ok(());
     }
 
-    match writer {
+    tauri::async_runtime::spawn_blocking(move || match writer {
         TerminalWriter::Remote(channel) => {
             let mut channel = channel
                 .lock()
@@ -459,12 +466,16 @@ pub fn terminal_write(
                 .and_then(|_| writer.flush())
                 .map_err(|error| format!("Failed to write to local terminal: {}", error))
         }
-    }
+    })
+    .await
+    .map_err(|error| format!("Terminal write task failed: {}", error))?
 }
 
+/// Resizes a terminal's remote PTY. `async` for the same reason as
+/// [`terminal_write`]: the nonblocking resize helper can retry for seconds.
 #[tauri::command]
-pub fn terminal_resize(
-    state: State<AppState>,
+pub async fn terminal_resize(
+    state: State<'_, AppState>,
     terminal_id: String,
     cols: u32,
     rows: u32,
@@ -483,7 +494,7 @@ pub fn terminal_resize(
         }
     };
 
-    match resizer {
+    tauri::async_runtime::spawn_blocking(move || match resizer {
         TerminalResizer::Remote(channel) => {
             let mut channel = channel
                 .lock()
@@ -499,7 +510,9 @@ pub fn terminal_resize(
             .map_err(|_| "Local PTY is unavailable".to_string())?
             .resize(pty_size(cols, rows))
             .map_err(|error| format!("Failed to resize local PTY: {}", error)),
-    }
+    })
+    .await
+    .map_err(|error| format!("Terminal resize task failed: {}", error))?
 }
 
 #[tauri::command]

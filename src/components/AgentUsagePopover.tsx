@@ -700,7 +700,8 @@ function shorten(value: string | null) {
 }
 
 function formatReset(value: number) {
-  const milliseconds = value > 10_000_000_000 ? value : value * 1000;
+  // Rust normalizes every provider reset timestamp to epoch seconds.
+  const milliseconds = value * 1000;
   return new Date(milliseconds).toLocaleString([], {
     month: "short",
     day: "numeric",
@@ -710,7 +711,8 @@ function formatReset(value: number) {
 }
 
 function formatResetCountdown(value: number) {
-  const milliseconds = value > 10_000_000_000 ? value : value * 1000;
+  // Rust normalizes every provider reset timestamp to epoch seconds.
+  const milliseconds = value * 1000;
   const remainingSeconds = Math.max(0, Math.round((milliseconds - Date.now()) / 1000));
   if (remainingSeconds === 0) return "now";
   const days = Math.floor(remainingSeconds / 86_400);

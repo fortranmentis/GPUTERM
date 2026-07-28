@@ -53,6 +53,8 @@
 - 비밀번호, 개인키(패스프레이즈 포함), SSH 에이전트 인증 지원
 - UTF-8 안전 스트리밍 — 청크 경계에 걸린 멀티바이트 문자(한글, 日本語, 이모지)가 깨지지 않음
 - **한글 입력 정상 동작** — WebKit 계열 웹뷰의 자모 분리 버그를 네이티브 터미널과 같은 백스페이스-재작성 방식으로 해결해, 터미널에서 한글 IME 조합이 올바르게 처리됩니다
+- **스크롤백 검색** — `Ctrl`/`Cmd`+`F`로 패인 안에 검색 바가 열리고 일치 개수를 표시합니다. `Enter`/`Shift`+`Enter`로 이동, `Escape`로 셸에 포커스 복귀
+- **끊김이 보이고 복구됩니다** — 셸이나 채널이 종료된 패인은 입력을 조용히 거부하는 대신 백엔드가 보고한 사유와 **Reconnect** 버튼을 표시
 - MOTD를 포함한 접속 초기 출력을 버퍼링 후 재생 — 연결 타이밍에 유실되지 않음
 - 연속 입력 직렬화와 완전한 SSH/TCP 비차단 전송으로 동시 키 입력·조합키·키 반복 중에도 터미널 읽기와 충돌 없이 반응
 - 터미널 쓰기는 libssh2의 수신 데이터 flush 경로를 사용하지 않으며, 쓰기·원격 PTY 크기 조절·SSH keepalive는 패킷 끼어들기 없이 비차단 작업을 재시도
@@ -272,7 +274,7 @@ cp scripts/gputerm-claude-statusline.sh ~/.claude/gputerm-claude-statusline.sh &
 }
 ```
 
-상태줄에는 `Opus · ctx 8% · 5h 76% · wk 59% · $0.12`가 출력되고, `~/.cache/gputerm/agent-status/claude/<session-id>.json`이 기록됩니다. 모니터링하려는 모든 호스트(원격 포함)에 설치하세요. Windows 자동 설정은 같은 기능의 `gputerm-claude-statusline.py`를 설치하며 Python 3가 필요합니다.
+상태줄에는 `Opus · ctx 8% · 5h 76% · wk 59% · $0.12`가 출력되고, `~/.cache/gputerm/agent-status/claude/<session-id>.json`이 기록됩니다. 모니터링하려는 모든 호스트(원격 포함)에 설치하세요. Windows 자동 설정은 `gputerm-claude-statusline.ps1`을 설치하고 절대 경로를 `powershell.exe` 명령으로 등록하므로 Claude Code가 Git Bash와 PowerShell 중 어느 셸을 선택해도 동작합니다. 지원 Windows에 기본 포함된 Windows PowerShell 5.1을 사용하며 Windows 헬퍼에는 Python이 필요하지 않습니다.
 
 기록되는 필드는 세션 id, 작업 디렉터리, 모델 이름과 id, `context_window`(`current_usage` 포함), `cost.total_cost_usd`, `cost.total_duration_ms`, `rate_limits.{five_hour,seven_day}.{used_percentage,resets_at}`, 캡처 시각, 가능한 경우 에이전트 pid뿐입니다. 프롬프트·응답·도구 입출력·트랜스크립트 경로·세션 이름·저장소 정보는 복사하지 않습니다. 7일이 지난 스냅샷은 다음 실행에서 정리됩니다.
 
@@ -313,10 +315,14 @@ cp scripts/gputerm-claude-statusline.sh ~/.claude/gputerm-claude-statusline.sh &
 
 ```bash
 npm run test                                    # 프론트엔드 테스트 (Vitest)
+npm run typecheck                               # TypeScript 타입 검사
+npm run lint                                    # ESLint (React hooks 규칙)
 cargo test --manifest-path src-tauri/Cargo.toml # 백엔드 테스트
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets  # 린트
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings  # 린트
 npm run build                                   # TypeScript + Vite 프로덕션 빌드
 ```
+
+`.github/workflows/ci.yml`이 push와 pull request마다 위 전부를 실행하며, `src-tauri/Cargo.toml`에 선언된 MSRV로 `cargo check`도 함께 수행합니다.
 
 <details>
 <summary>프로젝트 구조</summary>
@@ -405,6 +411,7 @@ GpuTerm은 [PolyForm Noncommercial 1.0.0](./LICENSE)에 따라 개인·비상업
 | GPU가 '사용 불가'로 표시 | GPU 도구(`nvidia-smi`, `rocm-smi`, `xpu-smi`, `intel_gpu_top`) 설치 또는 Linux `/sys/class/drm` 읽기 권한 확인 — 다른 지표는 무관하게 정상 동작 |
 | Windows 하이브리드 PC에서 외장 GPU만 표시 | 최신 빌드로 업데이트하세요. WDDM GPU Engine 카운터가 아직 없는 유휴 Intel/AMD 어댑터도 `Win32_VideoController` 탐색 결과에서 유지합니다 |
 | AI DASH 카드가 비어 있음 | 텔레메트리 계정에서 볼 수 있는 사용자로 `agy`, `codex`, `claude`가 실행 중인지 확인하세요. CPU/RAM은 프로세스 트리에서 표시되며 AGY 토큰/컨텍스트 메타데이터에는 모니터링 호스트의 `python3` 또는 `python`도 필요합니다 |
+| Windows에서 Claude 연동 설정 후에도 잔여량이 `n/a` | **연동 설정**을 다시 눌러 이전 `%USERPROFILE%` Python 명령을 교체하고 Claude Code를 재시작한 뒤 작업공간 신뢰를 허용하고 메시지를 한 번 보내세요. 구독 한도는 첫 응답 이후 제공됩니다 |
 | Windows 로컬 세션에서 콘솔 창이 반복 표시되거나 모니터링 데이터가 없음 | v1.1.6-beta에서 수정 — 앱을 업데이트하세요. 로컬 PowerShell 수집기는 콘솔 없이 UTF-8 출력으로 실행됩니다 |
 | Windows 원격에서 "The system cannot find the path specified" 표시 | v1.0.9-beta에서 수정 — 이전 빌드는 PATH에 `uname` 포트가 있는 Windows 호스트를 Linux로 오인했습니다; 앱을 업데이트하세요 |
 | 터미널에서 한글이 자모로 분리됨 | macOS/WebKit 클라이언트용으로 수정 완료 — 최신 릴리스로 업데이트하세요 |
