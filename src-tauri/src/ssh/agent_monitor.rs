@@ -1724,7 +1724,7 @@ fn assign_metadata(
         // session, so it is never handed to an unrelated process.
         let next = (0..sessions.len()).find(|index| {
             !used.contains(index)
-                && sessions[*index].pid_hint.map_or(true, |pid| {
+                && sessions[*index].pid_hint.is_none_or(|pid| {
                     !trees.iter().any(|(_, _, included)| included.contains(&pid))
                 })
         });
