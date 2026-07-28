@@ -55,7 +55,7 @@ jobs:
       - name: Lint backend
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
-  # Cargo.toml declares rust-version = "1.77". Without this job that declaration
+  # Cargo.toml declares the supported MSRV. Without this job that declaration
   # silently rots, because every other build uses the stable toolchain.
   msrv:
     runs-on: ubuntu-22.04

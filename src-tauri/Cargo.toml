@@ -6,7 +6,7 @@ authors = ["GpuTerm"]
 license = "PolyForm-Noncommercial-1.0.0"
 repository = ""
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.88"
 
 [lib]
 name = "gputerm_lib"
