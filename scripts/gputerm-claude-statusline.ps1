@@ -153,7 +153,7 @@ try {
         # one fixed file keeps short-lived sessions - which write quota-less
         # snapshots - from crowding the only useful reading out of the reader's
         # newest-files window. Absent limits leave the account file untouched.
-        if ($Snapshot.ContainsKey("rate_limits")) {
+        if ($Snapshot.Contains("rate_limits")) {
             $Account = [ordered]@{
                 scope        = "account"
                 captured_at  = $Snapshot["captured_at"]
