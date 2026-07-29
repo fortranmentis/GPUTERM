@@ -8,6 +8,20 @@
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 
+# Fixed name for the account-wide quota, read by GpuTerm regardless of how many
+# session snapshots exist.
+$AccountSnapshotName = "account.json"
+
+function Write-SnapshotFile([string]$Target, $Value) {
+    # Written to a sibling temporary file first so GpuTerm never reads a partial
+    # document mid-write.
+    $Temporary = $Target + ".tmp"
+    $Encoded = $Value | ConvertTo-Json -Compress -Depth 8
+    $Utf8 = New-Object System.Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText($Temporary, $Encoded, $Utf8)
+    Move-Item -LiteralPath $Temporary -Destination $Target -Force
+}
+
 function Get-Field($Object, [string]$Name) {
     if ($null -eq $Object) {
         return $null
@@ -132,16 +146,26 @@ try {
         }
         $Directory = Join-Path $UserHome ".cache\gputerm\agent-status\claude"
         New-Item -ItemType Directory -Force -Path $Directory | Out-Null
-        $Target = Join-Path $Directory ("{0}.json" -f $SessionId)
-        $Temporary = $Target + ".tmp"
-        $Encoded = $Snapshot | ConvertTo-Json -Compress -Depth 8
-        $Utf8 = New-Object System.Text.UTF8Encoding($false)
-        [IO.File]::WriteAllText($Temporary, $Encoded, $Utf8)
-        Move-Item -LiteralPath $Temporary -Destination $Target -Force
+        Write-SnapshotFile (Join-Path $Directory ("{0}.json" -f $SessionId)) $Snapshot
+
+        # The 5-hour and weekly windows are account-wide, and Claude only
+        # includes them after a session's first API response. Publishing them to
+        # one fixed file keeps short-lived sessions - which write quota-less
+        # snapshots - from crowding the only useful reading out of the reader's
+        # newest-files window. Absent limits leave the account file untouched.
+        if ($Snapshot.ContainsKey("rate_limits")) {
+            $Account = [ordered]@{
+                scope        = "account"
+                captured_at  = $Snapshot["captured_at"]
+                session_id   = $SessionId
+                rate_limits  = $Snapshot["rate_limits"]
+            }
+            Write-SnapshotFile (Join-Path $Directory $AccountSnapshotName) $Account
+        }
 
         $Cutoff = (Get-Date).AddDays(-7)
         Get-ChildItem -LiteralPath $Directory -File -Filter "*.json" |
-            Where-Object { $_.LastWriteTime -lt $Cutoff } |
+            Where-Object { $_.Name -ne $AccountSnapshotName -and $_.LastWriteTime -lt $Cutoff } |
             Remove-Item -Force
     }
 

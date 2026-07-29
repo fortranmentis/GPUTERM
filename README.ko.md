@@ -279,11 +279,13 @@ cp scripts/gputerm-claude-statusline.sh ~/.claude/gputerm-claude-statusline.sh &
 }
 ```
 
-상태줄에는 `Opus · ctx 8% · 5h 76% · wk 59% · $0.12`가 출력되고, `~/.cache/gputerm/agent-status/claude/<session-id>.json`이 기록됩니다. 모니터링하려는 모든 호스트(원격 포함)에 설치하세요. macOS 자동 설정은 운영체제에 기본 포함된 `osascript` 기반 JavaScript for Automation 헬퍼를 설치하므로 Python이 필요하지 않습니다. Windows 자동 설정은 `gputerm-claude-statusline.ps1`을 설치하고 절대 경로를 `powershell.exe` 명령으로 등록하므로 Claude Code가 Git Bash와 PowerShell 중 어느 셸을 선택해도 동작합니다. 지원 Windows에 기본 포함된 Windows PowerShell 5.1을 사용하며 Windows 헬퍼에도 Python이 필요하지 않습니다.
+상태줄에는 `Opus · ctx 8% · 5h 76% · wk 59% · $0.12`가 출력됩니다. 해당 세션의 `~/.cache/gputerm/agent-status/claude/<session-id>.json`을 기록하고, payload에 실제로 한도가 담겨 있을 때만 계정 단위 5시간·주간 창을 `~/.cache/gputerm/agent-status/claude/account.json`에 갱신합니다. GpuTerm은 `account.json`을 항상 파일명으로 읽으므로, 쿼터 없는 스냅샷을 쏟아내는 짧은 세션들이 유일하게 쓸모 있는 값을 가리지 못합니다. 모니터링하려는 모든 호스트(원격 포함)에 설치하세요. macOS 자동 설정은 운영체제에 기본 포함된 `osascript` 기반 JavaScript for Automation 헬퍼를 설치하므로 Python이 필요하지 않습니다. Windows 자동 설정은 `gputerm-claude-statusline.ps1`을 설치하고 절대 경로를 `powershell.exe` 명령으로 등록하므로 Claude Code가 Git Bash와 PowerShell 중 어느 셸을 선택해도 동작합니다. 지원 Windows에 기본 포함된 Windows PowerShell 5.1을 사용하며 Windows 헬퍼에도 Python이 필요하지 않습니다.
+
+원격 설정은 헬퍼를 셸 명령에 embed하지 않고 SFTP로 전송합니다. embed 방식은 신뢰할 수 없었습니다 — macOS/BSD `base64`는 위치 입력 파일을 거부하고, Windows PowerShell 형태는 와이어에서 약 23,000자에 달해 cmd.exe의 8,191자 한계를 넘습니다(Windows OpenSSH는 관리자가 `DefaultShell`을 바꾸지 않으면 exec 요청에 cmd.exe를 씁니다). 헬퍼와 `settings.json` 모두 임시 파일에 쓴 뒤 이름을 바꿔 넣으므로, 설정이 실패해도 동작하던 헬퍼가 빈 파일로 남지 않습니다. Windows 편집기와 PowerShell 리다이렉션이 붙이는 UTF-8 BOM도 허용합니다.
 
 기록되는 필드는 세션 id, 작업 디렉터리, 모델 이름과 id, `context_window`(`current_usage` 포함), `cost.total_cost_usd`, `cost.total_duration_ms`, `rate_limits.{five_hour,seven_day}.{used_percentage,resets_at}`, 캡처 시각, 가능한 경우 에이전트 pid뿐입니다. 프롬프트·응답·도구 입출력·트랜스크립트 경로·세션 이름·저장소 정보는 복사하지 않습니다. 7일이 지난 스냅샷은 다음 실행에서 정리됩니다.
 
-두 가지 조건은 Claude Code 자체에서 옵니다. `rate_limits`는 구독 계정에만 제공되며, 세션의 첫 응답 이후에 나타납니다. 그때까지는 잔여량을 추측하지 않고 쿼터 미제공 상태로 표시합니다.
+두 가지 조건은 Claude Code 자체에서 옵니다. `rate_limits`는 구독 계정에만 제공되며, 세션의 첫 응답 이후에 나타납니다. 잔여량을 추측하는 대신 실제로 막혀 있는 단계를 카드에 표시합니다 — 헬퍼 없음, 헬퍼가 비어 있음, status line 미설정, 다른 status line이 점유, 또는 설치 완료 후 첫 메시지 대기.
 
 ## 아키텍처
 

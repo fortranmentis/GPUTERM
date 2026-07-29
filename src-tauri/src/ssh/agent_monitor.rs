@@ -13,7 +13,6 @@ use crate::ssh::system_monitor::{
     detect_remote_os, local_os, run_local_command_for, run_local_command_with_timeout,
     run_remote_command_for, run_remote_command_with_budget, RemoteOs,
 };
-use base64::Engine as _;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::Value;
@@ -98,6 +97,27 @@ emit_agent_files() {
     printf '\n__GPUTERM_AGENT_END__\n'
   done
 }
+# Reports which setup step is incomplete when no quota has been published, so
+# the card can say what to do instead of only that data is missing.
+emit_claude_setup_state() {
+  name="$1"
+  dir="$HOME/.claude"
+  helper=missing
+  if [ -f "$dir/$name" ]; then
+    if [ -s "$dir/$name" ]; then helper=ok; else helper=empty; fi
+  fi
+  line=none
+  if [ -r "$dir/settings.json" ]; then
+    if grep -q 'gputerm-claude-statusline' "$dir/settings.json" 2>/dev/null; then
+      line=ours
+    elif grep -q '"statusLine"' "$dir/settings.json" 2>/dev/null; then
+      line=other
+    fi
+  fi
+  printf '__GPUTERM_AGENT_FILE__\tclaude\tsetup-state\n'
+  printf '{"scope":"setup","helper":"%s","status_line":"%s"}\n' "$helper" "$line"
+  printf '__GPUTERM_AGENT_END__\n'
+}
 # Status-line snapshots are emitted after the transcripts so their richer
 # fields win the per-session merge. One file per session id keeps concurrent
 # sessions from overwriting each other.
@@ -105,7 +125,12 @@ emit_agent_snapshots() {
   provider="$1"
   dir="$HOME/.cache/gputerm/agent-status/$provider"
   if [ -d "$dir" ]; then
-    find "$dir" -type f -name '*.json' -exec ls -t {} + 2>/dev/null | head -n 4 |
+    # The account-wide quota is emitted by name. Selecting only the newest few
+    # files used to miss it entirely: a provider publishes limits after its
+    # first response, while short-lived sessions keep writing newer snapshots
+    # that carry none.
+    emit_agent_tail "$provider" "$dir/account.json"
+    find "$dir" -type f -name '*.json' ! -name 'account.json' -exec ls -t {} + 2>/dev/null | head -n 4 |
     while IFS= read -r file; do
       emit_agent_tail "$provider" "$file"
     done
@@ -247,10 +272,34 @@ function Emit-AgentFiles([string]$provider, [string]$root, [string]$filter, [int
       Write-Output '__GPUTERM_AGENT_END__'
     }
 }
+function Emit-ClaudeSetupState([string]$name) {
+  $dir = Join-Path $GpuTermHome '.claude'
+  $helperPath = Join-Path $dir $name
+  $helper = 'missing'
+  if (Test-Path -LiteralPath $helperPath) {
+    if ((Get-Item -LiteralPath $helperPath).Length -gt 0) { $helper = 'ok' } else { $helper = 'empty' }
+  }
+  $line = 'none'
+  $settings = Join-Path $dir 'settings.json'
+  if (Test-Path -LiteralPath $settings) {
+    $text = Get-Content -LiteralPath $settings -Raw -ErrorAction SilentlyContinue
+    if ($text -like '*gputerm-claude-statusline*') { $line = 'ours' }
+    elseif ($text -like '*statusLine*') { $line = 'other' }
+  }
+  Write-Output ("__GPUTERM_AGENT_FILE__`tclaude`tsetup-state")
+  Write-Output ("{{`"scope`":`"setup`",`"helper`":`"{0}`",`"status_line`":`"{1}`"}}" -f $helper, $line)
+  Write-Output '__GPUTERM_AGENT_END__'
+}
 function Emit-AgentSnapshots([string]$provider) {
   $dir = Join-Path $GpuTermHome ".cache\gputerm\agent-status\$provider"
   if (Test-Path -LiteralPath $dir) {
+    # Emitted by name for the same reason as the POSIX branch: recency alone
+    # misses the account-wide quota, because a provider only publishes limits
+    # after its first response while short-lived sessions keep writing newer
+    # snapshots that carry none.
+    Emit-AgentTail $provider (Join-Path $dir 'account.json')
     Get-ChildItem -LiteralPath $dir -File -Filter '*.json' |
+      Where-Object { $_.Name -ne 'account.json' } |
       Sort-Object LastWriteTime -Descending |
       Select-Object -First 4 |
       ForEach-Object { Emit-AgentTail $provider $_.FullName }
@@ -284,6 +333,10 @@ fn metadata_command(os: RemoteOs, providers: &HashSet<Provider>) -> String {
         }
         if providers.contains(&Provider::Claude) {
             script.push_str("Emit-AgentSnapshots 'claude'\n");
+            script.push_str(&format!(
+                "Emit-ClaudeSetupState '{}'\n",
+                claude_helper_for_os(RemoteOs::Windows).0
+            ));
         }
         script.push_str("exit 0");
         return script;
@@ -305,6 +358,10 @@ fn metadata_command(os: RemoteOs, providers: &HashSet<Provider>) -> String {
     }
     if providers.contains(&Provider::Claude) {
         script.push_str("emit_agent_snapshots claude\n");
+        script.push_str(&format!(
+            "emit_claude_setup_state '{}'\n",
+            claude_helper_for_os(os).0
+        ));
     }
     script.push_str("true\n");
     script
@@ -535,6 +592,15 @@ struct AgentSessionMetadata {
     /// Process id the status-line snapshot belongs to, used to attribute usage
     /// to the right session when several run at once.
     pid_hint: Option<u32>,
+    /// Set for the account-wide quota record rather than a real session.
+    account_scope: bool,
+    /// Set for the setup-state record, which reports which install step is
+    /// incomplete rather than describing a session.
+    setup_scope: bool,
+    /// `ok`, `empty`, or `missing`.
+    setup_helper: Option<String>,
+    /// `ours`, `other`, or `none`.
+    setup_status_line: Option<String>,
     rate_limits: Vec<AgentRateLimitMetric>,
     subagents: Vec<AgentWorkMetric>,
     background_tasks: Vec<AgentWorkMetric>,
@@ -710,6 +776,48 @@ fn quota_refresh_due(
         .unwrap_or(true)
 }
 
+/// Builds the unavailable quota, replacing the generic message with the specific
+/// blocking step when the collector reported one.
+fn unavailable_with_setup_hint(
+    provider: Provider,
+    setup: Option<&AgentSessionMetadata>,
+) -> AgentQuotaSnapshot {
+    let mut snapshot = AgentQuotaSnapshot::unavailable(provider);
+    if provider != Provider::Claude {
+        return snapshot;
+    }
+    let Some(setup) = setup else {
+        return snapshot;
+    };
+    let helper = setup.setup_helper.as_deref().unwrap_or_default();
+    let status_line = setup.setup_status_line.as_deref().unwrap_or_default();
+    let message = match (helper, status_line) {
+        ("missing", _) => Some(
+            "The GpuTerm status-line helper is not installed on this host. Run Set up.".to_string(),
+        ),
+        ("empty", _) => Some(
+            "The GpuTerm status-line helper is present but empty, so Claude publishes nothing. Run Set up again."
+                .to_string(),
+        ),
+        (_, "none") => Some(
+            "Claude has no status line configured on this host. Run Set up.".to_string(),
+        ),
+        (_, "other") => Some(
+            "Claude uses a different status line, so GpuTerm is not being fed. Add the GpuTerm helper to that pipeline, or run Set up after removing it."
+                .to_string(),
+        ),
+        ("ok", "ours") => Some(
+            "Status line installed. Send one message in a Claude session to publish the 5-hour and weekly limits."
+                .to_string(),
+        ),
+        _ => None,
+    };
+    if let Some(message) = message {
+        snapshot.message = Some(message);
+    }
+    snapshot
+}
+
 fn merge_metadata_quota_fallbacks(
     state: &mut AgentMonitorState,
     providers: &HashSet<Provider>,
@@ -730,7 +838,7 @@ fn merge_metadata_quota_fallbacks(
             state
                 .quotas
                 .entry(*provider)
-                .or_insert_with(|| AgentQuotaSnapshot::unavailable(*provider));
+                .or_insert_with(|| unavailable_with_setup_hint(*provider, None));
             continue;
         };
         let newest = sessions
@@ -738,10 +846,19 @@ fn merge_metadata_quota_fallbacks(
             .filter(|metadata| !metadata.rate_limits.is_empty())
             .max_by_key(|metadata| metadata.captured_at.unwrap_or(0));
         let Some(metadata) = newest else {
+            // No published limits: say which install step is incomplete rather
+            // than only that the data is missing.
+            let hint = sessions.iter().find(|entry| entry.setup_scope);
+            let snapshot = unavailable_with_setup_hint(*provider, hint);
             state
                 .quotas
                 .entry(*provider)
-                .or_insert_with(|| AgentQuotaSnapshot::unavailable(*provider));
+                .and_modify(|current| {
+                    if current.limits.is_empty() {
+                        *current = snapshot.clone();
+                    }
+                })
+                .or_insert(snapshot);
             continue;
         };
         let source = match provider {
@@ -1842,6 +1959,13 @@ fn insert_provider_metadata(
         return;
     }
     let sessions = grouped.entry(provider).or_default();
+    // The account-wide quota record names the session that published it, so
+    // merging by session id would let it overwrite that session's own context
+    // and cost. It is kept as a standalone entry that only quota selection uses.
+    if metadata.account_scope || metadata.setup_scope {
+        sessions.push(metadata);
+        return;
+    }
     if let Some(session_id) = metadata.session_id.as_deref() {
         if let Some(existing) = sessions
             .iter_mut()
@@ -1855,7 +1979,9 @@ fn insert_provider_metadata(
 }
 
 fn metadata_has_values(metadata: &AgentSessionMetadata) -> bool {
-    metadata.session_id.is_some()
+    metadata.account_scope
+        || metadata.setup_scope
+        || metadata.session_id.is_some()
         || metadata.cwd.is_some()
         || metadata.model.is_some()
         || metadata.status.is_some()
@@ -2011,6 +2137,15 @@ fn parse_claude_metadata(values: &[Value], now: u64) -> AgentSessionMetadata {
         metadata.pid_hint = value_u64(value, "pid")
             .and_then(|pid| u32::try_from(pid).ok())
             .or(metadata.pid_hint);
+        match value_string(value, "scope").as_deref() {
+            Some("account") => metadata.account_scope = true,
+            Some("setup") => {
+                metadata.setup_scope = true;
+                metadata.setup_helper = value_string(value, "helper");
+                metadata.setup_status_line = value_string(value, "status_line");
+            }
+            _ => {}
+        }
         let captured_at = value_u64(value, "captured_at")
             .or_else(|| value_u64(value, "capturedAt"))
             .or_else(|| event_epoch_seconds(value));
@@ -2804,6 +2939,7 @@ fn configure_claude_quota_local() -> Result<ClaudeQuotaSetupResult, String> {
     write_claude_helper(&helper_path, helper_contents)?;
     set_claude_status_line(&mut settings, &desired_command);
     backup_and_write_json(&settings_path, &settings)?;
+    remove_stale_claude_helpers(&claude_dir, helper_name);
     Ok(ClaudeQuotaSetupResult {
         status: if existing.is_some() {
             "alreadyConfigured"
@@ -2828,38 +2964,41 @@ fn configure_claude_quota_remote(
             });
         }
     }
-    let current_command = if os == RemoteOs::Windows {
-        "$home = [Environment]::GetFolderPath('UserProfile')\n$path = Join-Path $home '.claude\\settings.json'\nif (Test-Path -LiteralPath $path) { Get-Content -LiteralPath $path -Raw } else { Write-Output '{}' }\nexit 0"
-    } else {
-        "if [ -r \"$HOME/.claude/settings.json\" ]; then cat \"$HOME/.claude/settings.json\"; else printf '{}'; fi"
-    };
-    let current = run_remote_command_for(session, os, current_command)?;
-    let mut settings = serde_json::from_str::<Value>(&current)
-        .map_err(|error| format!("Claude settings.json is not valid JSON: {}", error))?;
-    let existing = claude_status_line_command(&settings);
+
+    // Everything below moves over SFTP rather than through a shell command.
+    // Embedding the helper in an exec request could not work:
+    //
+    // * macOS/BSD `base64` rejects a positional input file, so the POSIX
+    //   decode failed and — because the shell truncates the target before
+    //   running the decoder — destroyed any previously working helper.
+    // * The Windows PowerShell form reached about 23,000 characters on the
+    //   wire, far past cmd.exe's 8,191-character limit, and Windows OpenSSH
+    //   runs exec requests through cmd.exe unless an admin changed
+    //   `DefaultShell`.
+    //
+    // SFTP also avoids login-shell output contaminating the settings read.
+    let sftp = session
+        .sftp()
+        .map_err(|error| format!("Claude quota setup needs SFTP on this host: {}", error))?;
+    let home = sftp
+        .realpath(Path::new("."))
+        .map_err(|error| format!("failed to resolve the remote home directory: {}", error))?;
+    let claude_dir = remote_join(&home, ".claude");
+    if let Err(error) = sftp.mkdir(Path::new(&claude_dir), 0o700) {
+        // Already present is the normal case; anything else is fatal.
+        if sftp.stat(Path::new(&claude_dir)).is_err() {
+            return Err(format!(
+                "failed to create {} on the remote host: {}",
+                claude_dir, error
+            ));
+        }
+    }
+
+    let settings_path = remote_join(&claude_dir, "settings.json");
+    let (mut settings, existing) = read_remote_claude_settings(&sftp, &settings_path)?;
     let (helper_name, helper_contents) = claude_helper_for_os(os);
-    let desired_command = if os == RemoteOs::Windows {
-        let home = run_remote_command_for(
-            session,
-            os,
-            "Write-Output ([Environment]::GetFolderPath('UserProfile'))\nexit 0",
-        )?;
-        let home = home
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .ok_or_else(|| {
-                "Claude quota setup cannot locate the remote Windows home directory.".to_string()
-            })?;
-        let helper_path = format!(
-            "{}/.claude/{}",
-            home.trim_end_matches(['\\', '/']).replace('\\', "/"),
-            helper_name
-        );
-        claude_status_line_command_for(os, &helper_path)
-    } else {
-        claude_status_line_command_for(os, "")
-    };
+    let helper_path = remote_join(&claude_dir, helper_name);
+    let desired_command = claude_status_line_command_for(os, &native_remote_path(&helper_path));
     if let Some(command) = existing.as_deref() {
         if !command.contains("gputerm-claude-statusline") {
             return Ok(ClaudeQuotaSetupResult {
@@ -2872,47 +3011,44 @@ fn configure_claude_quota_remote(
         }
     }
     set_claude_status_line(&mut settings, &desired_command);
-    let helper = base64::engine::general_purpose::STANDARD.encode(helper_contents);
-    let settings_json = serde_json::to_vec_pretty(&settings)
+
+    write_remote_file_atomically(&sftp, &helper_path, helper_contents.as_bytes())?;
+    if os != RemoteOs::Windows {
+        let stat = ssh2::FileStat {
+            size: None,
+            uid: None,
+            gid: None,
+            perm: Some(0o700),
+            atime: None,
+            mtime: None,
+        };
+        let _ = sftp.setstat(Path::new(&helper_path), stat);
+    }
+
+    if existing.is_some() {
+        let backup = remote_join(&claude_dir, "settings.json.gputerm-backup");
+        if let Ok(mut current) = sftp.open(Path::new(&settings_path)) {
+            let mut bytes = Vec::new();
+            if current.read_to_end(&mut bytes).is_ok() {
+                let _ = write_remote_file_atomically(&sftp, &backup, &bytes);
+            }
+        }
+    }
+    let encoded = serde_json::to_vec_pretty(&settings)
         .map_err(|error| format!("failed to encode Claude settings: {}", error))?;
-    let settings_encoded = base64::engine::general_purpose::STANDARD.encode(settings_json);
-    let command = if os == RemoteOs::Windows {
-        format!(
-            "$ErrorActionPreference='Stop'\n\
-             $home = [Environment]::GetFolderPath('UserProfile')\n\
-             if ([string]::IsNullOrWhiteSpace($home)) {{ throw 'Windows user profile is unavailable' }}\n\
-             $dir = Join-Path $home '.claude'\n\
-             New-Item -ItemType Directory -Force -Path $dir | Out-Null\n\
-             $helper = Join-Path $dir '{helper_name}'\n\
-             $settingsPath = Join-Path $dir 'settings.json'\n\
-             if (Test-Path -LiteralPath $settingsPath) {{ Copy-Item -LiteralPath $settingsPath -Destination (Join-Path $dir 'settings.json.gputerm-backup') -Force }}\n\
-             [IO.File]::WriteAllBytes($helper, [Convert]::FromBase64String('{helper}'))\n\
-             [IO.File]::WriteAllBytes((Join-Path $dir 'settings.json.gputerm-new'), [Convert]::FromBase64String('{settings}'))\n\
-             Move-Item -LiteralPath (Join-Path $dir 'settings.json.gputerm-new') -Destination $settingsPath -Force\n\
-             exit 0",
-            helper_name = helper_name,
-            helper = helper,
-            settings = settings_encoded,
-        )
-    } else {
-        format!(
-        "set -eu\n\
-         mkdir -p \"$HOME/.claude\"\n\
-         umask 077\n\
-         printf '%s' '{helper}' > \"$HOME/.claude/.gputerm-helper.b64\"\n\
-         (base64 --decode \"$HOME/.claude/.gputerm-helper.b64\" 2>/dev/null || base64 -D \"$HOME/.claude/.gputerm-helper.b64\") > \"$HOME/.claude/{helper_name}\"\n\
-         chmod 700 \"$HOME/.claude/{helper_name}\"\n\
-         printf '%s' '{settings}' > \"$HOME/.claude/.gputerm-settings.b64\"\n\
-         (base64 --decode \"$HOME/.claude/.gputerm-settings.b64\" 2>/dev/null || base64 -D \"$HOME/.claude/.gputerm-settings.b64\") > \"$HOME/.claude/settings.json.gputerm-new\"\n\
-         if [ -f \"$HOME/.claude/settings.json\" ]; then cp \"$HOME/.claude/settings.json\" \"$HOME/.claude/settings.json.gputerm-backup\"; fi\n\
-         mv \"$HOME/.claude/settings.json.gputerm-new\" \"$HOME/.claude/settings.json\"\n\
-         rm -f \"$HOME/.claude/.gputerm-helper.b64\" \"$HOME/.claude/.gputerm-settings.b64\"\n",
-        helper = helper,
-        helper_name = helper_name,
-        settings = settings_encoded,
-        )
-    };
-    run_remote_command_for(session, os, &command)?;
+    write_remote_file_atomically(&sftp, &settings_path, &encoded)?;
+
+    // A helper variant from an earlier GpuTerm release would otherwise sit
+    // beside the current one, and the status line may still point at it.
+    for (_, stale_name) in CLAUDE_HELPER_NAMES
+        .iter()
+        .filter(|(variant, _)| *variant != os)
+    {
+        if *stale_name != helper_name {
+            let _ = sftp.unlink(Path::new(&remote_join(&claude_dir, stale_name)));
+        }
+    }
+
     Ok(ClaudeQuotaSetupResult {
         status: if existing.is_some() {
             "alreadyConfigured"
@@ -2922,6 +3058,83 @@ fn configure_claude_quota_remote(
         .to_string(),
         message: "Claude quota monitoring is configured. Restart Claude Code, accept workspace trust if prompted, then send one message to publish the 5-hour and weekly limits.".to_string(),
     })
+}
+
+/// Every helper file name, so an install can remove the variants it replaces.
+const CLAUDE_HELPER_NAMES: [(RemoteOs, &str); 3] = [
+    (RemoteOs::Windows, "gputerm-claude-statusline.ps1"),
+    (RemoteOs::MacOs, "gputerm-claude-statusline-macos.js"),
+    (RemoteOs::Linux, "gputerm-claude-statusline.sh"),
+];
+
+/// Joins an SFTP path. SFTP always uses forward slashes, including against
+/// Windows OpenSSH.
+fn remote_join(base: impl AsRef<Path>, child: &str) -> String {
+    let base = base.as_ref().to_string_lossy().replace('\\', "/");
+    let base = base.trim_end_matches('/');
+    format!("{}/{}", base, child)
+}
+
+/// Converts an SFTP path to the form the host's own tools expect. Windows
+/// OpenSSH reports `/C:/Users/...`, but a `-File` argument needs `C:/Users/...`.
+fn native_remote_path(path: &str) -> String {
+    let bytes = path.as_bytes();
+    if bytes.len() > 2 && bytes[0] == b'/' && bytes[2] == b':' {
+        return path[1..].to_string();
+    }
+    path.to_string()
+}
+
+fn read_remote_claude_settings(
+    sftp: &ssh2::Sftp,
+    path: &str,
+) -> Result<(Value, Option<String>), String> {
+    let mut file = match sftp.open(Path::new(path)) {
+        Ok(file) => file,
+        // Absent settings are the first-run case, not an error.
+        Err(_) => return Ok((Value::Object(serde_json::Map::new()), None)),
+    };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|error| format!("failed to read Claude settings: {}", error))?;
+    let settings = parse_claude_settings(&bytes)?;
+    let command = claude_status_line_command(&settings);
+    Ok((settings, command))
+}
+
+/// Parses `settings.json`, tolerating an empty file and a UTF-8 BOM. Windows
+/// editors and PowerShell redirection both write the BOM, and `serde_json`
+/// treats it as a syntax error.
+fn parse_claude_settings(bytes: &[u8]) -> Result<Value, String> {
+    let text = String::from_utf8_lossy(bytes);
+    let text = text.trim_start_matches('\u{feff}').trim();
+    if text.is_empty() {
+        return Ok(Value::Object(serde_json::Map::new()));
+    }
+    serde_json::from_str::<Value>(text)
+        .map_err(|error| format!("Claude settings.json is not valid JSON: {}", error))
+}
+
+/// Writes through a temporary sibling and renames over the target, so a failed
+/// transfer cannot leave a truncated or empty file where a working one was.
+fn write_remote_file_atomically(
+    sftp: &ssh2::Sftp,
+    path: &str,
+    contents: &[u8],
+) -> Result<(), String> {
+    let temporary = format!("{}.gputerm-new", path);
+    {
+        let mut file = sftp
+            .create(Path::new(&temporary))
+            .map_err(|error| format!("failed to write {}: {}", temporary, error))?;
+        file.write_all(contents)
+            .map_err(|error| format!("failed to write {}: {}", temporary, error))?;
+    }
+    sftp.rename(Path::new(&temporary), Path::new(path), None)
+        .map_err(|error| {
+            let _ = sftp.unlink(Path::new(&temporary));
+            format!("failed to replace {}: {}", path, error)
+        })
 }
 
 fn local_claude_helper_runtime_available(os: RemoteOs) -> bool {
@@ -2946,9 +3159,8 @@ fn local_claude_helper_runtime_available(os: RemoteOs) -> bool {
 }
 
 fn read_claude_settings(path: &Path) -> Result<(Value, Option<String>), String> {
-    let settings = match fs::read_to_string(path) {
-        Ok(contents) => serde_json::from_str::<Value>(&contents)
-            .map_err(|error| format!("Claude settings.json is not valid JSON: {}", error))?,
+    let settings = match fs::read(path) {
+        Ok(bytes) => parse_claude_settings(&bytes)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             Value::Object(serde_json::Map::new())
         }
@@ -3016,16 +3228,30 @@ fn claude_status_line_command_for(os: RemoteOs, helper_path: &str) -> String {
     }
 }
 
+/// Installs the helper through a temporary sibling and a rename, so a failure
+/// partway through cannot leave an empty file where a working helper was.
 fn write_claude_helper(path: &Path, contents: &str) -> Result<(), String> {
-    fs::write(path, contents)
+    let temporary = path.with_extension("gputerm-new");
+    fs::write(&temporary, contents)
         .map_err(|error| format!("failed to install Claude status-line helper: {}", error))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o700))
             .map_err(|error| format!("failed to make Claude helper executable: {}", error))?;
     }
-    Ok(())
+    fs::rename(&temporary, path).map_err(|error| {
+        let _ = fs::remove_file(&temporary);
+        format!("failed to install Claude status-line helper: {}", error)
+    })
+}
+
+/// Removes helper variants this OS no longer uses, so a stale file cannot sit
+/// beside the current one with the status line still pointing at it.
+fn remove_stale_claude_helpers(claude_dir: &Path, keep: &str) {
+    for (_, name) in CLAUDE_HELPER_NAMES.iter().filter(|(_, name)| *name != keep) {
+        let _ = fs::remove_file(claude_dir.join(name));
+    }
 }
 
 fn backup_and_write_json(path: &Path, value: &Value) -> Result<(), String> {
@@ -3504,6 +3730,160 @@ mod tests {
         assert_eq!(quota.limits[0].window_minutes, Some(10080));
         assert_eq!(quota.limits[0].used_percent, Some(3.0));
         assert_eq!(quota.limits[0].remaining_percent, Some(97.0));
+    }
+
+    #[test]
+    fn reports_the_blocking_setup_step_instead_of_a_generic_absence() {
+        let cases = [
+            ("missing", "ours", "not installed"),
+            ("empty", "ours", "present but empty"),
+            ("ok", "none", "no status line configured"),
+            ("ok", "other", "different status line"),
+            ("ok", "ours", "Send one message"),
+        ];
+        for (helper, status_line, expected) in cases {
+            let output = format!(
+                "__GPUTERM_AGENT_FILE__\tclaude\tsetup-state\n\
+                 {{\"scope\":\"setup\",\"helper\":\"{helper}\",\"status_line\":\"{status_line}\"}}\n\
+                 __GPUTERM_AGENT_END__\n"
+            );
+            let mut state = AgentMonitorState {
+                metadata: parse_metadata_output(&output, TEST_NOW),
+                ..Default::default()
+            };
+            merge_metadata_quota_fallbacks(
+                &mut state,
+                &HashSet::from([Provider::Claude]),
+                TEST_NOW,
+            );
+            let quota = state.quotas.get(&Provider::Claude).unwrap();
+            assert_eq!(quota.status, "setup-required");
+            let message = quota.message.as_deref().unwrap_or_default();
+            assert!(
+                message.contains(expected),
+                "helper={helper} status_line={status_line} produced {message:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn setup_state_record_is_not_treated_as_a_session() {
+        let output = concat!(
+            "__GPUTERM_AGENT_FILE__\tclaude\tsetup-state\n",
+            "{\"scope\":\"setup\",\"helper\":\"ok\",\"status_line\":\"ours\"}\n",
+            "__GPUTERM_AGENT_END__\n",
+        );
+        let grouped = parse_metadata_output(output, TEST_NOW);
+        let sessions = grouped.get(&Provider::Claude).unwrap();
+        assert!(sessions.iter().all(|entry| entry.setup_scope));
+        // It names no session, so it must never become an agent card's metadata.
+        assert!(sessions.iter().all(|entry| entry.session_id.is_none()));
+    }
+
+    #[test]
+    fn remote_paths_use_sftp_separators_and_native_windows_drives() {
+        assert_eq!(
+            remote_join(Path::new("/home/alice"), ".claude"),
+            "/home/alice/.claude"
+        );
+        assert_eq!(remote_join(Path::new("/home/alice/"), ".claude"), "/home/alice/.claude");
+        // Windows OpenSSH reports the home directory in this form.
+        assert_eq!(
+            remote_join(Path::new("/C:/Users/Test User"), ".claude"),
+            "/C:/Users/Test User/.claude"
+        );
+        // A `-File` argument needs the drive without the SFTP root slash.
+        assert_eq!(
+            native_remote_path("/C:/Users/Test User/.claude/x.ps1"),
+            "C:/Users/Test User/.claude/x.ps1"
+        );
+        assert_eq!(native_remote_path("/home/alice/.claude/x.sh"), "/home/alice/.claude/x.sh");
+    }
+
+    #[test]
+    fn claude_settings_parsing_tolerates_a_bom_and_an_empty_file() {
+        // PowerShell redirection and Windows editors both write a UTF-8 BOM,
+        // which `serde_json` rejects outright.
+        let with_bom = b"\xef\xbb\xbf{\"statusLine\":{\"command\":\"x\"}}";
+        let parsed = parse_claude_settings(with_bom).expect("BOM is tolerated");
+        assert_eq!(claude_status_line_command(&parsed).as_deref(), Some("x"));
+
+        assert!(parse_claude_settings(b"").unwrap().is_object());
+        assert!(parse_claude_settings(b"   \n").unwrap().is_object());
+        assert!(parse_claude_settings(b"not json").is_err());
+    }
+
+    #[test]
+    fn account_snapshot_supplies_the_quota_when_every_session_lacks_limits() {
+        // The situation observed on a real machine: Claude only publishes
+        // rate limits after a session's first API response, so short-lived
+        // sessions kept writing newer, quota-less snapshots and pushed the only
+        // useful reading out of the collector's newest-files window.
+        let mut output = String::from(concat!(
+            "__GPUTERM_AGENT_FILE__\tclaude\taccount.json\n",
+            "{\"scope\":\"account\",\"captured_at\":1798999900,\"session_id\":\"published\",\"rate_limits\":{\"five_hour\":{\"used_percentage\":20,\"resets_at\":1799500000},\"seven_day\":{\"used_percentage\":40,\"resets_at\":1799900000}}}\n",
+            "__GPUTERM_AGENT_END__\n",
+        ));
+        for index in 0..4 {
+            output.push_str(&format!(
+                "__GPUTERM_AGENT_FILE__\tclaude\tshort-{index}.json\n\
+                 {{\"session_id\":\"short-{index}\",\"captured_at\":1798999990,\"cwd\":\"/w\",\"cost\":{{\"total_cost_usd\":0.0,\"total_duration_ms\":236}}}}\n\
+                 __GPUTERM_AGENT_END__\n"
+            ));
+        }
+
+        let mut state = AgentMonitorState {
+            metadata: parse_metadata_output(&output, TEST_NOW),
+            ..Default::default()
+        };
+        merge_metadata_quota_fallbacks(&mut state, &HashSet::from([Provider::Claude]), TEST_NOW);
+
+        let quota = state.quotas.get(&Provider::Claude).unwrap();
+        assert_eq!(quota.status, "available");
+        assert_eq!(quota.source, "claude-statusline");
+        let five_hour = quota
+            .limits
+            .iter()
+            .find(|limit| limit.window_minutes == Some(300))
+            .expect("five hour window");
+        assert_eq!(five_hour.remaining_percent, Some(80.0));
+    }
+
+    #[test]
+    fn account_snapshot_does_not_overwrite_its_session_context() {
+        // The account record names the session that published it, so merging by
+        // session id would let it wipe that session's own cost and context.
+        let output = concat!(
+            "__GPUTERM_AGENT_FILE__\tclaude\tpublished.json\n",
+            "{\"session_id\":\"published\",\"captured_at\":1798999900,\"cwd\":\"/work\",\"cost\":{\"total_cost_usd\":1.25,\"total_duration_ms\":165296},\"context_window\":{\"total_input_tokens\":150,\"context_window_size\":1000}}\n",
+            "__GPUTERM_AGENT_END__\n",
+            "__GPUTERM_AGENT_FILE__\tclaude\taccount.json\n",
+            "{\"scope\":\"account\",\"captured_at\":1798999950,\"session_id\":\"published\",\"rate_limits\":{\"five_hour\":{\"used_percentage\":20,\"resets_at\":1799500000}}}\n",
+            "__GPUTERM_AGENT_END__\n",
+        );
+        let grouped = parse_metadata_output(output, TEST_NOW);
+        let sessions = grouped.get(&Provider::Claude).unwrap();
+        let session = sessions
+            .iter()
+            .find(|entry| !entry.account_scope)
+            .expect("session record");
+        assert_eq!(session.cwd.as_deref(), Some("/work"));
+        assert_eq!(session.cost_usd, Some(1.25));
+        assert_eq!(session.context_used_tokens, Some(150));
+        assert!(sessions.iter().any(|entry| entry.account_scope));
+    }
+
+    #[test]
+    fn collector_emits_the_account_snapshot_by_name() {
+        let posix = metadata_command(RemoteOs::MacOs, &HashSet::from([Provider::Claude]));
+        assert!(posix.contains("emit_agent_tail \"$provider\" \"$dir/account.json\""));
+        // The recency-limited scan must skip it, or it would occupy one of the
+        // four session slots.
+        assert!(posix.contains("! -name 'account.json'"));
+
+        let windows = metadata_command(RemoteOs::Windows, &HashSet::from([Provider::Claude]));
+        assert!(windows.contains("Emit-AgentTail $provider (Join-Path $dir 'account.json')"));
+        assert!(windows.contains("$_.Name -ne 'account.json'"));
     }
 
     #[test]
@@ -4097,6 +4477,60 @@ mod tests {
             claude_status_line_command_for(RemoteOs::Linux, "/ignored"),
             "~/.claude/gputerm-claude-statusline.sh"
         );
+    }
+
+    #[test]
+    fn local_install_is_repeatable_and_never_leaves_an_empty_helper() {
+        // Reproduces the reported macOS failure: a second Set up used to
+        // truncate the working helper to zero bytes, and a BOM-prefixed
+        // settings.json aborted the whole install.
+        let root = std::env::temp_dir().join(format!("gputerm-install-{}", uuid::Uuid::new_v4()));
+        let claude_dir = root.join(".claude");
+        fs::create_dir_all(&claude_dir).expect("create scratch home");
+        fs::write(claude_dir.join("gputerm-claude-statusline.sh"), "").expect("stale variant");
+        fs::write(
+            claude_dir.join("settings.json"),
+            b"\xef\xbb\xbf{\"theme\":\"dark\"}",
+        )
+        .expect("BOM settings");
+
+        let os = local_os();
+        let (helper_name, helper_contents) = claude_helper_for_os(os);
+        let helper_path = claude_dir.join(helper_name);
+        let settings_path = claude_dir.join("settings.json");
+
+        for round in 0..2 {
+            let (mut settings, existing) =
+                read_claude_settings(&settings_path).expect("settings readable");
+            if round == 1 {
+                assert!(existing.is_some(), "the second run must see our own command");
+            }
+            let desired =
+                claude_status_line_command_for(os, helper_path.to_string_lossy().as_ref());
+            write_claude_helper(&helper_path, helper_contents).expect("helper installed");
+            set_claude_status_line(&mut settings, &desired);
+            backup_and_write_json(&settings_path, &settings).expect("settings written");
+            remove_stale_claude_helpers(&claude_dir, helper_name);
+
+            let written = fs::read_to_string(&helper_path).expect("helper readable");
+            assert_eq!(written.len(), helper_contents.len(), "round {round}");
+        }
+
+        let settings = fs::read_to_string(&settings_path).expect("settings readable");
+        assert!(settings.contains("gputerm-claude-statusline"));
+        assert!(settings.contains("dark"), "unrelated keys survive");
+        assert!(
+            !claude_dir.join(format!("{helper_name}.gputerm-new")).exists(),
+            "no temporary file is left behind"
+        );
+        if helper_name != "gputerm-claude-statusline.sh" {
+            assert!(
+                !claude_dir.join("gputerm-claude-statusline.sh").exists(),
+                "the superseded variant is removed"
+            );
+        }
+
+        fs::remove_dir_all(root).expect("remove scratch home");
     }
 
     #[test]

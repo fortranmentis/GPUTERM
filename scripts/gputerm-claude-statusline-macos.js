@@ -36,32 +36,64 @@ function environmentValue(name) {
   return value ? ObjC.unwrap(value) : "";
 }
 
-function writeSnapshot(home, sessionId, snapshot) {
+var ACCOUNT_SNAPSHOT_NAME = "account.json";
+
+function statusDirectory(home) {
+  return home + "/.cache/gputerm/agent-status/claude";
+}
+
+function writeAtomically(path, value) {
+  // Foundation's atomic write uses a sibling temporary file followed by a
+  // rename, so the telemetry reader never observes a partial JSON document.
+  $(JSON.stringify(value)).writeToFileAtomicallyEncodingError(
+    $(path),
+    true,
+    $.NSUTF8StringEncoding,
+    null,
+  );
+}
+
+// The 5-hour and weekly windows are account-wide, and Claude only includes them
+// after a session's first API response. Publishing them to one fixed file keeps
+// short-lived sessions — which write quota-less snapshots — from crowding the
+// only useful reading out of the reader's newest-files window.
+function writeAccountSnapshot(home, snapshot) {
+  if (!snapshot.rate_limits) return;
   var manager = $.NSFileManager.defaultManager;
-  var directory =
-    home + "/.cache/gputerm/agent-status/claude";
+  var directory = statusDirectory(home);
   manager.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(
     $(directory),
     true,
     $(),
     null,
   );
-  var target = directory + "/" + sessionId + ".json";
-  var encoded = $(JSON.stringify(snapshot));
-  // Foundation's atomic write uses a sibling temporary file followed by a
-  // rename, so the telemetry reader never observes a partial JSON document.
-  encoded.writeToFileAtomicallyEncodingError(
-    $(target),
+  writeAtomically(directory + "/" + ACCOUNT_SNAPSHOT_NAME, {
+    scope: "account",
+    captured_at: snapshot.captured_at,
+    session_id: snapshot.session_id,
+    rate_limits: snapshot.rate_limits,
+  });
+}
+
+function writeSnapshot(home, sessionId, snapshot) {
+  var manager = $.NSFileManager.defaultManager;
+  var directory = statusDirectory(home);
+  manager.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(
+    $(directory),
     true,
-    $.NSUTF8StringEncoding,
+    $(),
     null,
   );
+  writeAtomically(directory + "/" + sessionId + ".json", snapshot);
 
   var names = manager.contentsOfDirectoryAtPathError($(directory), null);
   if (!names) return;
   var cutoff = Date.now() / 1000 - 7 * 24 * 60 * 60;
   ObjC.deepUnwrap(names).forEach(function (name) {
     if (!name.endsWith(".json")) return;
+    // The account file is refreshed only when limits are published, so age is
+    // not a reason to delete it.
+    if (name === ACCOUNT_SNAPSHOT_NAME) return;
     var path = directory + "/" + name;
     var attributes = manager.attributesOfItemAtPathError($(path), null);
     if (!attributes) return;
@@ -135,6 +167,7 @@ function run() {
     var home = environmentValue("HOME");
     if (home && snapshot.session_id) {
       writeSnapshot(home, snapshot.session_id, snapshot);
+      writeAccountSnapshot(home, snapshot);
     }
 
     var parts = [];

@@ -140,19 +140,46 @@ agent_pid = os.environ.get("AGENT_PID", "").strip()
 if agent_pid.isdigit():
     snapshot["pid"] = int(agent_pid)
 
+ACCOUNT_SNAPSHOT_NAME = "account.json"
 directory = os.environ["SNAPSHOT_DIR"]
+
+
+def write_atomically(target, value):
+    # Written to a sibling temp file first so GpuTerm never reads a partial
+    # document mid-write.
+    temporary = target + ".tmp"
+    with open(temporary, "w") as handle:
+        json.dump(value, handle, separators=(",", ":"))
+    os.replace(temporary, target)
+
+
 if snapshot.get("session_id"):
     try:
         os.makedirs(directory, exist_ok=True)
-        target = os.path.join(directory, snapshot["session_id"] + ".json")
-        # Written to a sibling temp file first so GpuTerm never reads a partial
-        # document mid-write.
-        temporary = target + ".tmp"
-        with open(temporary, "w") as handle:
-            json.dump(snapshot, handle, separators=(",", ":"))
-        os.replace(temporary, target)
+        write_atomically(
+            os.path.join(directory, snapshot["session_id"] + ".json"), snapshot
+        )
+        # The 5-hour and weekly windows are account-wide, and Claude only
+        # includes them after a session's first API response. Publishing them to
+        # one fixed file keeps short-lived sessions - which write quota-less
+        # snapshots - from crowding the only useful reading out of the reader's
+        # newest-files window. Absent limits leave the account file untouched.
+        if snapshot.get("rate_limits"):
+            write_atomically(
+                os.path.join(directory, ACCOUNT_SNAPSHOT_NAME),
+                {
+                    "scope": "account",
+                    "captured_at": snapshot["captured_at"],
+                    "session_id": snapshot["session_id"],
+                    "rate_limits": snapshot["rate_limits"],
+                },
+            )
         cutoff = time.time() - 7 * 24 * 3600
         for name in os.listdir(directory):
+            # The account file is refreshed only when limits are published, so
+            # age is not a reason to delete it.
+            if name == ACCOUNT_SNAPSHOT_NAME:
+                continue
             path = os.path.join(directory, name)
             if name.endswith(".json") and os.path.getmtime(path) < cutoff:
                 os.remove(path)
