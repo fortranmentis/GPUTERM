@@ -126,7 +126,11 @@ try {
     }
 
     if (-not [string]::IsNullOrWhiteSpace([string]$SessionId)) {
-        $Directory = Join-Path $HOME ".cache\gputerm\agent-status\claude"
+        $UserHome = [Environment]::GetFolderPath("UserProfile")
+        if ([string]::IsNullOrWhiteSpace($UserHome)) {
+            $UserHome = $HOME
+        }
+        $Directory = Join-Path $UserHome ".cache\gputerm\agent-status\claude"
         New-Item -ItemType Directory -Force -Path $Directory | Out-Null
         $Target = Join-Path $Directory ("{0}.json" -f $SessionId)
         $Temporary = $Target + ".tmp"

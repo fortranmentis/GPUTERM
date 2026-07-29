@@ -379,7 +379,16 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
             {diskSummary.visible.length > 0 ? (
               <div className="disk-summary-compact">
                 {diskSummary.visible.map((disk) => (
-                  <span key={`${disk.filesystem}:${disk.mountPoint}`}><strong>{disk.mountPoint}</strong> {formatDiskUsagePercent(disk.usagePercent)}</span>
+                  <span
+                    className="disk-summary-item"
+                    key={`${disk.filesystem}:${disk.mountPoint}`}
+                    title={disk.mountPoint}
+                  >
+                    <strong>{disk.mountPoint}</strong>
+                    <span className="disk-summary-percent">
+                      {formatDiskUsagePercent(disk.usagePercent)}
+                    </span>
+                  </span>
                 ))}
                 {diskSummary.hiddenCount > 0 && <span className="disk-hidden-count">+{diskSummary.hiddenCount}</span>}
               </div>

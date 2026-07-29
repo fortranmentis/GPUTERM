@@ -62,6 +62,8 @@ Nothing is ever installed on your servers: every metric comes from one-shot stan
 
 ### 📁 SFTP Browser
 - Side-by-side remote/local panels with a draggable divider for adjusting their vertical ratio
+- **Sortable remote columns** — click Name, Type, Size, or Modified; click again to reverse direction while folders stay first and missing metadata stays last
+- **Decimal file sizes** — remote/local listings and transfer progress use consistent SI `B / KB / MB / GB / TB` units
 - Drag-and-drop upload & download for **files and complete directory trees**, with aggregate folder progress and cancellation
 - **Native desktop drops and paste uploads** — drag files/folders from Explorer, Finder, or Nautilus, or paste URI-list items into the remote pane
 - **Native desktop drag-out** — drag remote files, complete folders, or multi-selections from GpuTerm into Finder, Explorer, or a Linux file manager
@@ -79,6 +81,8 @@ Nothing is ever installed on your servers: every metric comes from one-shot stan
 - **NVIDIA, AMD, Intel, and Apple Silicon** GPUs are auto-detected per host; every card carries a vendor tag
 - **Hybrid iGPU + dGPU hosts show both cards** — Linux supplements vendor tools with DRM/sysfs adapter discovery, while Windows attributes counters by DirectX LUID and keeps idle adapters visible even before WDDM creates an activity counter
 - **AI DASH for AGY, Codex, and Claude Code** — the bottom card shows every available 5-hour and weekly balance at once in compact gauges, while the detail view retains context, tokens, and aggregate CPU/RAM across each CLI's complete child-process tree. AGY uses the precise percentage printed beside each `/usage` bar, lists the models in each group, and plots their in-memory 24-hour trend
+- **Cross-platform local AI quotas** — macOS Claude setup uses built-in `osascript` without Python; Windows Codex/AGY probes reuse observed native executables and support npm `.cmd` shims, while Windows Claude uses a consistent User Profile path
+- **Bounded disk summaries** — long mount paths are ellipsized inside the card without hiding utilization, with the complete path available on hover
 - Click any section for a **draggable, resizable detail popover** whose tables expand with the window: per-core CPU usage, top processes, VRAM/power/temperature per GPU, full mount list
 - **Pop any detail view out into its own OS window** — it refreshes independently and closes with its session
 - Remote telemetry runs on a dedicated SSH connection with automatic reconnect; local telemetry executes collectors directly without SSH
@@ -220,6 +224,7 @@ npm run tauri:build
 - To export remote items to another application, drag them toward a GpuTerm window edge. GpuTerm materializes them in a temporary local export and then starts a native OS copy drag. Large items may finish preparing after the pointer is released; drag them again once the transfer queue reports completion.
 - On Linux, GpuTerm keeps the GTK `text/uri-list` provider alive until the native drag has ended so Nautilus and other file managers can complete their asynchronous file request. On Retina/scaled displays, native drop coordinates are converted per platform before the remote pane is selected.
 - Click a local folder once to select it for transfer and double-click it to open it. The divider between the remote and local lists can be dragged or adjusted with the arrow keys.
+- Click a remote column header to sort it. Name/Type start ascending, Size/Modified start descending, repeated clicks reverse the direction, and the current sort remains active while navigating or refreshing.
 - At narrow SFTP widths, Modified and then Type are hidden automatically; Browse and transfer actions switch to icon-only controls with accessible labels rather than overflowing the pane.
 - Symbolic links are rejected during recursive transfer to prevent cycles and unexpected traversal outside the selected tree.
 - The last local directory is remembered across launches.
@@ -232,7 +237,7 @@ npm run tauri:build
 - **Interval:** 1, 2 (default), 5, or 10 seconds — detail popovers poll on the same cadence.
 - **Mode:** GPU + System, GPU only, or System only.
 - **Ignore FS:** comma-separated filesystem types hidden from the disk summary (default: `tmpfs`, `devtmpfs`, `squashfs`, `proc`, `sysfs`, `cgroup`, `cgroup2`, `overlay`, `devfs`, `autofs`). The disk popover can temporarily reveal them.
-- Mount points are prioritized `/` → `/home` → `/data` → `/mnt*` → `/media*` → drive letters → others; disks ≥ 80% are flagged warning, ≥ 90% critical.
+- Mount points are prioritized `/` → `/home` → `/data` → `/mnt*` → `/media*` → drive letters → others; disks ≥ 80% are flagged warning, ≥ 90% critical. Long compact-card paths are ellipsized, and their full value remains available as hover text and in the disk detail view.
 - **AI DASH:** the System modes include a 360 px summary card for AGY, Codex, and Claude Code. Its thin two-column gauges show every available 5-hour and weekly balance simultaneously; unsupported periods show `n/a`, expired windows show `reset`, and warning colors start at 25% and 10% remaining. Duplicate sessions share the newest account snapshot. The detail view keeps context and token data collapsed and includes descendants such as language servers, subagents, and background commands in CPU/memory totals. Codex uses account-wide `account/rateLimits/read` and labels its session-log fallback. Claude Code limits come from [Claude Code usage limits](#claude-code-usage-limits). AGY experimentally reads `/usage` in a hidden PTY every five minutes, preserves the Gemini and Claude/GPT model groups, and plots successful and failed samples over the last 24 hours without estimating missing balances.
 
 </details>
@@ -280,7 +285,7 @@ Then add it to `~/.claude/settings.json`:
 }
 ```
 
-The status line prints `Opus · ctx 8% · 5h 76% · wk 59% · $0.12` and writes `~/.cache/gputerm/agent-status/claude/<session-id>.json`. Install it on every host you want to monitor, including remote ones. Automatic Windows setup installs `gputerm-claude-statusline.ps1` and registers an absolute, forward-slash path through `powershell.exe`, so it works whether Claude Code chooses Git Bash or PowerShell. Windows PowerShell 5.1 is built into supported Windows versions; Python is not required for the Windows helper.
+The status line prints `Opus · ctx 8% · 5h 76% · wk 59% · $0.12` and writes `~/.cache/gputerm/agent-status/claude/<session-id>.json`. Install it on every host you want to monitor, including remote ones. Automatic macOS setup installs a JavaScript for Automation helper that uses the built-in `osascript`, so Python is not required. Automatic Windows setup installs `gputerm-claude-statusline.ps1` and registers an absolute, forward-slash path through `powershell.exe`, so it works whether Claude Code chooses Git Bash or PowerShell. Windows PowerShell 5.1 is built into supported Windows versions; Python is not required for the Windows helper.
 
 Only these fields are written: session id, working directory, model name and id, `context_window` (including `current_usage`), `cost.total_cost_usd`, `cost.total_duration_ms`, `rate_limits.{five_hour,seven_day}.{used_percentage,resets_at}`, a capture timestamp, and the agent pid when available. Prompts, responses, tool input and output, transcript paths, session names, and repository details are never copied. Snapshots older than seven days are pruned on the next run.
 

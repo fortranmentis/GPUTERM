@@ -15,6 +15,28 @@ export function formatBytes(value: number | null | undefined) {
   return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[unit]}`;
 }
 
+/**
+ * Formats file sizes using decimal SI units. File browsers conventionally
+ * label these units KB/MB/GB/TB, while resource telemetry keeps using the
+ * binary IEC formatter above.
+ */
+export function formatFileSize(value: number | null | undefined) {
+  if (value == null) {
+    return "n/a";
+  }
+  if (value < 1000) {
+    return `${value} B`;
+  }
+  const units = ["KB", "MB", "GB", "TB"];
+  let size = value / 1000;
+  let unit = 0;
+  while (size >= 1000 && unit < units.length - 1) {
+    size /= 1000;
+    unit += 1;
+  }
+  return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[unit]}`;
+}
+
 export function formatGiBOrTiB(value: number | null | undefined) {
   if (value == null) {
     return "n/a";

@@ -351,6 +351,19 @@ describe("RemoteTelemetryBar disk summary", () => {
     expect(screen.getByText("?")).toBeInTheDocument();
   });
 
+  it("keeps a long macOS mount path in a bounded, titled summary item", () => {
+    const longMount =
+      "/Library/Developer/CoreSimulator/Volumes/iOS_26_0/Library/Developer";
+    setTelemetry(telemetry([disk(longMount, 51)]));
+
+    const { container } = render(<RemoteTelemetryBar />);
+
+    const item = container.querySelector(".disk-summary-item");
+    expect(item).toHaveAttribute("title", longMount);
+    expect(item?.querySelector("strong")).toHaveTextContent(longMount);
+    expect(item?.querySelector(".disk-summary-percent")).toHaveTextContent("51%");
+  });
+
   it("opens disk detail popover and shows the full non-hidden mount list", () => {
     setTelemetry(
       telemetry([

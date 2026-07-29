@@ -226,6 +226,8 @@ for path in paths:
     print("__GPUTERM_AGENT_END__")"#;
 
 const WINDOWS_METADATA_PRELUDE: &str = r#"$ErrorActionPreference='SilentlyContinue'
+$GpuTermHome = [Environment]::GetFolderPath('UserProfile')
+if ([string]::IsNullOrWhiteSpace($GpuTermHome)) { $GpuTermHome = $HOME }
 function Emit-AgentTail([string]$provider, [string]$path) {
   if (-not (Test-Path -LiteralPath $path)) { return }
   Write-Output ("__GPUTERM_AGENT_FILE__`t{0}`t{1}" -f $provider, $path)
@@ -246,14 +248,14 @@ function Emit-AgentFiles([string]$provider, [string]$root, [string]$filter, [int
     }
 }
 function Emit-AgentSnapshots([string]$provider) {
-  $dir = Join-Path $HOME ".cache\gputerm\agent-status\$provider"
+  $dir = Join-Path $GpuTermHome ".cache\gputerm\agent-status\$provider"
   if (Test-Path -LiteralPath $dir) {
     Get-ChildItem -LiteralPath $dir -File -Filter '*.json' |
       Sort-Object LastWriteTime -Descending |
       Select-Object -First 4 |
       ForEach-Object { Emit-AgentTail $provider $_.FullName }
   }
-  Emit-AgentTail $provider (Join-Path $HOME ".cache\gputerm\agent-status\$provider.json")
+  Emit-AgentTail $provider (Join-Path $GpuTermHome ".cache\gputerm\agent-status\$provider.json")
 }
 "#;
 
@@ -266,12 +268,12 @@ fn metadata_command(os: RemoteOs, providers: &HashSet<Provider>) -> String {
         script.push_str(WINDOWS_METADATA_PRELUDE);
         if providers.contains(&Provider::Codex) {
             script.push_str(
-                "Emit-AgentFiles 'codex' (Join-Path $HOME '.codex\\sessions') 'rollout-*.jsonl' 3\n",
+                "Emit-AgentFiles 'codex' (Join-Path $GpuTermHome '.codex\\sessions') 'rollout-*.jsonl' 3\n",
             );
         }
         if providers.contains(&Provider::Claude) {
             script.push_str(
-                "Emit-AgentFiles 'claude' (Join-Path $HOME '.claude\\projects') '*.jsonl' 1\n",
+                "Emit-AgentFiles 'claude' (Join-Path $GpuTermHome '.claude\\projects') '*.jsonl' 1\n",
             );
         }
         if providers.contains(&Provider::Agy) {
@@ -505,6 +507,7 @@ struct ProcessSample {
     elapsed_seconds: Option<u64>,
     name: String,
     command: String,
+    executable_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -612,7 +615,7 @@ pub fn collect_local_agents(
             Duration::from_secs(METADATA_COMMAND_TIMEOUT_SECS),
         )
     });
-    refresh_provider_quotas_local(os, &providers, state);
+    refresh_provider_quotas_local(os, &providers, &processes, state);
     update_quota_snapshots(state, now_epoch_seconds());
     Ok(build_agent_metrics(
         &processes,
@@ -623,6 +626,32 @@ pub fn collect_local_agents(
 
 fn detected_providers(processes: &[ProcessSample]) -> HashSet<Provider> {
     processes.iter().filter_map(provider_for_process).collect()
+}
+
+/// Returns the native provider executable already observed in the Windows
+/// process list. This is more reliable than the GUI application's PATH, which
+/// may not contain CLI directories added by a terminal profile.
+fn provider_executable_hint(processes: &[ProcessSample], provider: Provider) -> Option<String> {
+    processes
+        .iter()
+        .filter(|process| provider_for_process(process) == Some(provider))
+        .filter_map(|process| process.executable_path.as_deref())
+        .find(|path| {
+            // Parse both separators even when this unit test is running on a
+            // non-Windows host.
+            let file_name = path
+                .rsplit(['\\', '/'])
+                .next()
+                .unwrap_or(path)
+                .to_ascii_lowercase();
+            let file_name = file_name.strip_suffix(".exe").unwrap_or(&file_name);
+            match provider {
+                Provider::Codex => file_name == "codex" || file_name.starts_with("codex-"),
+                Provider::Agy => file_name == "agy" || file_name == "antigravity",
+                Provider::Claude => file_name == "claude",
+            }
+        })
+        .map(str::to_string)
 }
 
 fn refresh_metadata_if_due<F>(
@@ -810,12 +839,22 @@ fn apply_finished_quota_probes(
             (provider, Ok(snapshot)) => {
                 state.quotas.insert(provider, snapshot);
             }
-            (provider, Err(_)) => {
+            (provider, Err(error)) => {
                 // A failed live read must not leave an arbitrarily old
                 // app-server value looking current. Re-evaluate the newest
                 // session-log snapshot as the documented fallback.
                 state.quotas.remove(&provider);
                 merge_metadata_quota_fallbacks(state, providers, now);
+                if provider == Provider::Codex {
+                    let quota = state
+                        .quotas
+                        .entry(provider)
+                        .or_insert_with(|| AgentQuotaSnapshot::unavailable(provider));
+                    if quota.limits.is_empty() {
+                        quota.message =
+                            Some(format!("Codex account limits are unavailable: {}", error));
+                    }
+                }
             }
         }
     }
@@ -824,6 +863,7 @@ fn apply_finished_quota_probes(
 fn refresh_provider_quotas_local(
     os: RemoteOs,
     providers: &HashSet<Provider>,
+    processes: &[ProcessSample],
     state: &mut AgentMonitorState,
 ) {
     let now = now_epoch_seconds();
@@ -834,8 +874,9 @@ fn refresh_provider_quotas_local(
         state
             .last_quota_refresh
             .insert(Provider::Codex, Instant::now());
+        let launch_hint = provider_executable_hint(processes, Provider::Codex);
         spawn_quota_probe(&state.quota_probes, Provider::Codex, move || {
-            query_codex_quota_local(now_epoch_seconds())
+            query_codex_quota_local(launch_hint.as_deref(), now_epoch_seconds())
         });
     }
     if providers.contains(&Provider::Agy)
@@ -844,8 +885,9 @@ fn refresh_provider_quotas_local(
         state
             .last_quota_refresh
             .insert(Provider::Agy, Instant::now());
+        let launch_hint = provider_executable_hint(processes, Provider::Agy);
         spawn_quota_probe(&state.quota_probes, Provider::Agy, move || {
-            query_agy_quota_local(os, now_epoch_seconds())
+            query_agy_quota_local(os, launch_hint.as_deref(), now_epoch_seconds())
         });
     }
 }
@@ -1002,9 +1044,22 @@ fn codex_rate_limit_request() -> &'static str {
     r#"{"id":2,"method":"account/rateLimits/read","params":null}"#
 }
 
-fn query_codex_quota_local(now: u64) -> Result<AgentQuotaSnapshot, String> {
+fn query_codex_quota_local(
+    _launch_hint: Option<&str>,
+    now: u64,
+) -> Result<AgentQuotaSnapshot, String> {
     #[cfg(target_os = "windows")]
-    let mut command = Command::new("codex");
+    let mut command = if let Some(path) = _launch_hint {
+        let mut command = Command::new(path);
+        command.arg("app-server");
+        command
+    } else {
+        // CreateProcess does not resolve npm's `.cmd` shims. cmd.exe does, and
+        // it also preserves the user's PATHEXT behavior.
+        let mut command = Command::new("cmd.exe");
+        command.args(["/D", "/S", "/C", "codex app-server"]);
+        command
+    };
     #[cfg(not(target_os = "windows"))]
     let mut command = {
         let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into());
@@ -1012,8 +1067,6 @@ fn query_codex_quota_local(now: u64) -> Result<AgentQuotaSnapshot, String> {
         command.args(["-lc", "exec codex app-server"]);
         command
     };
-    #[cfg(target_os = "windows")]
-    command.arg("app-server");
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1187,7 +1240,11 @@ fn parse_codex_quota_response(response: &Value, now: u64) -> Result<AgentQuotaSn
     ))
 }
 
-fn query_agy_quota_local(os: RemoteOs, now: u64) -> Result<AgentQuotaSnapshot, String> {
+fn query_agy_quota_local(
+    os: RemoteOs,
+    launch_hint: Option<&str>,
+    now: u64,
+) -> Result<AgentQuotaSnapshot, String> {
     let pair = native_pty_system()
         .openpty(PtySize {
             rows: 44,
@@ -1197,7 +1254,15 @@ fn query_agy_quota_local(os: RemoteOs, now: u64) -> Result<AgentQuotaSnapshot, S
         })
         .map_err(|error| format!("failed to open AGY PTY: {}", error))?;
     let mut command = if os == RemoteOs::Windows {
-        CommandBuilder::new("agy")
+        if let Some(path) = launch_hint {
+            CommandBuilder::new(path)
+        } else {
+            // A PTY can host cmd.exe directly, which lets npm-installed
+            // `agy.cmd` resolve and retain its interactive terminal behavior.
+            let mut command = CommandBuilder::new("cmd.exe");
+            command.args(["/D", "/S", "/C", "agy"]);
+            command
+        }
     } else {
         let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into());
         let mut command = CommandBuilder::new(shell);
@@ -1458,6 +1523,7 @@ fn parse_posix_processes(output: &str) -> Vec<ProcessSample> {
                 elapsed_seconds: parse_elapsed(fields[5]),
                 name: String::new(),
                 command: fields[6..].join(" "),
+                executable_path: None,
             })
         })
         .collect()
@@ -1499,6 +1565,7 @@ fn parse_windows_processes(
             let command = value_string(row, "commandLine")
                 .or_else(|| value_string(row, "executablePath"))
                 .unwrap_or_else(|| name.clone());
+            let executable_path = value_string(row, "executablePath");
             Some(ProcessSample {
                 pid,
                 ppid: value_u64(row, "ppid").unwrap_or(0) as u32,
@@ -1507,6 +1574,7 @@ fn parse_windows_processes(
                 elapsed_seconds: value_u64(row, "elapsedSeconds"),
                 name,
                 command,
+                executable_path,
                 ..Default::default()
             })
         })
@@ -2696,7 +2764,7 @@ pub async fn configure_claude_quota_monitor(
 
 fn configure_claude_quota_local() -> Result<ClaudeQuotaSetupResult, String> {
     let os = local_os();
-    if os != RemoteOs::Windows && !local_claude_helper_runtime_available(os) {
+    if os == RemoteOs::Linux && !local_claude_helper_runtime_available(os) {
         return Ok(ClaudeQuotaSetupResult {
             status: "unsupported".to_string(),
             message: "Claude quota setup needs Python 3 on this host. Install Python 3, then run Set up again.".to_string(),
@@ -2751,7 +2819,7 @@ fn configure_claude_quota_remote(
     session: &Session,
     os: RemoteOs,
 ) -> Result<ClaudeQuotaSetupResult, String> {
-    if os != RemoteOs::Windows {
+    if os == RemoteOs::Linux {
         let runtime_command = "if command -v python3 >/dev/null 2>&1 || command -v python >/dev/null 2>&1; then printf supported; else printf unsupported; fi";
         if run_remote_command_for(session, os, runtime_command)?.trim() != "supported" {
             return Ok(ClaudeQuotaSetupResult {
@@ -2761,7 +2829,7 @@ fn configure_claude_quota_remote(
         }
     }
     let current_command = if os == RemoteOs::Windows {
-        "$path = Join-Path $HOME '.claude\\settings.json'\nif (Test-Path -LiteralPath $path) { Get-Content -LiteralPath $path -Raw } else { Write-Output '{}' }\nexit 0"
+        "$home = [Environment]::GetFolderPath('UserProfile')\n$path = Join-Path $home '.claude\\settings.json'\nif (Test-Path -LiteralPath $path) { Get-Content -LiteralPath $path -Raw } else { Write-Output '{}' }\nexit 0"
     } else {
         "if [ -r \"$HOME/.claude/settings.json\" ]; then cat \"$HOME/.claude/settings.json\"; else printf '{}'; fi"
     };
@@ -2811,7 +2879,9 @@ fn configure_claude_quota_remote(
     let command = if os == RemoteOs::Windows {
         format!(
             "$ErrorActionPreference='Stop'\n\
-             $dir = Join-Path $HOME '.claude'\n\
+             $home = [Environment]::GetFolderPath('UserProfile')\n\
+             if ([string]::IsNullOrWhiteSpace($home)) {{ throw 'Windows user profile is unavailable' }}\n\
+             $dir = Join-Path $home '.claude'\n\
              New-Item -ItemType Directory -Force -Path $dir | Out-Null\n\
              $helper = Join-Path $dir '{helper_name}'\n\
              $settingsPath = Join-Path $dir 'settings.json'\n\
@@ -2855,7 +2925,7 @@ fn configure_claude_quota_remote(
 }
 
 fn local_claude_helper_runtime_available(os: RemoteOs) -> bool {
-    if os == RemoteOs::Windows {
+    if matches!(os, RemoteOs::Windows | RemoteOs::MacOs) {
         return true;
     }
     let candidates: &[&str] = &["python3", "python"];
@@ -2913,28 +2983,36 @@ fn set_claude_status_line(settings: &mut Value, command: &str) {
 }
 
 fn claude_helper_for_os(os: RemoteOs) -> (&'static str, &'static str) {
-    if os == RemoteOs::Windows {
-        (
+    match os {
+        RemoteOs::Windows => (
             "gputerm-claude-statusline.ps1",
             include_str!("../../../scripts/gputerm-claude-statusline.ps1"),
-        )
-    } else {
-        (
+        ),
+        RemoteOs::MacOs => (
+            "gputerm-claude-statusline-macos.js",
+            include_str!("../../../scripts/gputerm-claude-statusline-macos.js"),
+        ),
+        RemoteOs::Linux => (
             "gputerm-claude-statusline.sh",
             include_str!("../../../scripts/gputerm-claude-statusline.sh"),
-        )
+        ),
     }
 }
 
 fn claude_status_line_command_for(os: RemoteOs, helper_path: &str) -> String {
-    if os == RemoteOs::Windows {
-        let helper_path = helper_path.replace('\\', "/").replace('"', "\\\"");
-        format!(
-            "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"",
-            helper_path
-        )
-    } else {
-        "~/.claude/gputerm-claude-statusline.sh".to_string()
+    match os {
+        RemoteOs::Windows => {
+            let helper_path = helper_path.replace('\\', "/").replace('"', "\\\"");
+            format!(
+                "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"",
+                helper_path
+            )
+        }
+        RemoteOs::MacOs => {
+            "/usr/bin/osascript -l JavaScript \"$HOME/.claude/gputerm-claude-statusline-macos.js\""
+                .to_string()
+        }
+        RemoteOs::Linux => "~/.claude/gputerm-claude-statusline.sh".to_string(),
     }
 }
 
@@ -3790,6 +3868,137 @@ mod tests {
             claude_status_line_command(&settings).as_deref(),
             Some(command.as_str())
         );
+    }
+
+    #[test]
+    fn windows_provider_probe_prefers_the_observed_native_executable() {
+        let processes = vec![
+            ProcessSample {
+                name: "node.exe".to_string(),
+                command: r#""C:\Program Files\nodejs\node.exe" C:\tools\codex\cli.js"#
+                    .to_string(),
+                executable_path: Some(r"C:\Program Files\nodejs\node.exe".to_string()),
+                ..Default::default()
+            },
+            ProcessSample {
+                name: "codex.exe".to_string(),
+                command: r#""C:\Users\Test User\AppData\Roaming\npm\node_modules\@openai\codex\vendor\codex.exe""#
+                    .to_string(),
+                executable_path: Some(
+                    r"C:\Users\Test User\AppData\Roaming\npm\node_modules\@openai\codex\vendor\codex.exe"
+                        .to_string(),
+                ),
+                ..Default::default()
+            },
+            ProcessSample {
+                name: "agy.exe".to_string(),
+                command: r#""C:\Users\Test User\bin\agy.exe""#.to_string(),
+                executable_path: Some(r"C:\Users\Test User\bin\agy.exe".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        assert_eq!(
+            provider_executable_hint(&processes, Provider::Codex).as_deref(),
+            Some(
+                r"C:\Users\Test User\AppData\Roaming\npm\node_modules\@openai\codex\vendor\codex.exe"
+            )
+        );
+        assert_eq!(
+            provider_executable_hint(&processes, Provider::Agy).as_deref(),
+            Some(r"C:\Users\Test User\bin\agy.exe")
+        );
+    }
+
+    #[test]
+    fn macos_claude_setup_uses_the_builtin_jxa_runtime() {
+        let (helper_name, helper) = claude_helper_for_os(RemoteOs::MacOs);
+        assert_eq!(helper_name, "gputerm-claude-statusline-macos.js");
+        assert!(helper.starts_with("#!/usr/bin/osascript -l JavaScript"));
+        assert!(helper.contains("NSFileHandle.fileHandleWithStandardInput"));
+        assert!(helper.contains("rate_limits"));
+        assert!(!helper.contains("python"));
+        assert!(local_claude_helper_runtime_available(RemoteOs::MacOs));
+        assert_eq!(
+            claude_status_line_command_for(RemoteOs::MacOs, "/ignored"),
+            "/usr/bin/osascript -l JavaScript \"$HOME/.claude/gputerm-claude-statusline-macos.js\""
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn executes_macos_claude_status_line_and_writes_a_quota_snapshot() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "gputerm-claude-statusline-macos-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        let session_id = format!("gputerm-macos-test-{}-{}", std::process::id(), unique);
+        let script_path = root.join("gputerm-claude-statusline-macos.js");
+        let snapshot_path = root
+            .join(".cache")
+            .join("gputerm")
+            .join("agent-status")
+            .join("claude")
+            .join(format!("{}.json", session_id));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            &script_path,
+            include_str!("../../../scripts/gputerm-claude-statusline-macos.js"),
+        )
+        .unwrap();
+
+        let mut child = Command::new("/usr/bin/osascript")
+            .args(["-l", "JavaScript"])
+            .arg(&script_path)
+            .env("HOME", &root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let payload = serde_json::json!({
+            "session_id": session_id,
+            "model": { "display_name": "Opus" },
+            "context_window": { "used_percentage": 25 },
+            "rate_limits": {
+                "five_hour": { "used_percentage": 20, "resets_at": 2_000_000_000_u64 },
+                "seven_day": { "used_percentage": 40, "resets_at": 2_000_100_000_u64 }
+            },
+            "prompt": "must not be copied"
+        })
+        .to_string();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        let snapshot = fs::read_to_string(&snapshot_path).unwrap();
+        let _ = fs::remove_dir_all(&root);
+
+        assert!(
+            output.status.success(),
+            "JXA helper failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Opus"));
+        assert!(stdout.contains("5h 80%"));
+        assert!(stdout.contains("wk 60%"));
+        let snapshot: Value = serde_json::from_str(&snapshot).unwrap();
+        assert_eq!(
+            snapshot
+                .pointer("/rate_limits/five_hour/used_percentage")
+                .and_then(Value::as_f64),
+            Some(20.0)
+        );
+        assert!(snapshot.get("prompt").is_none());
     }
 
     #[cfg(target_os = "windows")]

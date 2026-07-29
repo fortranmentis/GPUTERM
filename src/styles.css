@@ -1393,6 +1393,43 @@ button:disabled {
   font-weight: 800;
 }
 
+.file-sort-column {
+  display: block;
+  min-width: 0;
+}
+
+.file-sort-button {
+  display: inline-flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 3px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.file-sort-button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-sort-button svg {
+  flex: none;
+}
+
+.file-sort-button.active,
+.file-sort-button:hover,
+.file-sort-button:focus-visible {
+  color: var(--cyan);
+}
+
 .file-list {
   flex: 1;
   min-height: 0;
@@ -2015,32 +2052,48 @@ button.agent-summary-section {
 
 .disk-summary-compact {
   display: flex;
+  width: 100%;
+  min-width: 0;
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
+  overflow: hidden;
   color: #cbd5e1;
   font-size: 13px;
 }
 
-.disk-summary-compact span {
+.disk-summary-compact > span {
   display: inline-flex;
+  max-width: 100%;
   align-items: center;
   gap: 4px;
   min-width: 0;
   white-space: nowrap;
 }
 
-.disk-summary-compact span:not(:last-child)::after {
+.disk-summary-compact > span:not(:last-child)::after {
+  flex: none;
   content: "·";
   margin-left: 6px;
   color: var(--subtle);
 }
 
 .disk-summary-compact strong {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
   color: #f1f7ff;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.disk-summary-compact .disk-summary-percent {
+  flex: none;
+  overflow: visible;
 }
 
 .disk-hidden-count {
+  flex: none;
   color: var(--cyan);
   font-weight: 800;
 }

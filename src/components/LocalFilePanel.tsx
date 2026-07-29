@@ -1,7 +1,7 @@
 import { FolderOpen } from "lucide-react";
 import type { DragEvent, KeyboardEvent, PointerEvent, Ref } from "react";
 import type { LocalEntry } from "../types/session";
-import { formatBytes } from "../utils/formatBytes";
+import { formatFileSize } from "../utils/formatBytes";
 
 type LocalFilePanelProps = {
   containerRef?: Ref<HTMLElement>;
@@ -107,7 +107,7 @@ export function LocalFilePanel({
           >
             <span>{entry.entryType === "directory" ? "dir" : "file"}</span>
             <strong>{entry.name}</strong>
-            <small>{formatBytes(entry.size)}</small>
+            <small>{formatFileSize(entry.size)}</small>
           </button>
         ))}
         {entries.length === 0 && (

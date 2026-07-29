@@ -62,6 +62,8 @@
 
 ### 📁 SFTP 브라우저
 - 원격/로컬 패널 사이 구분선을 드래그해 세로 비율 조절
+- **원격 열 정렬** — 이름·종류·용량·수정일 헤더를 클릭해 정렬하고 다시 클릭해 방향 전환; 폴더는 항상 먼저, 메타데이터가 없는 항목은 마지막에 유지
+- **십진 파일 용량** — 원격/로컬 목록과 전송 진행률을 SI 기준 `B / KB / MB / GB / TB`로 일관되게 표시
 - 드래그 앤 드롭으로 **파일과 전체 폴더 트리**를 업로드·다운로드하고 폴더 전체 진행률 및 취소 지원
 - **네이티브 데스크톱 드롭 및 붙여넣기 업로드** — Explorer, Finder, Nautilus 밖에서 파일/폴더를 끌어오거나 URI 목록 항목을 원격 패널에 붙여넣기
 - 1 MiB 청크 스트리밍 전송, 진행률 큐, **항목별 전송 취소**
@@ -76,6 +78,8 @@
 - **NVIDIA·AMD·Intel·Apple Silicon** GPU를 호스트별로 자동 감지하며, 카드마다 벤더 태그 표시
 - **내장 + 외장 하이브리드 구성도 두 GPU 모두 표시** — Linux는 벤더 도구에 DRM/sysfs 어댑터 탐색을 보완하고, Windows는 DirectX LUID로 카운터를 정확히 귀속하며 WDDM 활동 카운터가 아직 없는 유휴 GPU도 유지합니다
 - **AGY·Codex·Claude Code용 AI DASH** — 하단 카드에서 사용 가능한 5시간·주간 잔여량을 초소형 게이지로 한 번에 보여주고, 상세창에는 컨텍스트·토큰과 각 CLI의 전체 자식 프로세스 트리를 합산한 CPU/RAM을 유지합니다. AGY는 `/usage` 막대 옆의 정밀 퍼센트를 사용하고 그룹별 모델 목록과 최근 24시간 추이를 표시합니다
+- **플랫폼별 로컬 AI 잔여량 보강** — macOS Claude는 Python 없이 기본 `osascript`를 사용하고, Windows Codex/AGY는 실행 중인 native 경로와 npm `.cmd` shim을 지원하며, Windows Claude는 User Profile 경로를 일관되게 사용
+- **카드 내부 DISK 경로 표시** — 긴 마운트 경로는 사용률을 가리지 않고 말줄임되며 전체 경로는 hover로 확인
 - 각 섹션을 클릭하면 표가 창 크기에 맞춰 확장되는 **드래그·크기 조절 가능 상세 팝오버**: 코어별 CPU 사용률, 상위 프로세스, GPU별 VRAM/전력/온도, 전체 마운트 목록
 - **상세창을 별도 OS 창으로 분리** 가능 — 독립적으로 갱신되고 세션이 끊기면 함께 닫힘
 - 원격 텔레메트리는 전용 SSH 연결에서 자동 재연결하고, 로컬 텔레메트리는 SSH 없이 호스트에서 수집기를 직접 실행
@@ -215,6 +219,7 @@ npm run tauri:build
 - 대상이 이미 있으면 파일 교체 또는 기존 폴더 병합 전에 확인을 요청합니다.
 - Explorer, Finder, Nautilus 밖에서 끌어온 파일과 폴더는 네이티브 데스크톱 경로를 사용하며, Nautilus 등 호환 파일 관리자에서 복사한 항목은 포커스된 원격 패널에 붙여넣을 수도 있습니다.
 - 로컬 폴더는 한 번 클릭해 전송 대상으로 선택하고 더블클릭해 엽니다. 원격/로컬 목록 사이 구분선은 드래그하거나 방향키로 조절할 수 있습니다.
+- 원격 열 헤더를 클릭해 정렬할 수 있습니다. 이름/종류는 오름차순, 용량/수정일은 내림차순으로 시작하며 다시 클릭하면 방향이 바뀌고, 디렉터리 이동·새로고침 중에도 선택이 유지됩니다.
 - 심볼릭 링크는 순환과 선택한 트리 밖으로의 예기치 않은 이동을 막기 위해 재귀 전송에서 제외됩니다.
 - 마지막 로컬 디렉토리는 다음 실행 시 복원됩니다.
 
@@ -226,7 +231,7 @@ npm run tauri:build
 - **Interval:** 1, 2(기본), 5, 10초 — 상세 팝오버도 같은 주기로 폴링합니다.
 - **Mode:** GPU + System, GPU only, System only.
 - **Ignore FS:** 디스크 요약에서 숨길 파일시스템 타입을 쉼표로 구분해 지정 (기본: `tmpfs`, `devtmpfs`, `squashfs`, `proc`, `sysfs`, `cgroup`, `cgroup2`, `overlay`, `devfs`, `autofs`). 디스크 팝오버에서 일시적으로 표시할 수 있습니다.
-- 마운트 우선순위는 `/` → `/home` → `/data` → `/mnt*` → `/media*` → 드라이브 문자 → 기타이며, 사용률 80% 이상은 경고, 90% 이상은 위험으로 표시됩니다.
+- 마운트 우선순위는 `/` → `/home` → `/data` → `/mnt*` → `/media*` → 드라이브 문자 → 기타이며, 사용률 80% 이상은 경고, 90% 이상은 위험으로 표시됩니다. 요약 카드의 긴 경로는 말줄임되고 전체 값은 hover와 디스크 상세창에서 확인할 수 있습니다.
 - **AI DASH:** System이 포함된 모드에서 AGY·Codex·Claude Code용 360px 요약 카드를 표시합니다. 얇은 2열 게이지로 사용 가능한 5시간·주간 잔여량을 모두 동시에 보여주며, 미지원 기간은 `n/a`, 만료된 값은 `reset`, 잔여량 25%·10% 이하는 각각 경고·위험 색상으로 표시합니다. 중복 세션은 가장 최신 계정 스냅샷 하나를 공유합니다. 상세창에서는 컨텍스트·토큰을 기본으로 접고 CPU·메모리는 전체 자식 트리를 합산합니다. Codex는 계정 단위 `account/rateLimits/read` 값과 명시적인 세션 로그 대체값을 사용하고, Claude Code 값은 [Claude Code 사용 한도](#claude-code-사용-한도)의 status line에서 옵니다. AGY는 5분마다 숨은 PTY에서 `/usage`를 실험적으로 판독해 Gemini와 Claude/GPT 그룹을 분리하며, 성공·실패 표본의 최근 24시간 추이를 표시하고 값을 읽을 수 없을 때는 추정하지 않습니다.
 
 </details>
@@ -274,7 +279,7 @@ cp scripts/gputerm-claude-statusline.sh ~/.claude/gputerm-claude-statusline.sh &
 }
 ```
 
-상태줄에는 `Opus · ctx 8% · 5h 76% · wk 59% · $0.12`가 출력되고, `~/.cache/gputerm/agent-status/claude/<session-id>.json`이 기록됩니다. 모니터링하려는 모든 호스트(원격 포함)에 설치하세요. Windows 자동 설정은 `gputerm-claude-statusline.ps1`을 설치하고 절대 경로를 `powershell.exe` 명령으로 등록하므로 Claude Code가 Git Bash와 PowerShell 중 어느 셸을 선택해도 동작합니다. 지원 Windows에 기본 포함된 Windows PowerShell 5.1을 사용하며 Windows 헬퍼에는 Python이 필요하지 않습니다.
+상태줄에는 `Opus · ctx 8% · 5h 76% · wk 59% · $0.12`가 출력되고, `~/.cache/gputerm/agent-status/claude/<session-id>.json`이 기록됩니다. 모니터링하려는 모든 호스트(원격 포함)에 설치하세요. macOS 자동 설정은 운영체제에 기본 포함된 `osascript` 기반 JavaScript for Automation 헬퍼를 설치하므로 Python이 필요하지 않습니다. Windows 자동 설정은 `gputerm-claude-statusline.ps1`을 설치하고 절대 경로를 `powershell.exe` 명령으로 등록하므로 Claude Code가 Git Bash와 PowerShell 중 어느 셸을 선택해도 동작합니다. 지원 Windows에 기본 포함된 Windows PowerShell 5.1을 사용하며 Windows 헬퍼에도 Python이 필요하지 않습니다.
 
 기록되는 필드는 세션 id, 작업 디렉터리, 모델 이름과 id, `context_window`(`current_usage` 포함), `cost.total_cost_usd`, `cost.total_duration_ms`, `rate_limits.{five_hour,seven_day}.{used_percentage,resets_at}`, 캡처 시각, 가능한 경우 에이전트 pid뿐입니다. 프롬프트·응답·도구 입출력·트랜스크립트 경로·세션 이름·저장소 정보는 복사하지 않습니다. 7일이 지난 스냅샷은 다음 실행에서 정리됩니다.
 

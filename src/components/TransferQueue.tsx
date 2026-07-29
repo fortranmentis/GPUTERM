@@ -2,7 +2,7 @@ import { XCircle } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTransferStore } from "../stores/transferStore";
 import { useSessionStore } from "../stores/sessionStore";
-import { formatBytes } from "../utils/formatBytes";
+import { formatFileSize } from "../utils/formatBytes";
 
 export function TransferQueue() {
   const tasks = useTransferStore((state) => state.tasks);
@@ -50,7 +50,8 @@ export function TransferQueue() {
             <div className="transfer-task-side">
               <span className={`transfer-status ${task.status}`}>{task.status}</span>
               <span>
-                {formatBytes(task.transferredBytes)} / {formatBytes(task.totalBytes)}
+                {formatFileSize(task.transferredBytes)} /{" "}
+                {formatFileSize(task.totalBytes)}
               </span>
               <div className="progress-track">
                 <div

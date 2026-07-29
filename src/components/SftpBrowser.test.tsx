@@ -223,6 +223,61 @@ describe("SftpBrowser local path browse", () => {
     });
   });
 
+  it("sorts the remote table by clickable headers while keeping folders first", async () => {
+    remoteEntries = [
+      { ...remoteFile("small.bin"), size: 1_000, modifiedTime: 10 },
+      { ...remoteFile("unknown.bin"), size: null, modifiedTime: null },
+      { ...remoteDirectory("folder") },
+      { ...remoteFile("large.bin"), size: 2_000_000, modifiedTime: 30 },
+    ];
+    const { container } = render(<SftpBrowser />);
+
+    await screen.findByText("small.bin");
+    const rowNames = () =>
+      Array.from(
+        container.querySelectorAll(".file-table .file-list .file-name"),
+      ).map((element) => element.textContent?.trim());
+
+    expect(rowNames()).toEqual([
+      "folder",
+      "large.bin",
+      "small.bin",
+      "unknown.bin",
+    ]);
+    expect(screen.getByText("1.00 KB")).toBeInTheDocument();
+    expect(screen.getByText("2.00 MB")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Sort by Size" }));
+    expect(rowNames()).toEqual([
+      "folder",
+      "large.bin",
+      "small.bin",
+      "unknown.bin",
+    ]);
+    expect(
+      screen.getByRole("columnheader", { name: "Size" }),
+    ).toHaveAttribute("aria-sort", "descending");
+
+    fireEvent.click(screen.getByRole("button", { name: "Sort by Size" }));
+    expect(rowNames()).toEqual([
+      "folder",
+      "small.bin",
+      "large.bin",
+      "unknown.bin",
+    ]);
+    expect(
+      screen.getByRole("columnheader", { name: "Size" }),
+    ).toHaveAttribute("aria-sort", "ascending");
+
+    fireEvent.click(screen.getByRole("button", { name: "Sort by Modified" }));
+    expect(rowNames()).toEqual([
+      "folder",
+      "large.bin",
+      "small.bin",
+      "unknown.bin",
+    ]);
+  });
+
   it("shows the folder-name editor only after the icon-only mkdir button", async () => {
     render(<SftpBrowser />);
 
