@@ -1,7 +1,7 @@
 {
   "name": "gputerm",
   "private": true,
-  "version": "1.2.2-beta",
+  "version": "1.2.3-beta",
   "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "scripts": {

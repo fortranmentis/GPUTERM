@@ -10,8 +10,9 @@ use crate::ssh::session::{
     open_ssh_session, target_for_active_session, with_ops_session, AppState, SshTarget,
 };
 use crate::ssh::system_monitor::{
-    detect_remote_os, local_os, run_local_command_for, run_local_command_with_timeout,
-    run_remote_command_for, run_remote_command_with_budget, RemoteOs,
+    detect_remote_os, local_os, native_remote_path, remote_join, run_local_command_for,
+    run_local_command_with_timeout, run_remote_command_for, run_remote_command_with_budget,
+    write_remote_file_atomically, RemoteOs,
 };
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::Serialize;
@@ -609,6 +610,9 @@ struct AgentSessionMetadata {
 #[derive(Default)]
 pub struct AgentMonitorState {
     last_metadata_scan: Option<Instant>,
+    /// Why the last metadata scrape failed. Swallowing this is what made a
+    /// too-long Windows command look like "no data" for so long.
+    last_metadata_error: Option<String>,
     last_metadata_providers: HashSet<Provider>,
     metadata: HashMap<Provider, Vec<AgentSessionMetadata>>,
     quotas: HashMap<Provider, AgentQuotaSnapshot>,
@@ -740,10 +744,20 @@ fn refresh_metadata_if_due<F>(
     }
     state.last_metadata_scan = Some(Instant::now());
     state.last_metadata_providers = providers.clone();
-    if let Ok(output) = run(&metadata_command(os, providers)) {
-        let now = now_epoch_seconds();
-        state.metadata = parse_metadata_output(&output, now);
-        merge_metadata_quota_fallbacks(state, providers, now);
+    match run(&metadata_command(os, providers)) {
+        Ok(output) => {
+            state.last_metadata_error = None;
+            let now = now_epoch_seconds();
+            state.metadata = parse_metadata_output(&output, now);
+            merge_metadata_quota_fallbacks(state, providers, now);
+        }
+        Err(error) => {
+            // Kept rather than discarded: the process card stays valid, but the
+            // reason no session or quota data arrived has to reach the user.
+            state.last_metadata_error = Some(error);
+            let now = now_epoch_seconds();
+            merge_metadata_quota_fallbacks(state, providers, now);
+        }
     }
 }
 
@@ -781,14 +795,20 @@ fn quota_refresh_due(
 fn unavailable_with_setup_hint(
     provider: Provider,
     setup: Option<&AgentSessionMetadata>,
+    collection_error: Option<&str>,
 ) -> AgentQuotaSnapshot {
     let mut snapshot = AgentQuotaSnapshot::unavailable(provider);
+    let Some(setup) = setup else {
+        // No setup record either, so the scrape itself is the story worth
+        // telling: without it the card can only say data is missing.
+        if let Some(error) = collection_error {
+            snapshot.message = Some(format!("Agent metadata could not be collected: {}", error));
+        }
+        return snapshot;
+    };
     if provider != Provider::Claude {
         return snapshot;
     }
-    let Some(setup) = setup else {
-        return snapshot;
-    };
     let helper = setup.setup_helper.as_deref().unwrap_or_default();
     let status_line = setup.setup_status_line.as_deref().unwrap_or_default();
     let message = match (helper, status_line) {
@@ -812,8 +832,12 @@ fn unavailable_with_setup_hint(
         ),
         _ => None,
     };
-    if let Some(message) = message {
-        snapshot.message = Some(message);
+    match (message, collection_error) {
+        (Some(message), _) => snapshot.message = Some(message),
+        (None, Some(error)) => {
+            snapshot.message = Some(format!("Agent metadata could not be collected: {}", error))
+        }
+        (None, None) => {}
     }
     snapshot
 }
@@ -835,10 +859,10 @@ fn merge_metadata_quota_fallbacks(
             continue;
         }
         let Some(sessions) = state.metadata.get(provider) else {
-            state
-                .quotas
-                .entry(*provider)
-                .or_insert_with(|| unavailable_with_setup_hint(*provider, None));
+            let error = state.last_metadata_error.clone();
+            state.quotas.entry(*provider).or_insert_with(|| {
+                unavailable_with_setup_hint(*provider, None, error.as_deref())
+            });
             continue;
         };
         let newest = sessions
@@ -849,7 +873,11 @@ fn merge_metadata_quota_fallbacks(
             // No published limits: say which install step is incomplete rather
             // than only that the data is missing.
             let hint = sessions.iter().find(|entry| entry.setup_scope);
-            let snapshot = unavailable_with_setup_hint(*provider, hint);
+            let snapshot = unavailable_with_setup_hint(
+                *provider,
+                hint,
+                state.last_metadata_error.as_deref(),
+            );
             state
                 .quotas
                 .entry(*provider)
@@ -3067,24 +3095,6 @@ const CLAUDE_HELPER_NAMES: [(RemoteOs, &str); 3] = [
     (RemoteOs::Linux, "gputerm-claude-statusline.sh"),
 ];
 
-/// Joins an SFTP path. SFTP always uses forward slashes, including against
-/// Windows OpenSSH.
-fn remote_join(base: impl AsRef<Path>, child: &str) -> String {
-    let base = base.as_ref().to_string_lossy().replace('\\', "/");
-    let base = base.trim_end_matches('/');
-    format!("{}/{}", base, child)
-}
-
-/// Converts an SFTP path to the form the host's own tools expect. Windows
-/// OpenSSH reports `/C:/Users/...`, but a `-File` argument needs `C:/Users/...`.
-fn native_remote_path(path: &str) -> String {
-    let bytes = path.as_bytes();
-    if bytes.len() > 2 && bytes[0] == b'/' && bytes[2] == b':' {
-        return path[1..].to_string();
-    }
-    path.to_string()
-}
-
 fn read_remote_claude_settings(
     sftp: &ssh2::Sftp,
     path: &str,
@@ -3113,28 +3123,6 @@ fn parse_claude_settings(bytes: &[u8]) -> Result<Value, String> {
     }
     serde_json::from_str::<Value>(text)
         .map_err(|error| format!("Claude settings.json is not valid JSON: {}", error))
-}
-
-/// Writes through a temporary sibling and renames over the target, so a failed
-/// transfer cannot leave a truncated or empty file where a working one was.
-fn write_remote_file_atomically(
-    sftp: &ssh2::Sftp,
-    path: &str,
-    contents: &[u8],
-) -> Result<(), String> {
-    let temporary = format!("{}.gputerm-new", path);
-    {
-        let mut file = sftp
-            .create(Path::new(&temporary))
-            .map_err(|error| format!("failed to write {}: {}", temporary, error))?;
-        file.write_all(contents)
-            .map_err(|error| format!("failed to write {}: {}", temporary, error))?;
-    }
-    sftp.rename(Path::new(&temporary), Path::new(path), None)
-        .map_err(|error| {
-            let _ = sftp.unlink(Path::new(&temporary));
-            format!("failed to replace {}: {}", path, error)
-        })
 }
 
 fn local_claude_helper_runtime_available(os: RemoteOs) -> bool {
@@ -3767,6 +3755,45 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_metadata_scrape_reaches_the_card_instead_of_vanishing() {
+        // The Windows symptom was a card with no model and a generic quota
+        // message, because the scrape error was discarded. Any remaining cause
+        // has to be visible.
+        let mut state = AgentMonitorState::default();
+        refresh_metadata_if_due(
+            &mut state,
+            RemoteOs::Windows,
+            &HashSet::from([Provider::Claude]),
+            |_| Err("The command line is too long.".to_string()),
+        );
+        let quota = state.quotas.get(&Provider::Claude).unwrap();
+        assert_eq!(quota.status, "setup-required");
+        let message = quota.message.as_deref().unwrap_or_default();
+        assert!(message.contains("could not be collected"), "{message}");
+        assert!(message.contains("command line is too long"), "{message}");
+    }
+
+    #[test]
+    fn a_specific_setup_step_outranks_the_collection_error() {
+        // When the collector did report the setup state, that is the more
+        // actionable message.
+        let setup = AgentSessionMetadata {
+            setup_scope: true,
+            setup_helper: Some("empty".to_string()),
+            setup_status_line: Some("ours".to_string()),
+            ..Default::default()
+        };
+        let snapshot = unavailable_with_setup_hint(
+            Provider::Claude,
+            Some(&setup),
+            Some("some transport error"),
+        );
+        let message = snapshot.message.as_deref().unwrap_or_default();
+        assert!(message.contains("present but empty"), "{message}");
+        assert!(!message.contains("some transport error"), "{message}");
+    }
+
+    #[test]
     fn setup_state_record_is_not_treated_as_a_session() {
         let output = concat!(
             "__GPUTERM_AGENT_FILE__\tclaude\tsetup-state\n",
@@ -3871,6 +3898,60 @@ mod tests {
         assert_eq!(session.cost_usd, Some(1.25));
         assert_eq!(session.context_used_tokens, Some(150));
         assert!(sessions.iter().any(|entry| entry.account_scope));
+    }
+
+    #[test]
+    fn no_windows_command_is_ever_sent_inline_past_the_cmd_exe_limit() {
+        use crate::ssh::system_monitor::{
+            windows_encoded_command, windows_script_needs_upload, WINDOWS_CMD_EXE_LIMIT,
+        };
+
+        // This is the invariant that was silently violated: base64 of UTF-16LE
+        // inflates a script about 2.7x, so the all-providers metadata scrape
+        // reached roughly 18,000 characters against cmd.exe's 8,191 limit and
+        // the whole scrape failed, leaving the card with no model and no quota.
+        let mut scripts = vec![("process list".to_string(), WINDOWS_PROCESS_COMMAND.to_string())];
+        let providers = [Provider::Claude, Provider::Codex, Provider::Agy];
+        for mask in 1..(1 << providers.len()) {
+            let combination = providers
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| mask & (1 << index) != 0)
+                .map(|(_, provider)| *provider)
+                .collect::<HashSet<_>>();
+            let label = combination
+                .iter()
+                .map(|provider| provider.key())
+                .collect::<Vec<_>>()
+                .join("+");
+            scripts.push((label, metadata_command(RemoteOs::Windows, &combination)));
+        }
+
+        for (label, script) in scripts {
+            if windows_script_needs_upload(&script) {
+                // Delivered by path, so its size no longer matters.
+                continue;
+            }
+            let wire = windows_encoded_command(&script).len();
+            assert!(
+                wire <= WINDOWS_CMD_EXE_LIMIT,
+                "{label} would be sent inline at {wire} characters, past cmd.exe's {WINDOWS_CMD_EXE_LIMIT}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_all_providers_metadata_scrape_is_uploaded_rather_than_inlined() {
+        use crate::ssh::system_monitor::windows_script_needs_upload;
+
+        // The combination the reporting user actually runs on Windows.
+        let script = metadata_command(
+            RemoteOs::Windows,
+            &HashSet::from([Provider::Claude, Provider::Codex, Provider::Agy]),
+        );
+        assert!(windows_script_needs_upload(&script));
+        // Process detection stays inline: it is small and runs every poll.
+        assert!(!windows_script_needs_upload(WINDOWS_PROCESS_COMMAND));
     }
 
     #[test]

@@ -16,8 +16,11 @@ use base64::Engine as _;
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use ssh2::Session;
+use std::collections::hash_map::DefaultHasher;
 use std::ffi::OsString;
-use std::io::Read;
+use std::hash::{Hash, Hasher};
+use std::io::{Read, Write};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1319,16 +1322,192 @@ fn windows_local_script(script: &str) -> String {
 /// it survives whichever default shell the OpenSSH server is configured with.
 /// Windows has no `timeout`/`exit 124` equivalent; the libssh2 session
 /// timeout bounds the call like the macOS no-`timeout` fallback branch.
+/// Joins an SFTP path. SFTP always uses forward slashes, including against
+/// Windows OpenSSH.
+pub(crate) fn remote_join(base: impl AsRef<Path>, child: &str) -> String {
+    let base = base.as_ref().to_string_lossy().replace('\\', "/");
+    let base = base.trim_end_matches('/');
+    format!("{}/{}", base, child)
+}
+
+/// Converts an SFTP path to the form the host's own tools expect. Windows
+/// OpenSSH reports `/C:/Users/...`, but a `-File` argument needs `C:/Users/...`.
+pub(crate) fn native_remote_path(path: &str) -> String {
+    let bytes = path.as_bytes();
+    if bytes.len() > 2 && bytes[0] == b'/' && bytes[2] == b':' {
+        return path[1..].to_string();
+    }
+    path.to_string()
+}
+
+/// Writes a remote file through a temporary sibling, so a failed transfer cannot
+/// leave a truncated or empty file where a working one was.
+///
+/// The rename needs a fallback because `ssh2::Sftp::rename` can never overwrite:
+/// libssh2 pins SFTP to version 3 (`libssh2_sftp.h`, `LIBSSH2_SFTP_VERSION 3`)
+/// and only sends the rename flags field at version 5 or later (`sftp.c`), so
+/// `RenameFlags::OVERWRITE` is never transmitted to any server and a rename onto
+/// an existing path fails with `SSH_FX_FAILURE`. OpenSSH's atomic
+/// `posix-rename@openssh.com` extension exists in libssh2 but is not bound by
+/// `libssh2-sys`, and `ssh2::Sftp` keeps its raw handle private, so unlinking
+/// first is the only route. The complete contents are already on the remote
+/// before the destination is touched, which is the property that matters.
+pub(crate) fn write_remote_file_atomically(
+    sftp: &ssh2::Sftp,
+    path: &str,
+    contents: &[u8],
+) -> Result<(), String> {
+    let temporary = format!("{}.gputerm-new", path);
+    {
+        let mut file = sftp
+            .create(Path::new(&temporary))
+            .map_err(|error| format!("failed to write {}: {}", temporary, error))?;
+        file.write_all(contents)
+            .map_err(|error| format!("failed to write {}: {}", temporary, error))?;
+    }
+
+    if sftp
+        .rename(Path::new(&temporary), Path::new(path), None)
+        .is_ok()
+    {
+        return Ok(());
+    }
+    // Absent is fine; this only clears the way for the retry.
+    let _ = sftp.unlink(Path::new(path));
+    sftp.rename(Path::new(&temporary), Path::new(path), None)
+        .map_err(|error| {
+            // The temporary file is deliberately left in place: it holds the
+            // complete contents, so naming it lets the user recover.
+            format!(
+                "failed to replace {}: {}. The new file is at {}",
+                path, error, temporary
+            )
+        })
+}
+
+/// Ceiling for an `-EncodedCommand` wire command.
+///
+/// Windows OpenSSH runs exec requests through `cmd.exe` unless an administrator
+/// changed `DefaultShell`, and cmd.exe's command line stops at 8,191 characters.
+/// Base64 of UTF-16LE inflates a script by roughly 2.7x, so the all-providers
+/// agent metadata scrape reached about 18,000 characters and failed outright,
+/// while the Claude-only form sat at 98% of the limit. Scripts above this bound
+/// are uploaded and run by path instead, which keeps the command near 120
+/// characters no matter how large the script grows.
+/// cmd.exe's hard command-line ceiling, which bounds anything sent inline.
+pub(crate) const WINDOWS_CMD_EXE_LIMIT: usize = 8_191;
+
+/// Inline commands stay well inside the ceiling so that growing a script does
+/// not silently walk up to it again.
+const WINDOWS_ENCODED_COMMAND_LIMIT: usize = WINDOWS_CMD_EXE_LIMIT * 3 / 4;
+
 fn run_windows_remote_command(session: &Session, script: &str) -> Result<String, String> {
-    let wrapped = format!(
-        "powershell.exe -NoProfile -NonInteractive -EncodedCommand {}",
-        encode_powershell_script(script)
-    );
+    let wrapped = match windows_remote_invocation(session, script) {
+        WindowsInvocation::Encoded(command) => command,
+        WindowsInvocation::ScriptFile(path) => format!(
+            "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"",
+            path
+        ),
+    };
     let (stdout, stderr, exit_status) = exec_remote(session, &wrapped)?;
     if exit_status != 0 {
         return Err(non_zero_exit_error(&stderr, exit_status));
     }
     Ok(stdout)
+}
+
+/// The full wire command for the inline form.
+pub(crate) fn windows_encoded_command(script: &str) -> String {
+    format!(
+        "powershell.exe -NoProfile -NonInteractive -EncodedCommand {}",
+        encode_powershell_script(script)
+    )
+}
+
+/// Whether a script is too large to send inline and must be uploaded instead.
+pub(crate) fn windows_script_needs_upload(script: &str) -> bool {
+    windows_encoded_command(script).len() > WINDOWS_ENCODED_COMMAND_LIMIT
+}
+
+pub(crate) enum WindowsInvocation {
+    Encoded(String),
+    ScriptFile(String),
+}
+
+/// Chooses how to deliver a PowerShell script, preferring the single-round-trip
+/// encoded form and falling back to it whenever the upload is not possible, so
+/// this can never do worse than sending the command inline.
+fn windows_remote_invocation(session: &Session, script: &str) -> WindowsInvocation {
+    let encoded = windows_encoded_command(script);
+    if !windows_script_needs_upload(script) {
+        return WindowsInvocation::Encoded(encoded);
+    }
+    match upload_windows_script(session, script) {
+        Ok(path) => WindowsInvocation::ScriptFile(path),
+        Err(_) => WindowsInvocation::Encoded(encoded),
+    }
+}
+
+/// Uploads the script under a content-addressed name and returns the path to run.
+///
+/// The name is derived from the contents, so an unchanged script is uploaded once
+/// and later polls only pay for one `stat`.
+fn upload_windows_script(session: &Session, script: &str) -> Result<String, String> {
+    let sftp = session
+        .sftp()
+        .map_err(|error| format!("SFTP unavailable for script upload: {}", error))?;
+    let home = sftp
+        .realpath(Path::new("."))
+        .map_err(|error| format!("failed to resolve the remote home directory: {}", error))?;
+    let directory = remote_join(remote_join(&home, ".gputerm"), "scripts");
+
+    let mut hasher = DefaultHasher::new();
+    script.hash(&mut hasher);
+    let path = remote_join(&directory, &format!("gputerm-{:016x}.ps1", hasher.finish()));
+
+    // A UTF-8 BOM makes `-File` read the script unambiguously, keeping non-ASCII
+    // content intact.
+    let mut bytes = Vec::with_capacity(script.len() + 3);
+    bytes.extend_from_slice(&[0xef, 0xbb, 0xbf]);
+    bytes.extend_from_slice(script.as_bytes());
+
+    // The name is content-addressed, so a matching size means this exact script
+    // is already there. Repeat polls then cost one realpath and one stat.
+    let already_uploaded = sftp
+        .stat(Path::new(&path))
+        .map(|stat| stat.size == Some(bytes.len() as u64))
+        .unwrap_or(false);
+    if !already_uploaded {
+        for level in [remote_join(&home, ".gputerm"), directory.clone()] {
+            if sftp.stat(Path::new(&level)).is_err() {
+                sftp.mkdir(Path::new(&level), 0o700)
+                    .map_err(|error| format!("failed to create {}: {}", level, error))?;
+            }
+        }
+        write_remote_file_atomically(&sftp, &path, &bytes)?;
+        prune_windows_scripts(&sftp, &directory);
+    }
+    Ok(native_remote_path(&path))
+}
+
+/// Drops uploaded scripts that no current GpuTerm version asks for any more.
+fn prune_windows_scripts(sftp: &ssh2::Sftp, directory: &str) {
+    let Ok(entries) = sftp.readdir(Path::new(directory)) else {
+        return;
+    };
+    let cutoff = now_epoch_seconds().saturating_sub(7 * 24 * 60 * 60);
+    for (path, stat) in entries {
+        if stat.mtime.is_some_and(|mtime| mtime < cutoff) {
+            let _ = sftp.unlink(&path);
+        }
+    }
+}
+
+fn now_epoch_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
 }
 
 fn encode_powershell_script(script: &str) -> String {
@@ -1633,6 +1812,16 @@ fn timestamp() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn windows_scripts_switch_to_upload_only_once_they_outgrow_the_inline_form() {
+        // A short script stays inline: one round trip, no remote file.
+        assert!(!windows_script_needs_upload("Write-Output 'hi'"));
+        // The encoded form inflates by about 2.7x, so this crosses the bound.
+        let large = "Write-Output 'x'\n".repeat(400);
+        assert!(windows_encoded_command(&large).len() > WINDOWS_ENCODED_COMMAND_LIMIT);
+        assert!(windows_script_needs_upload(&large));
+    }
+
     use super::*;
 
     #[test]

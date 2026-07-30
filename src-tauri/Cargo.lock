@@ -1271,7 +1271,7 @@ dependencies = [
 
 [[package]]
 name = "gputerm"
-version = "1.2.2-beta"
+version = "1.2.3-beta"
 dependencies = [
  "aes-gcm",
  "argon2",
