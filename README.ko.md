@@ -6,9 +6,9 @@
 
 터미널, 파일 전송, 그리고 CPU · RAM · 디스크 · GPU(NVIDIA / AMD / Intel / Apple Silicon) 실시간 모니터링 — 하나의 네이티브 창에서.
 
-[![Release](https://img.shields.io/github/v/release/fortranmentis/GPUTERM?include_prereleases&label=release&color=2ea44f)](https://github.com/fortranmentis/GPUTERM/releases)
+[![Release](https://img.shields.io/github/v/release/fortranmentis/GPUTERM?include_prereleases&label=release&color=2ea44f&cacheSeconds=3600)](https://github.com/fortranmentis/GPUTERM/releases)
 [![Release Build](https://github.com/fortranmentis/GPUTERM/actions/workflows/release.yml/badge.svg)](https://github.com/fortranmentis/GPUTERM/actions/workflows/release.yml)
-[![Downloads](https://img.shields.io/github/downloads/fortranmentis/GPUTERM/total?color=8b5cf6)](https://github.com/fortranmentis/GPUTERM/releases)
+[![Downloads](https://img.shields.io/github/downloads/fortranmentis/GPUTERM/total?color=8b5cf6&cacheSeconds=3600)](https://github.com/fortranmentis/GPUTERM/releases)
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue)](./LICENSE)
 [![Built with Tauri](https://img.shields.io/badge/Tauri-2-FFC131?logo=tauri&logoColor=white)](https://tauri.app)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white)](https://react.dev)
@@ -24,7 +24,7 @@
 
 원격 GPU 서버에서 작업하다 보면 SSH 클라이언트, SFTP 도구, 그리고 `watch nvidia-smi`를 띄워둔 터미널까지 세 개의 창을 오가게 됩니다. **GpuTerm은 이 셋을 하나로 합쳤습니다.** 한 번 접속하면 xterm.js 터미널, 드래그 앤 드롭 SFTP 브라우저, 그리고 CPU·메모리·디스크·로그인 사용자·GPU(NVIDIA·AMD·Intel·Apple Silicon, Linux/macOS/Windows 모두)를 폴링하는 실시간 텔레메트리 바가 함께 열립니다. 모니터링은 별도 SSH 채널로 동작하므로 셸 작업을 방해하지 않습니다.
 
-서버에는 아무것도 설치하지 않습니다: 모든 지표는 표준 명령(`nvidia-smi`, `/proc`, `sysctl`, PowerShell CIM 등)을 SSH로 1회씩 실행해 수집하며, 핵심 지표에는 root/관리자 권한도 필요 없습니다.
+서버에 닿는 것이 거의 없습니다: 모든 지표는 표준 명령(`nvidia-smi`, `/proc`, `sysctl`, PowerShell CIM 등)을 SSH로 1회씩 실행해 수집하며, 핵심 지표에는 root/관리자 권한도 필요 없습니다. [예외 세 가지](#faq)는 크기가 큰 Windows 수집기 스크립트, 선택 기능인 Claude status line 헬퍼, 그리고 원격 명령을 아예 실행하지 않는 LLM 런타임 모니터링입니다.
 
 > **상태:** 베타. 모든 [릴리스](https://github.com/fortranmentis/GPUTERM/releases)에 Windows·macOS·Linux 설치 파일이 첨부되며, 아래 안내에 따라 소스에서 직접 빌드할 수도 있습니다.
 
