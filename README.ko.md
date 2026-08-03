@@ -417,7 +417,11 @@ src-tauri/src/ssh/      Rust 백엔드
 <details>
 <summary><b>서버에 뭔가 설치되나요?</b></summary>
 
-아니요. 모든 지표는 읽기 전용 표준 명령(`nvidia-smi`, `cat /proc/...`, `sysctl`, PowerShell `Get-CimInstance` 등)을 SSH로 1회씩 실행해 수집합니다. 원격 호스트에 아무것도 복사·설치되지 않고, 흔적도 남지 않습니다.
+거의 없고, 사용자가 요청하지 않으면 절대 없습니다. 모든 지표는 읽기 전용 표준 명령(`nvidia-smi`, `cat /proc/...`, `sysctl`, PowerShell `Get-CimInstance` 등)을 SSH로 1회씩 실행해 수집합니다. 예외는 아래 세 가지뿐입니다.
+
+- **LLM 런타임 모니터링은 원격 명령을 아예 실행하지 않습니다.** 등록한 주소로 내 PC에서 HTTP GET만 보냅니다. SSH 터널을 쓰면 포워딩 채널을 열지만 호스트에서 무언가를 실행하지는 않습니다.
+- **Windows AI DASH는 수집기 스크립트를 업로드할 수 있습니다.** PowerShell 명령이 `cmd.exe` 명령줄 한도를 넘으면 접속 사용자의 `~/.gputerm/scripts`에 내용 기반 이름의 `.ps1`을 쓰고 `-File`로 실행합니다. 그 파일에는 GpuTerm의 수집기 코드만 들어 있고(자격증명·수집 결과 없음), 7일간 사용되지 않으면 자동 삭제됩니다.
+- **Claude Code 사용량 모니터링은 status line 스크립트를 설치하지만, Set up을 눌렀을 때만 그렇습니다.** 모니터링 대상 호스트의 `~/.claude`에 `gputerm-claude-statusline.*`을 써서 Claude가 자기 한도를 공개하게 합니다. 그 외에는 아무것도 복사하지 않으며, 다른 지표 수집은 이 파일에 의존하지 않습니다.
 
 </details>
 

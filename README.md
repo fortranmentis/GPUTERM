@@ -424,7 +424,11 @@ Pushing a `v*` tag runs the [Release Build workflow](.github/workflows/release.y
 <details>
 <summary><b>Does GpuTerm install anything on my servers?</b></summary>
 
-No. Every metric is collected by running one-shot, read-only standard commands over SSH (`nvidia-smi`, `cat /proc/...`, `sysctl`, PowerShell `Get-CimInstance`, …). Nothing is copied to, installed on, or left behind on the remote host.
+Almost never, and never without you asking. Every metric comes from one-shot, read-only standard commands over SSH (`nvidia-smi`, `cat /proc/...`, `sysctl`, PowerShell `Get-CimInstance`, …). There are three exceptions, all narrow:
+
+- **LLM runtime monitoring runs no remote command at all.** It issues HTTP GETs from your machine to the addresses you register. With an SSH tunnel it opens a forwarded channel, still without executing anything on the host.
+- **Windows AI DASH may upload a collector script.** When a PowerShell command exceeds the `cmd.exe` command-line limit, GpuTerm writes a content-addressed `.ps1` under the connected user's `~/.gputerm/scripts` and runs it with `-File`. Those files contain only GpuTerm's collector code — no credentials, no collected output — and are pruned after seven days without use.
+- **Claude Code quota monitoring installs a status-line script, but only when you press Set up.** It writes `gputerm-claude-statusline.*` into `~/.claude` on the monitored host so Claude can publish its own limits. Nothing else is copied, and no other metric depends on it.
 
 </details>
 
