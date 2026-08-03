@@ -3,6 +3,7 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
   Activity,
   Bot,
+  Boxes,
   Cpu,
   Gauge,
   HardDrive,
@@ -22,11 +23,13 @@ import {
   type RefObject,
 } from "react";
 import { AgentUsagePopover } from "./AgentUsagePopover";
+import { LlmRuntimePopover } from "./LlmRuntimePopover";
 import { CpuUsagePopover } from "./CpuUsagePopover";
 import { DiskUsagePopover } from "./DiskUsagePopover";
 import { GpuUsagePopover } from "./GpuUsagePopover";
 import { MemoryUsagePopover } from "./MemoryUsagePopover";
 import { UsersPopover } from "./UsersPopover";
+import { useLlmStore } from "../stores/llmStore";
 import {
   selectActiveTelemetry,
   selectIsActiveConnected,
@@ -57,7 +60,13 @@ import {
   formatWatts,
 } from "../utils/format";
 
-type OpenResource = ResourceDetailType | "disk" | "users" | "agents" | null;
+type OpenResource =
+  | ResourceDetailType
+  | "disk"
+  | "users"
+  | "agents"
+  | "llm"
+  | null;
 
 const DETAIL_TITLES: Record<Exclude<OpenResource, null>, string> = {
   cpu: "CPU details",
@@ -66,6 +75,7 @@ const DETAIL_TITLES: Record<Exclude<OpenResource, null>, string> = {
   disk: "Disks",
   users: "Logged-in users",
   agents: "AI DASH",
+  llm: "LLM runtimes",
 };
 
 type RemoteTelemetryBarProps = {
@@ -80,6 +90,11 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
   const settings = useSessionStore((state) => state.telemetrySettings);
   const setTelemetrySettings = useSessionStore((state) => state.setTelemetrySettings);
   const setMessage = useSessionStore((state) => state.setMessage);
+  // LLM runtimes are polled independently of any SSH session, so this card and
+  // its popover live outside the `connected && telemetry` gate below.
+  const llmTelemetry = useLlmStore((state) => state.telemetry);
+  const llmInstances = useLlmStore((state) => state.instances);
+  const setLlmInstances = useLlmStore((state) => state.setInstances);
   const [openResource, setOpenResource] = useState<OpenResource>(null);
   const [resourceDetails, setResourceDetails] = useState<ResourceDetails | null>(null);
   const [detailsLoading, setDetailsLoading] = useState(false);
@@ -92,6 +107,7 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
   const diskButtonRef = useRef<HTMLButtonElement | null>(null);
   const usersButtonRef = useRef<HTMLButtonElement | null>(null);
   const agentsButtonRef = useRef<HTMLButtonElement | null>(null);
+  const llmButtonRef = useRef<HTMLButtonElement | null>(null);
   const [ignoreDraft, setIgnoreDraft] = useState(settings.diskIgnoreFsTypes.join(", "));
 
   useEffect(() => {
@@ -115,6 +131,7 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
     () => [...new Set((telemetry?.users ?? []).map((session) => session.user))],
     [telemetry?.users],
   );
+  const llmSummary = llmTelemetry?.summary ?? null;
   const agentQuotaRows = useMemo(
     () => createAgentQuotaSummary(telemetry?.agents ?? []),
     [telemetry?.agents],
@@ -122,7 +139,8 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
 
   useEffect(() => {
     if (!connected) {
-      setOpenResource(null);
+      // The LLM card does not depend on a session, so it stays open.
+      setOpenResource((current) => (current === "llm" ? current : null));
     } else if (
       !showSystem &&
       ["cpu", "memory", "disk", "users", "agents"].includes(openResource ?? "")
@@ -140,7 +158,8 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
       !openResource ||
       openResource === "disk" ||
       openResource === "users" ||
-      openResource === "agents"
+      openResource === "agents" ||
+      openResource === "llm"
     ) {
       setResourceDetails(null);
       setDetailsLoading(false);
@@ -220,10 +239,13 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
   };
 
   const popOut = async (resource: Exclude<OpenResource, null>) => {
-    if (!activeSessionId) {
+    // Every other detail window belongs to one SSH session; the LLM window has
+    // no session at all, so it gets a single shared label.
+    const sessionScoped = resource !== "llm";
+    if (sessionScoped && !activeSessionId) {
       return;
     }
-    const label = `detail-${resource}-${activeSessionId}`;
+    const label = sessionScoped ? `detail-${resource}-${activeSessionId}` : "detail-llm";
     try {
       const existing = await WebviewWindow.getByLabel(label);
       if (existing) {
@@ -232,7 +254,9 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
         return;
       }
       const detailWindow = new WebviewWindow(label, {
-        url: `/?window=detail&session=${encodeURIComponent(activeSessionId)}&resource=${resource}`,
+        url: sessionScoped
+          ? `/?window=detail&session=${encodeURIComponent(activeSessionId ?? "")}&resource=${resource}`
+          : `/?window=detail&resource=llm`,
         title: `${DETAIL_TITLES[resource]} — ${telemetry?.hostname ?? "GpuTerm"}`,
         width: 780,
         height: 600,
@@ -477,6 +501,53 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
             <span>{telemetry.errors.agents ?? "No AI agents running"}</span>
           )}
         </TelemetryButton>
+      )}
+
+      <TelemetryButton
+        buttonRef={llmButtonRef}
+        title="LLM RUNTIME"
+        icon={<Boxes size={16} />}
+        titleAccessory={
+          llmSummary && llmSummary.registered > 0 ? (
+            <span className="agent-summary-session-count">
+              {llmSummary.registered}{" "}
+              {llmSummary.registered === 1 ? "instance" : "instances"}
+            </span>
+          ) : null
+        }
+        className="llm-summary-section"
+        expanded={openResource === "llm"}
+        onClick={() => openDetail("llm")}
+      >
+        {llmSummary && llmSummary.registered > 0 ? (
+          <>
+            <strong>
+              {llmSummary.normal} normal / {llmSummary.warning} attention /{" "}
+              {llmSummary.error} error
+            </strong>
+            <span>
+              {llmSummary.models}{" "}
+              {llmSummary.models === 1 ? "model" : "models"} running or served
+            </span>
+            <span>
+              vLLM {formatNumber(llmSummary.vllmRequestsRunning ?? 0, 0)} running
+              / {formatNumber(llmSummary.vllmRequestsWaiting ?? 0, 0)} waiting
+            </span>
+          </>
+        ) : (
+          <span>No Ollama or vLLM instance registered</span>
+        )}
+      </TelemetryButton>
+
+      {openResource === "llm" && (
+        <LlmRuntimePopover
+          telemetry={llmTelemetry}
+          instances={llmInstances}
+          onInstancesChange={setLlmInstances}
+          anchorRef={llmButtonRef}
+          onClose={() => setOpenResource(null)}
+          onPopOut={() => void popOut("llm")}
+        />
       )}
 
       {openResource === "cpu" && (

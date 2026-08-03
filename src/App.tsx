@@ -10,8 +10,10 @@ import { RemoteTelemetryBar } from "./components/RemoteTelemetryBar";
 import { SessionSidebar } from "./components/SessionSidebar";
 import { SftpBrowser } from "./components/SftpBrowser";
 import { TerminalPane } from "./components/TerminalPane";
+import { useLlmStore } from "./stores/llmStore";
 import { useSessionStore } from "./stores/sessionStore";
 import type { RemoteTelemetry, TelemetrySettings } from "./types/gpu";
+import type { LlmInstance, LlmTelemetry } from "./types/llm";
 import type {
   SessionProfile,
   SftpProgressPayload,
@@ -42,6 +44,8 @@ function App() {
   const showSession = useSessionStore((state) => state.showSession);
   const setSessionTelemetry = useSessionStore((state) => state.setSessionTelemetry);
   const setTelemetrySettings = useSessionStore((state) => state.setTelemetrySettings);
+  const setLlmInstances = useLlmStore((state) => state.setInstances);
+  const setLlmTelemetry = useLlmStore((state) => state.setTelemetry);
   const [sftpWidth, setSftpWidth] = useState(initialSftpWidth);
   const [sidebarOpen, setSidebarOpen] = useState(
     () => localStorage.getItem(SIDEBAR_OPEN_STORAGE_KEY) !== "false",
@@ -91,7 +95,22 @@ function App() {
     invoke<TelemetrySettings>("get_telemetry_settings")
       .then(setTelemetrySettings)
       .catch(() => undefined);
-  }, [setMessage, setSessions, setTelemetrySettings]);
+    invoke<LlmInstance[]>("list_llm_instances")
+      .then(setLlmInstances)
+      // A config file that cannot be read must not look like "no instances".
+      .catch((error) => setMessage({ kind: "error", text: String(error) }));
+    // The poller only emits when something changes, so the first paint reads
+    // whatever it has already collected rather than waiting for a change.
+    invoke<LlmTelemetry | null>("get_llm_telemetry")
+      .then((payload) => payload && setLlmTelemetry(payload))
+      .catch(() => undefined);
+  }, [
+    setLlmInstances,
+    setLlmTelemetry,
+    setMessage,
+    setSessions,
+    setTelemetrySettings,
+  ]);
 
   useEffect(() => {
     // Closing the main window must take the detached detail windows with it;
@@ -123,6 +142,16 @@ function App() {
 
     listen<RemoteTelemetry>("remote-telemetry", (event) => {
       setSessionTelemetry(event.payload.sessionId, event.payload);
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+      } else {
+        unlisteners.push(unlisten);
+      }
+    });
+
+    listen<LlmTelemetry>("llm-runtime-telemetry", (event) => {
+      setLlmTelemetry(event.payload);
     }).then((unlisten) => {
       if (disposed) {
         unlisten();
@@ -199,6 +228,7 @@ function App() {
   }, [
     removeTerminalPane,
     showSession,
+    setLlmTelemetry,
     setMessage,
     setSessionTelemetry,
   ]);

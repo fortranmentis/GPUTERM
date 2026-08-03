@@ -1,3 +1,5 @@
+use crate::llm::instance::LlmInstance;
+use crate::llm::monitor::MonitorHandle;
 use crate::ssh::agent_monitor::AgentQuotaHistories;
 use crate::ssh::credentials::{CredentialStore, CredentialVaultStatus, SecureCredentialStore};
 use crate::ssh::system_monitor::{RemoteOs, SystemMonitorSettings};
@@ -45,6 +47,11 @@ pub struct AppState {
     pub agent_quota_refreshes: AgentQuotaRefreshes,
     /// In-memory AGY quota history keyed by monitored host/account identity.
     pub agent_quota_histories: AgentQuotaHistories,
+    /// Registered Ollama/vLLM instances. Unlike everything above this is not
+    /// keyed by SSH session: an LLM runtime is a standalone HTTP endpoint.
+    pub llm_instances: Arc<Mutex<Vec<LlmInstance>>>,
+    /// Latest LLM runtime telemetry plus the poller's refresh trigger.
+    pub llm_monitor: Arc<MonitorHandle>,
 }
 
 #[derive(Clone)]
@@ -630,6 +637,19 @@ fn run_tunnel_forwarder(listener: TcpListener, mut channel: Channel, stop: Arc<A
             }
         }
     };
+
+    pump_channel_socket(socket, channel, &stop);
+}
+
+/// Pumps bytes between one loopback socket and one direct-tcpip channel until
+/// either side closes or the stop flag is set.
+///
+/// Both the session and the socket must already be nonblocking: a blocking read
+/// on a `Channel` holds the `Session` mutex across the syscall and would stall
+/// every other channel on the same connection.
+fn pump_channel_socket(socket: TcpStream, mut channel: Channel, stop: &AtomicBool) {
+    use std::sync::atomic::Ordering;
+
     if socket.set_nonblocking(true).is_err() {
         let _ = channel.close();
         return;
@@ -713,6 +733,369 @@ fn run_tunnel_forwarder(listener: TcpListener, mut channel: Channel, stop: Arc<A
     }
 
     let _ = channel.close();
+}
+
+// ---------------------------------------------------------------------------
+// Persistent local port forwarding
+//
+// Used by the LLM runtime monitor to poll a runtime bound to the remote host's
+// loopback. The ProxyJump path above forwards exactly one connection for the
+// length of a handshake; this one serves many, for as long as it is held.
+// ---------------------------------------------------------------------------
+
+/// `LIBSSH2_ERROR_EAGAIN`. The `ssh2` crate does not re-export it, and pulling
+/// in `libssh2-sys` directly for one integer is not worth it. The test below
+/// pins it against ssh2's own `io::ErrorKind::WouldBlock` mapping so a change
+/// in either place fails loudly.
+const LIBSSH2_ERROR_EAGAIN: i32 = -37;
+
+/// Simultaneous forwarded connections per instance.
+///
+/// One is the steady state; a second appears briefly when the runtime closes an
+/// idle keep-alive socket and the HTTP client dials a fresh one. Kept well below
+/// sshd's default `MaxSessions 10`, since one SSH connection hosts every
+/// forward for that host.
+const MAX_FORWARD_CONNECTIONS: usize = 4;
+
+/// Consecutive channel-open failures before a forwarder gives up.
+///
+/// A backstop for the case where the transport still answers a keepalive but
+/// channels cannot be opened (an sshd at its `MaxSessions`, for instance), so a
+/// forward can never be stuck alive-but-useless.
+const MAX_CONSECUTIVE_OPEN_FAILURES: u32 = 5;
+
+fn is_would_block(error: &ssh2::Error) -> bool {
+    matches!(error.code(), ssh2::ErrorCode::Session(code) if code == LIBSSH2_ERROR_EAGAIN)
+}
+
+/// Whether the SSH transport is still usable.
+///
+/// `keepalive_send` is the cheapest thing that actually touches the socket. On a
+/// nonblocking session it can report `EAGAIN`, which means the write is pending
+/// rather than impossible, so that counts as alive.
+fn session_alive(session: &Session) -> bool {
+    match session.keepalive_send() {
+        Ok(_) => true,
+        Err(error) => is_would_block(&error),
+    }
+}
+
+/// Opens a direct-tcpip channel on a **nonblocking** session.
+///
+/// This retry loop is the whole reason the function exists. The ProxyJump path
+/// opens its channel while the session is still blocking and so never sees
+/// `EAGAIN`; on a nonblocking session the very first call usually returns it.
+/// Treating that as a failure would leave a bound port that never serves
+/// anything — a silent dead tunnel rather than a visible error.
+fn open_direct_channel(
+    session: &Session,
+    host: &str,
+    port: u16,
+    deadline: Instant,
+) -> Result<Channel, String> {
+    let mut wait = Duration::from_millis(2);
+    loop {
+        match session.channel_direct_tcpip(host, port, None) {
+            Ok(channel) => return Ok(channel),
+            Err(error) if is_would_block(&error) => {
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "Timed out opening an SSH channel to {}:{}",
+                        host, port
+                    ));
+                }
+                thread::sleep(wait);
+                wait = (wait * 2).min(Duration::from_millis(20));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "SSH channel to {}:{} was refused: {}",
+                    host, port, error
+                ));
+            }
+        }
+    }
+}
+
+/// Clears an `AtomicBool` on every exit path, including a panic.
+struct FlagGuard(Arc<AtomicBool>);
+
+impl Drop for FlagGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Decrements a counter on every exit path, including a panic.
+struct CountGuard(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for CountGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A loopback port forwarded to `host:port` on the far side of an SSH
+/// connection, serving connections until dropped.
+pub struct PersistentForward {
+    pub local_port: u16,
+    stop: Arc<AtomicBool>,
+    alive: Arc<AtomicBool>,
+    hop_dead: Arc<AtomicBool>,
+    /// Keeps the SSH hop open for as long as the forward exists.
+    _connection: Arc<SshConnection>,
+}
+
+impl PersistentForward {
+    /// False once the forwarder thread has exited for any reason, so the caller
+    /// can rebuild rather than polling a port nothing is listening on.
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// True when the forwarder stopped because the SSH transport itself is gone.
+    ///
+    /// The distinction matters: rebuilding a forward on a dead connection would
+    /// succeed in binding a port and then fail every request forever, so the
+    /// caller has to know to reconnect rather than just re-forward.
+    pub fn hop_dead(&self) -> bool {
+        self.hop_dead.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Drop for PersistentForward {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Opens a connection dedicated to hosting port forwards.
+///
+/// Nonblocking mode is applied before returning and **must not be reversed**: a
+/// blocking read on any channel would hold the session mutex and stall every
+/// other forward on the same connection. For the same reason this must never be
+/// an `ops_sessions` entry or a terminal's session, both of which are used in
+/// blocking mode.
+pub fn open_forwarding_session(target: &SshTarget) -> Result<Arc<SshConnection>, String> {
+    let connection = open_ssh_session(target)?;
+    connection.session.set_keepalive(true, 15);
+    connection.set_blocking(false)?;
+    Ok(Arc::new(connection))
+}
+
+/// Binds a loopback listener and starts forwarding it to `remote_host:remote_port`.
+///
+/// Returns as soon as the port is bound. The first channel is opened by the
+/// forwarder thread on the first accepted socket, so this never waits on the
+/// network.
+pub fn open_persistent_forward(
+    connection: &Arc<SshConnection>,
+    remote_host: &str,
+    remote_port: u16,
+) -> Result<PersistentForward, String> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|error| format!("Failed to open a local tunnel socket: {}", error))?;
+    let local_port = listener
+        .local_addr()
+        .map_err(|error| format!("Failed to read the local tunnel address: {}", error))?
+        .port();
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| format!("Failed to configure the local tunnel socket: {}", error))?;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let alive = Arc::new(AtomicBool::new(true));
+    let hop_dead = Arc::new(AtomicBool::new(false));
+    let thread_connection = Arc::clone(connection);
+    let thread_stop = Arc::clone(&stop);
+    let thread_alive = Arc::clone(&alive);
+    let thread_hop_dead = Arc::clone(&hop_dead);
+    let host = remote_host.to_string();
+    thread::spawn(move || {
+        run_persistent_forward(
+            listener,
+            thread_connection,
+            host,
+            remote_port,
+            thread_stop,
+            thread_alive,
+            thread_hop_dead,
+        )
+    });
+
+    Ok(PersistentForward {
+        local_port,
+        stop,
+        alive,
+        hop_dead,
+        _connection: Arc::clone(connection),
+    })
+}
+
+/// Accepts loopback connections until stopped, opening one direct-tcpip channel
+/// per connection and pumping each on its own thread.
+fn run_persistent_forward(
+    listener: TcpListener,
+    connection: Arc<SshConnection>,
+    remote_host: String,
+    remote_port: u16,
+    stop: Arc<AtomicBool>,
+    alive: Arc<AtomicBool>,
+    hop_dead: Arc<AtomicBool>,
+) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let _alive = FlagGuard(alive);
+    let live = Arc::new(AtomicUsize::new(0));
+    let mut open_failures: u32 = 0;
+
+    while !stop.load(Ordering::SeqCst) {
+        let socket = match listener.accept() {
+            Ok((socket, _)) => socket,
+            Err(ref error) if error.kind() == ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(3));
+                continue;
+            }
+            // The listener itself failed; nothing can be served any more.
+            Err(_) => break,
+        };
+
+        if live.load(Ordering::SeqCst) >= MAX_FORWARD_CONNECTIONS {
+            // Refuse rather than queue: the client retries, and an unbounded
+            // channel count would eventually hit sshd's MaxSessions.
+            drop(socket);
+            continue;
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let channel =
+            match open_direct_channel(&connection.session, &remote_host, remote_port, deadline) {
+                Ok(channel) => {
+                    open_failures = 0;
+                    channel
+                }
+                Err(_) => {
+                    drop(socket);
+                    open_failures += 1;
+
+                    // A refusal by the runtime and a dead SSH hop look the same
+                    // from here, but they need opposite responses: the first is
+                    // per-connection, the second means this forwarder can never
+                    // serve anything again. Without distinguishing them a dead
+                    // hop leaves the accept loop running, the port bound, and
+                    // the caller polling a tunnel that will always fail.
+                    if !session_alive(&connection.session) {
+                        hop_dead.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    if open_failures >= MAX_CONSECUTIVE_OPEN_FAILURES {
+                        // The transport answers but channels cannot be opened.
+                        // Give up on this forward without condemning the hop.
+                        break;
+                    }
+                    continue;
+                }
+            };
+
+        live.fetch_add(1, Ordering::SeqCst);
+        let pump_stop = Arc::clone(&stop);
+        let pump_live = Arc::clone(&live);
+        thread::spawn(move || {
+            let _count = CountGuard(pump_live);
+            pump_channel_socket(socket, channel, &pump_stop);
+        });
+    }
+}
+
+/// The saved profiles, for callers outside this module that need names or ids.
+pub fn list_profiles() -> Result<Vec<SessionProfile>, String> {
+    read_profiles()
+}
+
+/// Whether every hop to `target` already has a trusted key on file.
+///
+/// A pure file read, so a background thread can decide *before* opening a socket
+/// whether the connect could need the interactive host-key prompt it has no way
+/// to show. It cannot detect a key *mismatch* — that needs the live key — which
+/// correctly still surfaces from `verify_known_host` with its own loud message.
+pub fn host_keys_trusted(target: &SshTarget) -> bool {
+    let Ok(known_hosts) = read_known_hosts() else {
+        return false;
+    };
+    let mut hop = Some(target);
+    while let Some(current) = hop {
+        let key = format!("{}:{}", current.host.to_lowercase(), current.port);
+        if !known_hosts.contains_key(&key) {
+            return false;
+        }
+        hop = current.proxy.as_deref();
+    }
+    true
+}
+
+/// Builds a target for a saved profile, whether or not it is connected.
+///
+/// Prefers the live connection's profile when there is one, so a reconnecting
+/// poller uses the same resolved chain the terminal did.
+pub fn target_for_profile(
+    active: &Arc<Mutex<HashMap<String, ActiveConnection>>>,
+    credentials: &SecureCredentialStore,
+    profile_id: &str,
+) -> Result<SshTarget, String> {
+    let live = active
+        .lock()
+        .ok()
+        .and_then(|connections| connections.get(profile_id).map(|item| item.profile.clone()));
+
+    let profile = match live {
+        Some(profile) => profile,
+        None => read_profiles()?
+            .into_iter()
+            .find(|profile| profile.id == profile_id)
+            .ok_or_else(|| "That SSH session profile no longer exists".to_string())?,
+    };
+
+    if profile.is_local {
+        return Err("A local terminal profile cannot be used as a tunnel".to_string());
+    }
+
+    let password_for = |id: &str| credentials.get_password(id).ok().flatten();
+    let proxy = resolve_proxy_chain(profile.proxy_jump_id.as_deref(), &password_for)?;
+    Ok(SshTarget {
+        session_id: profile.id.clone(),
+        host: profile.host,
+        port: profile.port,
+        username: profile.username,
+        password: credentials.get_password(profile_id).ok().flatten(),
+        private_key_path: profile.private_key_path,
+        proxy,
+    })
+}
+
+/// A stable description of everything that affects where a connection lands.
+///
+/// The password is deliberately excluded: unlocking the vault must not tear down
+/// a connection that is already working.
+pub fn target_signature(target: &SshTarget) -> String {
+    let mut signature = format!(
+        "{}@{}:{}|{}",
+        target.username,
+        target.host.to_lowercase(),
+        target.port,
+        target.private_key_path.as_deref().unwrap_or("-")
+    );
+    let mut hop = target.proxy.as_deref();
+    while let Some(current) = hop {
+        let _ = write!(
+            signature,
+            ">{}@{}:{}",
+            current.username,
+            current.host.to_lowercase(),
+            current.port
+        );
+        hop = current.proxy.as_deref();
+    }
+    signature
 }
 
 fn authenticate(session: &Session, target: &SshTarget) -> Result<(), String> {
@@ -1032,6 +1415,72 @@ mod tests {
                 .map(|(key_type, fp)| (key_type.to_string(), fp.to_string()))
                 .collect(),
         )
+    }
+
+    #[test]
+    fn the_eagain_constant_matches_what_ssh2_itself_calls_would_block() {
+        // `open_direct_channel`'s retry loop hinges on this number. If ssh2 ever
+        // changes it, a tunnel would bind a port and silently never serve, so
+        // pin it against ssh2's own io::ErrorKind mapping rather than trusting
+        // the literal.
+        let eagain = ssh2::Error::from_errno(ssh2::ErrorCode::Session(LIBSSH2_ERROR_EAGAIN));
+        assert_eq!(
+            std::io::Error::from(ssh2::Error::from_errno(ssh2::ErrorCode::Session(
+                LIBSSH2_ERROR_EAGAIN
+            )))
+            .kind(),
+            ErrorKind::WouldBlock
+        );
+        assert!(is_would_block(&eagain));
+
+        // A real failure must not be mistaken for backpressure, or the loop
+        // would spin until its deadline instead of reporting the refusal.
+        let refused = ssh2::Error::from_errno(ssh2::ErrorCode::Session(-32));
+        assert!(!is_would_block(&refused));
+    }
+
+    #[test]
+    fn a_signature_ignores_the_password_but_tracks_every_hop() {
+        let base = SshTarget {
+            session_id: "s".to_string(),
+            host: "Host.Example".to_string(),
+            port: 22,
+            username: "user".to_string(),
+            password: Some("hunter2".to_string()),
+            private_key_path: None,
+            proxy: None,
+        };
+        let signature = target_signature(&base);
+        // Unlocking the vault must not tear down a healthy connection.
+        assert!(!signature.contains("hunter2"), "{signature}");
+        assert!(signature.contains("host.example:22"), "{signature}");
+
+        let mut without_password = base.clone();
+        without_password.password = None;
+        assert_eq!(target_signature(&without_password), signature);
+
+        // Anything that changes where the connection lands must change it.
+        let mut other_port = base.clone();
+        other_port.port = 2222;
+        assert_ne!(target_signature(&other_port), signature);
+
+        let mut with_key = base.clone();
+        with_key.private_key_path = Some("/keys/id_ed25519".to_string());
+        assert_ne!(target_signature(&with_key), signature);
+
+        let mut jumped = base.clone();
+        jumped.proxy = Some(Box::new(SshTarget {
+            session_id: "b".to_string(),
+            host: "bastion".to_string(),
+            port: 22,
+            username: "jump".to_string(),
+            password: Some("also-secret".to_string()),
+            private_key_path: None,
+            proxy: None,
+        }));
+        let jumped_signature = target_signature(&jumped);
+        assert_ne!(jumped_signature, signature);
+        assert!(!jumped_signature.contains("also-secret"), "{jumped_signature}");
     }
 
     #[test]

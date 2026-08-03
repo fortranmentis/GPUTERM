@@ -89,6 +89,17 @@ Nothing is ever installed on your servers: every metric comes from one-shot stan
 - **Quiet Windows local monitoring** — PowerShell collectors run without allocating console windows and emit UTF-8 text, so localized device and volume names remain parseable
 - Hosts without any GPU gracefully fall back to system-only metrics
 
+### 🤖 Ollama & vLLM runtime monitoring
+- Register any number of **Ollama** and **vLLM** servers by URL; each is polled independently of your SSH sessions, so the card works with no terminal connected
+- **Poll directly, or through an SSH tunnel** — pick a saved SSH profile as the instance's *Reach through* and the address is resolved on that host, so a runtime bound to its own `127.0.0.1` needs nothing exposed on the network
+- **Read-only.** GpuTerm calls `/api/ps`, `/api/tags`, `/health`, `/v1/models`, and `/metrics` only. It never sends an inference request, downloads or deletes a model, or restarts a server
+- **Ollama** — running and installed models, model size, VRAM-resident size and share, estimated non-VRAM residency, configured maximum context, and how long a loaded model stays in memory
+- **vLLM** — running/waiting/swapped requests, server-wide KV cache usage and headroom, prefix-cache hit rate, prompt and generation tokens per second, request rate, preemptions, and TTFT/latency/queue percentiles interpolated from Prometheus histogram buckets
+- **Nothing is faked.** A metric this build of the runtime does not publish is shown as *not supported*, and a value that has not been read yet is shown as `—`. Neither is ever displayed as `0`
+- **Counter restarts are handled** — a counter that goes backwards produces a null rate for that interval and a "server was probably restarted" event, never a negative throughput
+- API keys go straight into the encrypted `credentials.enc` vault. They are never returned to the webview, never written to `llm_instances.json`, and masked out of error text
+- Per-instance poll interval and timeout, enable/disable, a connection test that saves nothing, exponential backoff on repeated failure, and a 15-minute in-memory trend chart
+
 ### 🔐 Security by default
 - Passwords and key passphrases are stored only in the local `credentials.enc` vault: Argon2id derives a 256-bit key from your GpuTerm master password, and AES-256-GCM encrypts and authenticates the complete credential payload
 - The master password and derived key are kept in memory only for the current app run; secrets are never written in plaintext or included in `sessions.json`
@@ -112,6 +123,7 @@ Nothing is ever installed on your servers: every metric comes from one-shot stan
 | Intel GPU | ◐ `xpu-smi` / `intel_gpu_top` | — | ◐ WDDM counters (util + VRAM) |
 | Apple GPU | — | ◐ util + memory (power/temp need root) | — |
 | AGY · Codex · Claude Code process trees | ✅ `ps` | ✅ `ps` | ✅ CIM + `Get-Process` |
+| Ollama / vLLM runtimes | ✅ HTTP | ✅ HTTP | ✅ HTTP |
 | Detail popovers (per-core CPU, top processes) | ✅ | ✅ (no per-core without root) | ✅ |
 
 ✅ full support ◐ partial (see [known limitations](#roadmap--known-limitations)) — the exact remote commands are listed under [Usage](#usage).
@@ -194,6 +206,7 @@ npm run tauri:build
 3. **Connect** — on first contact GpuTerm shows the server's SHA-256 host key fingerprint and asks for confirmation before trusting it. Connect as many servers as you like; connected profiles show a green dot, and clicking one switches the whole view to that session.
 4. **Split terminals** — use the columns button to open another shell for the focused session, or the **+** button to add a different saved session. Choose left/right/top/bottom placement and the new pane's initial size before adding it.
 5. **Work** — type in the terminal, drag or paste files into the remote SFTP panel, and watch live metrics in the bottom bar. Click CPU / RAM / Disk / GPU / Users for detail popovers you can drag around, resize, or pop out into separate windows with the ↗ button.
+6. **Register an LLM runtime (optional)** — click **LLM RUNTIME** in the monitoring bar, then **Add**. This card is not tied to a session, so it works before you connect anything.
 
 <details>
 <summary>Terminal split controls</summary>
@@ -243,6 +256,41 @@ npm run tauri:build
 </details>
 
 <details>
+<summary>Connecting an Ollama or vLLM server</summary>
+
+Both are configured the same way: **LLM RUNTIME → Add**, pick the runtime, enter the address, and press **Test connection** before **Add**. Only `http` and `https` addresses are accepted; a trailing `/`, a path, or a query string is stripped, so `http://host:11434/` and `http://host:11434` are the same instance. The same runtime cannot be registered twice at the same address.
+
+**Ollama** — the default address is `http://<host>:11434`. Ollama binds to `127.0.0.1` unless told otherwise, so to monitor it from another machine either start it with `OLLAMA_HOST=0.0.0.0:11434` (or set that in the service unit) and open the port, or leave it on loopback and use the SSH tunnel described below. No API key is needed. GpuTerm reads `/api/ps` every poll and `/api/tags` every five minutes.
+
+**vLLM** — the default address is `http://<host>:8000`, i.e. the `--host`/`--port` given to `vllm serve`. If the server was started with `--api-key`, enter the same value in the **API key** field; GpuTerm sends it as `Authorization: Bearer …` on every request and stores it in the encrypted vault. `/metrics` is enabled by default; if the server runs with `--disable-log-stats` it publishes no serving metrics and GpuTerm reports them as unavailable rather than zero. GpuTerm reads `/health` and `/metrics` every poll and `/v1/models` every minute.
+
+For an `https` address, the certificate is validated against the operating system trust store, so an internal CA already trusted by the machine works without extra configuration.
+
+**Or leave the runtime on loopback and tunnel over SSH.** Set **Reach through** to a saved SSH profile instead of `Direct`. The address is then resolved *on that host*, so `http://127.0.0.1:11434` reaches a runtime bound to the remote machine's own loopback — no `0.0.0.0` binding, no firewall rule, no `netsh portproxy`, and the traffic is carried inside SSH. GpuTerm opens one SSH connection per profile (shared by every tunneled instance on that host) and forwards one loopback port per instance.
+
+Two things to know before choosing it:
+
+- The SSH host key must already be trusted. Press **Test connection** once — that is the only place the fingerprint prompt can appear, because the background poller has no way to ask. After trusting it, monitoring starts on its own within one poll interval.
+- The forwarded loopback port stays open for as long as the app runs, and any process on your own machine can reach the remote runtime through it. This is exactly what `ssh -L` does and no worse, but it is a real difference from polling a LAN address.
+
+`https` cannot be tunneled: the request would arrive at `127.0.0.1`, so the certificate would be checked against that address and could not match. GpuTerm refuses the combination when you save it rather than failing later.
+
+</details>
+
+<details>
+<summary>Metrics no runtime reports, and why</summary>
+
+| Not shown | Why |
+| --- | --- |
+| Ollama request count, queue depth, TTFT, tokens/s | `/api/ps` and `/api/tags` do not expose them. The per-request figures exist only in an inference response, and GpuTerm never sends an inference request |
+| Ollama current context usage | Only the configured maximum is published. It is labeled *configured max context* for that reason |
+| vLLM `num_requests_swapped` | Removed in newer vLLM. Shown as *not supported*, never as `0` |
+| vLLM percentiles when the histogram is absent | Some builds omit `_bucket` series or use `--disable-log-stats`. Percentiles are left blank rather than invented |
+| Ollama non-VRAM residency as RAM | `size - size_vram` is an estimate of CPU offloading, not a measurement of system RAM, and is labeled as such |
+
+</details>
+
+<details>
 <summary>Remote commands executed for telemetry</summary>
 
 All metrics come from standard tools over SSH — nothing is installed on the server.
@@ -256,6 +304,8 @@ All metrics come from standard tools over SSH — nothing is installed on the se
 | GPU | `nvidia-smi` (NVIDIA), `rocm-smi --json` (AMD/ROCm), `xpu-smi` / `intel_gpu_top` (Intel), plus `/sys/class/drm/card*/device` for uncovered adapters | `ioreg -c IOAccelerator` (Apple GPU utilization, no root needed) | `nvidia-smi` (NVIDIA, full metrics); WDDM GPU performance counters for AMD/Intel (utilization + VRAM) |
 | Top processes | `ps -eo … --sort=-%cpu` / `--sort=-rss` | `ps -Ao … -r` / `-m` | `Get-Process` (two-sample CPU delta) |
 | AI DASH | `ps -axo …`; provider metadata; Codex app-server quota lookup; optional AGY `/usage` PTY probe | same | `Win32_Process` + `Get-Process`; provider metadata, Codex account lookup, and optional AGY `/usage` ConPTY probe |
+
+LLM runtime monitoring is the exception: it runs no remote command at all. GpuTerm issues HTTP GETs from the desktop machine to the addresses you register — `/api/ps` and `/api/tags` for Ollama, `/health`, `/v1/models`, and `/metrics` for vLLM — and nothing else.
 
 Commands run with a 3-second timeout on a dedicated SSH connection (10 s on Windows to absorb PowerShell start-up); Codex account reads use 5 seconds and the experimental AGY PTY probe uses 15 seconds. Windows commands are batched into a single PowerShell 5.1 invocation per poll and work with either cmd.exe or PowerShell as the OpenSSH default shell. Small scripts travel as `-EncodedCommand`; larger ones are uploaded over SFTP under a content-addressed name and run with `-File`, because base64 of UTF-16LE inflates a script by roughly 2.7x while cmd.exe — the OpenSSH default shell for exec requests — stops at 8,191 characters. Uploaded scripts live under `~/.gputerm/scripts`, are re-sent only when their contents change, and are pruned after seven days; nothing is installed and no admin rights are required. For a local Windows session, the same collectors use the system PowerShell directly with `CREATE_NO_WINDOW` and explicit UTF-8 text output, preventing polling consoles from appearing and preserving localized JSON fields. GpuTerm detects the remote OS and available GPU tools per host and shows a vendor tag on every card; `intel_gpu_top` needs root or `CAP_PERFMON`, and Apple GPU power/temperature would need root `powermetrics`, so they show as n/a. Linux DRM/sysfs supplies adapter identity and any driver-exported utilization/VRAM counters for GPUs not covered by a richer vendor collector. If no GPU source is present, the GPU section reports unavailable while everything else keeps working.
 
@@ -300,13 +350,17 @@ Two conditions come from Claude Code itself: `rate_limits` is present for subscr
 │  React 19 + TypeScript + Zustand + xterm.js                            │
 │    invoke() ──────────────► Tauri commands (Rust)                      │
 │    listen() ◄────────────── terminal-output · remote-telemetry ·       │
-│                             sftp-progress · terminal-closed            │
+│                             llm-runtime-telemetry · sftp-progress ·    │
+│                             terminal-closed                            │
 ├────────────────────────────────────────────────────────────────────────┤
 │  Rust backend (ssh2 / libssh2)                                         │
 │    • Terminal      – PTY shell, dedicated connection per terminal cell │
 │    • Telemetry     – own connection, auto-reconnect with backoff       │
 │    • SFTP ops      – pooled per-session "operations" connection        │
 │    • Bulk transfer – dedicated connection per item, recursive/cancellable│
+│    • LLM runtimes  – session-independent HTTP poller (ureq), one thread│
+│                      per instance, read-only; optionally over an SSH   │
+│                      direct-tcpip forward                              │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -321,6 +375,7 @@ Long-running work is isolated: blocking SSH I/O runs on `spawn_blocking` threads
 | `app_settings.json` | UI preferences such as the last local SFTP directory |
 | `credentials.enc` | Versioned Argon2id parameters plus an AES-256-GCM encrypted and authenticated credential payload |
 | `credential_index.json` | Non-secret session ids used only to show which profiles have a saved vault entry |
+| `llm_instances.json` | Registered Ollama/vLLM instances — name, runtime, URL, poll interval, optional SSH tunnel profile id. Never the API key |
 
 Passwords and key passphrases are **never written in plaintext**. Private key contents are never copied into GpuTerm's configuration files.
 
@@ -428,6 +483,9 @@ GpuTerm is free for personal and noncommercial use under [PolyForm Noncommercial
 | Local Windows session flashes console windows or has no monitoring data | Fixed in v1.1.6-beta — update the app; local PowerShell collectors now run without a console and use UTF-8 output |
 | Windows remote shows “The system cannot find the path specified” | Fixed in v1.0.9-beta — older builds misdetected Windows hosts that have a `uname` port on PATH as Linux; update the app |
 | Korean input splits into jamo in the terminal | Fixed for macOS/WebKit clients — update to the latest release |
+| LLM instance shows `connection refused` at `127.0.0.1` | Check **Reached through** on its detail card. `Direct` means *this* machine's loopback; if the runtime is on another host, press **Edit** and set **Reach through** to that host's SSH profile |
+| LLM instance shows `SSH host key not trusted` | Press **Test connection** on that instance once and accept the fingerprint, or open the same SSH session in a terminal. The background poller cannot show the prompt itself; monitoring resumes automatically afterwards |
+| vLLM metrics are all *not supported* | The server is probably running with `--disable-log-stats`, which publishes no `/metrics`. Restart it without that flag |
 
 ## Roadmap / Known limitations
 
@@ -438,6 +496,9 @@ GpuTerm is free for personal and noncommercial use under [PolyForm Noncommercial
 - GPU monitoring uses `nvidia-smi`, `rocm-smi`, `xpu-smi`, `intel_gpu_top`, Linux DRM/sysfs, macOS `ioreg`, or Windows WDDM performance counters; DRM shared-memory GPUs may expose utilization without dedicated VRAM, power, or temperature
 - Agent CPU/RAM/process-tree totals are always available when the CLI process is visible to the monitoring user. AGY 1.0 token/context metadata needs Python 3 on the monitored host; AGY live quota/work state, Claude cost/subscriber limits, and provider-specific fields remain best effort because CLI log/status schemas vary. Unavailable fields show as n/a
 - Windows remotes: requires Windows PowerShell 5.1+ (preinstalled); load averages don't exist and show as n/a; AMD/Intel GPUs report utilization and dedicated VRAM only (no power/temperature, needs Windows 10 1709+ with a WDDM 2.x driver); process owners and GPU process command lines need elevation and fall back to n/a / process names; `quser` is missing on Home editions, so the Users section stays empty there; hybrid iGPU+dGPU hosts show both cards (counters are attributed by adapter LUID from the DirectX registry, idle adapters remain visible without an activity counter, and a positional heuristic is used if the key is unavailable)
+- LLM runtime monitoring is read-only and endpoint-based: models are not downloaded, deleted, started, or stopped, servers are not restarted, and no inference request is ever sent. Ollama therefore has no request, queue, TTFT, or tokens/s figures at all, and vLLM metrics depend on the version — anything the server does not publish is reported as *not supported* rather than as `0`
+- LLM time series are kept in memory for one hour and are not written to disk, so they start empty after a restart
+- An SSH-tunneled LLM instance needs its host key trusted first (via **Test connection** or by opening that session in a terminal once), because a background poller cannot show the fingerprint prompt. Its forwarded loopback port is reachable by any local process for as long as the app runs — the same exposure as a hand-run `ssh -L`. `https` cannot be tunneled, since the certificate would be validated against `127.0.0.1`
 - macOS installer currently targets Apple Silicon only (Intel Macs: build from source)
 
 Issues and pull requests are welcome — please run the test suites above before submitting.

@@ -2,18 +2,27 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Bot, Cpu, Gauge, HardDrive, MemoryStick, Users } from "lucide-react";
+import { Bot, Boxes, Cpu, Gauge, HardDrive, MemoryStick, Users } from "lucide-react";
 import { AgentDetailContent } from "./AgentUsagePopover";
+import { LlmRuntimeDetailContent } from "./LlmRuntimePopover";
 import { CpuDetailContent } from "./CpuUsagePopover";
 import { DiskDetailContent } from "./DiskUsagePopover";
 import { GpuDetailContent } from "./GpuUsagePopover";
 import { MemoryDetailContent } from "./MemoryUsagePopover";
 import { UsersDetailContent } from "./UsersPopover";
 import type { RemoteTelemetry, TelemetrySettings } from "../types/gpu";
+import type { LlmInstance, LlmTelemetry } from "../types/llm";
 import type { ResourceDetails } from "../types/resourceDetails";
 import type { TerminalClosedPayload } from "../types/session";
 
-type DetailResource = "cpu" | "memory" | "gpu" | "disk" | "users" | "agents";
+type DetailResource =
+  | "cpu"
+  | "memory"
+  | "gpu"
+  | "disk"
+  | "users"
+  | "agents"
+  | "llm";
 
 const RESOURCE_META: Record<DetailResource, { title: string; icon: ReactNode }> = {
   cpu: { title: "CPU details", icon: <Cpu size={16} /> },
@@ -22,6 +31,7 @@ const RESOURCE_META: Record<DetailResource, { title: string; icon: ReactNode }> 
   disk: { title: "Disks", icon: <HardDrive size={16} /> },
   users: { title: "Logged-in users", icon: <Users size={16} /> },
   agents: { title: "AI DASH", icon: <Bot size={16} /> },
+  llm: { title: "LLM runtimes", icon: <Boxes size={16} /> },
 };
 
 const DEFAULT_SETTINGS: TelemetrySettings = {
@@ -50,7 +60,8 @@ function parseQuery(): { sessionId: string | null; resource: DetailResource | nu
     value === "gpu" ||
     value === "disk" ||
     value === "users" ||
-    value === "agents";
+    value === "agents" ||
+    value === "llm";
   return {
     sessionId: params.get("session"),
     resource: isResource(resource) ? resource : null,
@@ -69,6 +80,8 @@ export function DetailWindow() {
   const [loading, setLoading] = useState(false);
   const [telemetry, setTelemetry] = useState<RemoteTelemetry | null>(null);
   const [selectedGpuUuid, setSelectedGpuUuid] = useState<string | null>(null);
+  const [llmInstances, setLlmInstances] = useState<LlmInstance[]>([]);
+  const [llmTelemetry, setLlmTelemetry] = useState<LlmTelemetry | null>(null);
 
   useEffect(() => {
     invoke<TelemetrySettings>("get_telemetry_settings")
@@ -102,6 +115,36 @@ export function DetailWindow() {
       unlisten?.();
     };
   }, [sessionId]);
+
+  // The LLM window is not tied to a session: it reads the poller's own stream.
+  useEffect(() => {
+    if (resource !== "llm") {
+      return;
+    }
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    invoke<LlmInstance[]>("list_llm_instances")
+      .then((next) => !disposed && setLlmInstances(next))
+      .catch(() => undefined);
+    invoke<LlmTelemetry | null>("get_llm_telemetry")
+      .then((next) => !disposed && next && setLlmTelemetry(next))
+      .catch(() => undefined);
+
+    listen<LlmTelemetry>("llm-runtime-telemetry", (event) => {
+      setLlmTelemetry(event.payload);
+    }).then((next) => {
+      if (disposed) {
+        next();
+      } else {
+        unlisten = next;
+      }
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [resource]);
 
   // disk/users/agents render straight from the broadcast telemetry stream.
   useEffect(() => {
@@ -174,7 +217,8 @@ export function DetailWindow() {
     };
   }, [resource, sessionId, settings.telemetryIntervalSecs]);
 
-  if (!sessionId || !resource) {
+  // Every resource but `llm` renders one SSH session's telemetry.
+  if (!resource || (!sessionId && resource !== "llm")) {
     return (
       <div className="detail-window">
         <div className="empty-list">Invalid detail window parameters</div>
@@ -223,9 +267,15 @@ export function DetailWindow() {
             users={telemetry?.users ?? []}
             error={telemetry?.errors.users}
           />
+        ) : resource === "llm" ? (
+          <LlmRuntimeDetailContent
+            telemetry={llmTelemetry}
+            instances={llmInstances}
+            onInstancesChange={setLlmInstances}
+          />
         ) : (
           <AgentDetailContent
-            sessionId={sessionId}
+            sessionId={sessionId ?? ""}
             agents={telemetry?.agents ?? []}
             error={telemetry?.errors.agents}
           />

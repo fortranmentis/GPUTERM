@@ -86,6 +86,17 @@
 - **조용한 Windows 로컬 모니터링** — PowerShell 수집기를 콘솔 창 없이 실행하고 UTF-8 텍스트로 출력해 한글 장치명·볼륨명도 안정적으로 파싱
 - GPU가 전혀 없는 서버에서는 시스템 지표만 표시하며 정상 동작
 
+### 🤖 Ollama · vLLM 런타임 모니터링
+- **Ollama**와 **vLLM** 서버를 URL로 여러 개 등록. SSH 세션과 무관하게 폴링하므로 터미널을 연결하지 않아도 카드가 동작합니다
+- **직접 접속 또는 SSH 터널** — 인스턴스의 *Reach through*로 저장된 SSH 프로필을 고르면 주소가 그 호스트에서 해석되므로, 자기 `127.0.0.1`에만 붙은 런타임도 네트워크에 아무것도 노출하지 않고 모니터링됩니다
+- **읽기 전용.** `/api/ps`, `/api/tags`, `/health`, `/v1/models`, `/metrics`만 호출하며 추론 요청, 모델 다운로드·삭제, 서버 재시작은 하지 않습니다
+- **Ollama** — 실행 중·설치된 모델, 모델 크기, VRAM 상주 크기와 비율, 비VRAM 상주 추정량, 설정된 최대 컨텍스트, 메모리 유지 잔여시간
+- **vLLM** — 처리 중·대기·스왑 요청, 서버 전체 KV 캐시 사용률과 잔여율, Prefix 캐시 적중률, 입력·출력 토큰 처리율, 요청 처리율, Preemption, Prometheus histogram bucket에서 보간한 TTFT·지연·대기시간 백분위
+- **값을 지어내지 않습니다.** 해당 버전이 노출하지 않는 지표는 *지원하지 않음*, 아직 읽지 못한 값은 `—`로 표시하며 어느 쪽도 `0`으로 표시하지 않습니다
+- **Counter 초기화 처리** — Counter가 감소하면 그 구간 처리율을 null로 두고 "서버 재시작 가능성" 이벤트를 남기며, 음수 처리율을 만들지 않습니다
+- API 키는 암호화된 `credentials.enc` 보안 저장소에만 저장합니다. 웹뷰로 반환하지 않고 `llm_instances.json`에도 기록하지 않으며 오류 메시지에서도 마스킹합니다
+- 인스턴스별 수집 주기·타임아웃, 활성화 토글, 저장하지 않는 연결 테스트, 연속 실패 시 백오프, 메모리에만 두는 15분 추이 그래프
+
 ### 🔐 기본 보안
 - 비밀번호와 키 패스프레이즈는 로컬 `credentials.enc` 보안 저장소에만 저장: GpuTerm 마스터 비밀번호를 Argon2id로 256비트 키로 유도하고, 전체 자격증명 페이로드를 AES-256-GCM으로 암호화·인증
 - 마스터 비밀번호와 유도 키는 현재 앱 실행 중에만 메모리에 유지하며, 비밀값을 평문이나 `sessions.json`에 기록하지 않음
@@ -109,6 +120,7 @@
 | Intel GPU | ◐ `xpu-smi` / `intel_gpu_top` | — | ◐ WDDM 카운터 (사용률 + VRAM) |
 | Apple GPU | — | ◐ 사용률 + 메모리 (전력·온도는 root 필요) | — |
 | AGY · Codex · Claude Code 프로세스 트리 | ✅ `ps` | ✅ `ps` | ✅ CIM + `Get-Process` |
+| Ollama / vLLM 런타임 | ✅ HTTP | ✅ HTTP | ✅ HTTP |
 | 상세 팝오버 (코어별 CPU, 상위 프로세스) | ✅ | ✅ (코어별은 root 필요) | ✅ |
 
 ✅ 전체 지원 ◐ 부분 지원 ([알려진 제한](#로드맵--알려진-제한) 참고) — 실행되는 원격 명령 목록은 [사용법](#사용법)에 있습니다.
@@ -191,6 +203,7 @@ npm run tauri:build
 3. **접속** — 최초 접속 시 서버의 SHA-256 호스트 키 지문을 보여주고 신뢰 여부를 확인받습니다. 여러 서버에 동시에 접속할 수 있으며, 연결된 프로필에는 초록 점이 표시되고 클릭하면 해당 세션으로 화면이 전환됩니다.
 4. **터미널 분할** — 열 나누기 버튼으로 포커스된 세션의 새 셸을 열거나, **+** 버튼으로 다른 저장 세션을 추가합니다. 추가 전에 왼쪽·오른쪽·위·아래 배치와 새 창의 초기 크기를 선택할 수 있습니다.
 5. **작업** — 터미널에 입력하고, 원격 SFTP 패널로 파일을 끌어다 놓거나 붙여넣고, 하단 바에서 실시간 지표를 확인하세요. CPU / RAM / Disk / GPU / Users를 클릭하면 상세 팝오버가 열리며, 드래그·크기 조절은 물론 ↗ 버튼으로 별도 창 분리도 가능합니다.
+6. **LLM 런타임 등록 (선택)** — 모니터링 바의 **LLM RUNTIME** 카드를 클릭한 뒤 **Add**를 누르세요. 세션에 종속되지 않으므로 아무것도 연결하지 않은 상태에서도 동작합니다.
 
 <details>
 <summary>터미널 분할 조작</summary>
@@ -237,6 +250,41 @@ npm run tauri:build
 </details>
 
 <details>
+<summary>실제 Ollama · vLLM 서버 연결 방법</summary>
+
+두 런타임 모두 같은 방식입니다. **LLM RUNTIME → Add**에서 종류를 고르고 주소를 입력한 뒤 **Test connection**으로 확인하고 **Add**를 누르세요. `http`와 `https`만 허용하며 끝의 `/`·경로·쿼리는 제거되므로 `http://host:11434/`와 `http://host:11434`는 같은 인스턴스입니다. 같은 런타임을 같은 주소로 두 번 등록할 수 없습니다.
+
+**Ollama** — 기본 주소는 `http://<host>:11434`입니다. Ollama는 기본적으로 `127.0.0.1`에만 바인딩하므로, 다른 PC에서 모니터링하려면 `OLLAMA_HOST=0.0.0.0:11434`로 실행(또는 서비스 유닛에 설정)하고 방화벽을 열거나, 아래의 SSH 터널을 쓰면 loopback 그대로 둘 수 있습니다. API 키는 필요 없습니다. GpuTerm은 매 폴링마다 `/api/ps`를, 5분마다 `/api/tags`를 읽습니다.
+
+**vLLM** — 기본 주소는 `http://<host>:8000`, 즉 `vllm serve`에 준 `--host`/`--port`입니다. `--api-key`로 실행했다면 같은 값을 **API key** 칸에 입력하세요. 모든 요청에 `Authorization: Bearer …`로 전송하며 값은 암호화된 보안 저장소에 보관합니다. `/metrics`는 기본 활성화되어 있으며, `--disable-log-stats`로 실행한 서버는 서빙 지표를 노출하지 않으므로 `0`이 아니라 사용 불가로 표시합니다. GpuTerm은 매 폴링마다 `/health`와 `/metrics`를, 1분마다 `/v1/models`를 읽습니다.
+
+`https` 주소는 운영체제 신뢰 저장소로 인증서를 검증하므로, 사내 CA가 이미 해당 PC에 신뢰 등록되어 있으면 별도 설정 없이 동작합니다.
+
+**또는 런타임을 loopback에 그대로 두고 SSH로 터널링하세요.** **Reach through**를 `Direct` 대신 저장된 SSH 프로필로 바꾸면 주소가 *그 호스트에서* 해석됩니다. 즉 `http://127.0.0.1:11434`가 원격 머신 자신의 loopback에 붙은 런타임에 닿습니다 — `0.0.0.0` 바인딩도, 방화벽 규칙도, `netsh portproxy`도 필요 없고 트래픽은 SSH 안으로 지나갑니다. GpuTerm은 프로필당 SSH 연결 하나(그 호스트의 모든 터널 인스턴스가 공유)를 열고 인스턴스당 loopback 포트 하나를 포워딩합니다.
+
+고르기 전에 알아 둘 두 가지:
+
+- **SSH 호스트 키가 먼저 신뢰되어 있어야 합니다.** **Test connection**을 한 번 누르세요 — 지문 프롬프트가 뜰 수 있는 유일한 곳입니다. 백그라운드 폴러는 물어볼 방법이 없기 때문입니다. 신뢰한 뒤에는 한 폴링 주기 안에 모니터링이 스스로 시작됩니다.
+- **포워딩된 loopback 포트는 앱이 켜져 있는 동안 계속 열려 있고, 같은 PC의 아무 프로세스나 그 포트로 원격 런타임에 닿을 수 있습니다.** 손으로 돌리는 `ssh -L`과 정확히 같고 그보다 나쁘지는 않지만, LAN 주소를 직접 폴링하는 것과는 분명히 다른 점입니다.
+
+`https`는 터널링할 수 없습니다. 요청이 `127.0.0.1`에 도착하므로 인증서가 그 주소로 검증되어 일치할 수 없습니다. GpuTerm은 나중에 실패하게 두지 않고 저장하는 시점에 거부합니다.
+
+</details>
+
+<details>
+<summary>지원하지 않는 지표와 그 이유</summary>
+
+| 표시하지 않는 값 | 이유 |
+| --- | --- |
+| Ollama 요청 수·대기열·TTFT·tokens/s | `/api/ps`와 `/api/tags`가 제공하지 않습니다. 요청 단위 값은 추론 응답에만 존재하는데 GpuTerm은 추론 요청을 보내지 않습니다 |
+| Ollama 현재 컨텍스트 사용량 | 설정된 최대값만 공개됩니다. 그래서 *설정된 최대 컨텍스트*로 표기합니다 |
+| vLLM `num_requests_swapped` | 최신 vLLM에서 제거되었습니다. `0`이 아니라 *지원하지 않음*으로 표시합니다 |
+| histogram이 없을 때의 vLLM 백분위 | 일부 빌드는 `_bucket` 시리즈를 내보내지 않거나 `--disable-log-stats`로 실행됩니다. 가짜 값을 만들지 않고 비워 둡니다 |
+| Ollama 비VRAM 상주량을 RAM으로 | `size - size_vram`은 CPU 오프로딩 추정치이지 시스템 RAM 실사용량이 아니므로 그렇게 표기합니다 |
+
+</details>
+
+<details>
 <summary>텔레메트리가 실행하는 원격 명령</summary>
 
 모든 지표는 표준 도구를 SSH로 실행해 수집합니다 — 서버에 아무것도 설치하지 않습니다.
@@ -250,6 +298,8 @@ npm run tauri:build
 | GPU | `nvidia-smi`(NVIDIA), `rocm-smi --json`(AMD/ROCm), `xpu-smi` / `intel_gpu_top`(Intel), 미수집 어댑터는 `/sys/class/drm/card*/device` | `ioreg -c IOAccelerator` (Apple GPU 사용률, root 불필요) | `nvidia-smi`(NVIDIA, 전체 지표); AMD/Intel은 WDDM GPU 성능 카운터(사용률 + VRAM) |
 | 상위 프로세스 | `ps -eo … --sort=-%cpu` / `--sort=-rss` | `ps -Ao … -r` / `-m` | `Get-Process` (2회 샘플 CPU 델타) |
 | AI DASH | `ps -axo …`; 공급자 메타데이터; Codex 계정 한도 조회; 선택적 AGY `/usage` PTY 판독 | 동일 | `Win32_Process` + `Get-Process`; 공급자 메타데이터, Codex 계정 한도 조회, 선택적 AGY `/usage` ConPTY 판독 |
+
+LLM 런타임 모니터링만은 예외로 원격 명령을 전혀 실행하지 않습니다. 등록한 주소로 데스크톱에서 HTTP GET만 보냅니다 — Ollama는 `/api/ps`·`/api/tags`, vLLM은 `/health`·`/v1/models`·`/metrics`이며 그 외에는 아무것도 호출하지 않습니다.
 
 명령은 전용 SSH 연결에서 3초 타임아웃으로 실행됩니다(Windows는 PowerShell 기동 시간을 감안해 10초). Codex 계정 조회는 5초, 실험적 AGY PTY 판독은 15초 타임아웃을 사용합니다. Windows 명령은 폴링마다 하나의 PowerShell 5.1 스크립트로 묶으며 OpenSSH 기본 셸이 cmd.exe든 PowerShell이든 동작합니다. 짧은 스크립트는 `-EncodedCommand`로 보내고, 큰 스크립트는 내용 해시 이름으로 SFTP 업로드한 뒤 `-File`로 실행합니다 — UTF-16LE base64가 스크립트를 약 2.7배로 부풀리는데 exec 요청을 처리하는 cmd.exe의 한계가 8,191자이기 때문입니다. 업로드된 스크립트는 `~/.gputerm/scripts`에 두고 내용이 바뀔 때만 다시 전송하며 7일 후 정리합니다. 서버에 아무것도 설치하지 않고 관리자 권한도 필요 없습니다. Windows 로컬 세션에서는 동일한 수집기를 시스템 PowerShell로 직접 실행하되 `CREATE_NO_WINDOW`와 명시적인 UTF-8 텍스트 출력을 적용해 폴링 콘솔 창이 뜨지 않고 지역화된 JSON 필드도 보존됩니다. GpuTerm이 원격 OS와 GPU 도구를 호스트별로 감지해 각 카드에 벤더 태그를 표시합니다. `intel_gpu_top`은 root 또는 `CAP_PERFMON`이 필요하고, Apple GPU의 전력·온도는 root `powermetrics`가 필요해 n/a로 표시됩니다. Linux DRM/sysfs는 더 풍부한 벤더 수집기에 잡히지 않은 GPU의 어댑터 정보와 드라이버가 제공하는 사용률/VRAM 카운터를 보완합니다. GPU 소스가 하나도 없으면 GPU 섹션만 '사용 불가'로 표시되고 나머지는 계속 동작합니다.
 
@@ -294,13 +344,16 @@ cp scripts/gputerm-claude-statusline.sh ~/.claude/gputerm-claude-statusline.sh &
 │  React 19 + TypeScript + Zustand + xterm.js                            │
 │    invoke() ──────────────► Tauri commands (Rust)                      │
 │    listen() ◄────────────── terminal-output · remote-telemetry ·       │
-│                             sftp-progress · terminal-closed            │
+│                             llm-runtime-telemetry · sftp-progress ·    │
+│                             terminal-closed                            │
 ├────────────────────────────────────────────────────────────────────────┤
 │  Rust backend (ssh2 / libssh2)                                         │
 │    • 터미널        – 터미널 셀마다 전용 연결을 사용하는 PTY 셸           │
 │    • 텔레메트리    – 자체 연결, 백오프 기반 자동 재연결                 │
 │    • SFTP 작업     – 세션별로 재사용하는 "작업용" 연결 풀               │
 │    • 대용량 전송   – 항목별 전용 연결, 재귀 전송·취소 가능               │
+│    • LLM 런타임    – 세션과 무관한 HTTP 폴러(ureq), 인스턴스별 스레드,   │
+│                      읽기 전용. 선택적으로 SSH direct-tcpip 포워드 경유  │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -315,6 +368,7 @@ cp scripts/gputerm-claude-statusline.sh ~/.claude/gputerm-claude-statusline.sh &
 | `app_settings.json` | 마지막 로컬 SFTP 디렉토리 등 UI 설정 |
 | `credentials.enc` | 버전이 포함된 Argon2id 매개변수와 AES-256-GCM으로 암호화·인증된 자격증명 전체 페이로드 |
 | `credential_index.json` | 저장된 보안 항목을 화면에 표시할 때만 사용하는 비밀값 없는 세션 ID 목록 |
+| `llm_instances.json` | 등록한 Ollama/vLLM 인스턴스 — 이름·런타임·URL·수집 주기·선택적 SSH 터널 프로필 id. API 키는 저장하지 않음 |
 
 비밀번호와 키 패스프레이즈는 **평문으로 기록되지 않습니다**. 개인키 내용은 GpuTerm 설정 파일에 복사하지 않습니다.
 
@@ -422,6 +476,9 @@ GpuTerm은 [PolyForm Noncommercial 1.0.0](./LICENSE)에 따라 개인·비상업
 | Windows 로컬 세션에서 콘솔 창이 반복 표시되거나 모니터링 데이터가 없음 | v1.1.6-beta에서 수정 — 앱을 업데이트하세요. 로컬 PowerShell 수집기는 콘솔 없이 UTF-8 출력으로 실행됩니다 |
 | Windows 원격에서 "The system cannot find the path specified" 표시 | v1.0.9-beta에서 수정 — 이전 빌드는 PATH에 `uname` 포트가 있는 Windows 호스트를 Linux로 오인했습니다; 앱을 업데이트하세요 |
 | 터미널에서 한글이 자모로 분리됨 | macOS/WebKit 클라이언트용으로 수정 완료 — 최신 릴리스로 업데이트하세요 |
+| LLM 인스턴스가 `127.0.0.1`에서 `connection refused` | 상세 카드의 **Reached through**를 확인하세요. `Direct`는 *이* PC의 loopback을 뜻합니다. 런타임이 다른 호스트에 있다면 **Edit**에서 **Reach through**를 그 호스트의 SSH 프로필로 바꾸세요 |
+| LLM 인스턴스가 `SSH host key not trusted` | 해당 인스턴스에서 **Test connection**을 한 번 눌러 지문을 승인하거나, 같은 SSH 세션을 터미널로 접속하세요. 백그라운드 폴러는 프롬프트를 띄울 수 없으며, 승인 후에는 자동으로 모니터링이 재개됩니다 |
+| vLLM 지표가 전부 *지원하지 않음* | 서버가 `--disable-log-stats`로 실행되어 `/metrics`를 노출하지 않을 가능성이 큽니다. 해당 플래그 없이 다시 실행하세요 |
 
 ## 로드맵 / 알려진 제한
 
@@ -432,6 +489,9 @@ GpuTerm은 [PolyForm Noncommercial 1.0.0](./LICENSE)에 따라 개인·비상업
 - GPU 모니터링은 `nvidia-smi`·`rocm-smi`·`xpu-smi`·`intel_gpu_top`·Linux DRM/sysfs·macOS `ioreg`·Windows WDDM 성능 카운터 사용; 공유 메모리 방식 GPU는 DRM에서 사용률만 제공하고 전용 VRAM·전력·온도는 n/a일 수 있음
 - CLI 프로세스가 모니터링 사용자에게 보이면 에이전트 CPU/RAM/프로세스 트리 합계는 항상 제공됩니다. AGY 1.0 토큰/컨텍스트 메타데이터에는 모니터링 호스트의 Python 3가 필요합니다. AGY 실시간 쿼터/작업 상태, Claude 비용·구독 한도 등 공급자별 필드는 CLI 버전별 로그/status 스키마 차이 때문에 가능한 범위에서 수집하며 없는 값은 n/a로 표시됩니다
 - Windows 원격: Windows PowerShell 5.1 이상 필요(기본 탑재); load average는 존재하지 않아 n/a로 표시; AMD/Intel GPU는 사용률·전용 VRAM만 제공(전력·온도 불가, Windows 10 1709+ 및 WDDM 2.x 드라이버 필요); 프로세스 소유자와 GPU 프로세스 커맨드라인은 관리자 권한이 필요해 n/a 또는 프로세스 이름으로 대체; Home 에디션에는 `quser`가 없어 사용자 섹션이 비어 있음; 내장+외장 하이브리드 호스트는 두 GPU 모두 표시(카운터는 DirectX 레지스트리의 어댑터 LUID로 정확히 매핑하며, 유휴 어댑터는 활동 카운터가 없어도 탐색 결과로 유지하고 해당 키가 없으면 위치 기반 휴리스틱으로 폴백)
+- LLM 런타임 모니터링은 엔드포인트 기반 읽기 전용입니다. 모델 다운로드·삭제·실행·종료, 서버 재시작, 추론 요청을 하지 않습니다. 따라서 Ollama에는 요청 수·대기열·TTFT·tokens/s 자체가 없고, vLLM 지표는 버전에 따라 달라지며 서버가 노출하지 않는 값은 `0`이 아니라 *지원하지 않음*으로 표시합니다
+- LLM 시계열은 최근 1시간 분량을 메모리에만 보관하며 디스크에 쓰지 않으므로 재시작하면 비어 있습니다
+- SSH 터널 LLM 인스턴스는 호스트 키가 먼저 신뢰되어 있어야 합니다(**Test connection** 또는 해당 세션을 터미널로 한 번 접속). 백그라운드 폴러는 지문 프롬프트를 띄울 수 없기 때문입니다. 포워딩된 loopback 포트는 앱이 켜져 있는 동안 같은 PC의 아무 프로세스나 접근할 수 있습니다 — 손으로 돌리는 `ssh -L`과 같은 수준의 노출입니다. `https`는 인증서가 `127.0.0.1`로 검증되므로 터널링할 수 없습니다
 - macOS 설치 파일은 현재 Apple Silicon 전용 (Intel Mac은 소스 빌드 필요)
 
 이슈와 풀 리퀘스트를 환영합니다 — 제출 전에 위의 테스트를 실행해 주세요.

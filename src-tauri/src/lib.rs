@@ -1,7 +1,13 @@
+mod llm;
 mod native_drag;
 mod ssh;
 
+use llm::{
+    delete_llm_instance, get_llm_telemetry, list_llm_instances, refresh_llm_telemetry,
+    save_llm_instance, set_llm_instance_enabled, test_llm_instance,
+};
 use native_drag::start_native_file_drag;
+use tauri::Manager;
 
 use ssh::agent_monitor::{configure_claude_quota_monitor, refresh_agent_quota};
 use ssh::local_fs::{
@@ -65,7 +71,27 @@ pub fn run() {
             cancel_transfer,
             sftp_delete,
             sftp_mkdir,
+            list_llm_instances,
+            save_llm_instance,
+            delete_llm_instance,
+            set_llm_instance_enabled,
+            test_llm_instance,
+            get_llm_telemetry,
+            refresh_llm_telemetry,
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run GpuTerm");
+        .setup(|app| {
+            // LLM runtimes are not tied to an SSH session, so their poller
+            // cannot start from `connect_terminal` like the other monitors.
+            let state = app.state::<AppState>();
+            llm::load_into_state(&state);
+            llm::monitor::start(app.handle().clone(), llm::monitor_context(&state));
+            Ok(())
+        })
+        .build(tauri::generate_context!())
+        .expect("failed to build GpuTerm")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                app.state::<AppState>().llm_monitor.stop();
+            }
+        });
 }

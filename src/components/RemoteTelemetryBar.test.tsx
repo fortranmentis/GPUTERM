@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { RemoteTelemetryBar } from "./RemoteTelemetryBar";
+import { useLlmStore } from "../stores/llmStore";
 import { useSessionStore } from "../stores/sessionStore";
 import type { AgentMetric, DiskMetric, GpuMetric, RemoteTelemetry } from "../types/gpu";
 import type { GpuDetailMetric, ResourceDetails } from "../types/resourceDetails";
@@ -1045,5 +1046,82 @@ describe("RemoteTelemetryBar disk summary", () => {
     ).not.toHaveAttribute("aria-valuenow");
     expect(within(dialog).getByText("window reset")).toBeInTheDocument();
     expect(within(dialog).getByText(/as of 15m ago/)).toBeInTheDocument();
+  });
+});
+
+describe("RemoteTelemetryBar LLM runtime card", () => {
+  beforeEach(() => {
+    mockInvoke.mockReset();
+    mockInvoke.mockResolvedValue(undefined);
+    useLlmStore.setState({ instances: [], telemetry: null });
+    useSessionStore.setState({
+      activeSessionId: null,
+      connectedSessionIds: [],
+      telemetryBySession: {},
+      message: null,
+    });
+  });
+
+  it("renders with no SSH session, since LLM runtimes are not session-scoped", () => {
+    render(<RemoteTelemetryBar />);
+
+    expect(screen.getByText("Telemetry unavailable")).toBeInTheDocument();
+    expect(screen.getByText("LLM RUNTIME")).toBeInTheDocument();
+    expect(
+      screen.getByText("No Ollama or vLLM instance registered"),
+    ).toBeInTheDocument();
+  });
+
+  it("summarizes registered instances by severity", () => {
+    useLlmStore.setState({
+      instances: [],
+      telemetry: {
+        generatedAt: 1_799_000_000,
+        summary: {
+          registered: 3,
+          enabled: 3,
+          normal: 1,
+          warning: 1,
+          error: 1,
+          unknown: 0,
+          models: 4,
+          vllmRequestsRunning: 5,
+          vllmRequestsWaiting: 2,
+        },
+        instances: [],
+      },
+    });
+
+    render(<RemoteTelemetryBar />);
+
+    expect(screen.getByText("3 instances")).toBeInTheDocument();
+    expect(screen.getByText("1 normal / 1 attention / 1 error")).toBeInTheDocument();
+    expect(screen.getByText("4 models running or served")).toBeInTheDocument();
+    expect(screen.getByText("vLLM 5 running / 2 waiting")).toBeInTheDocument();
+  });
+
+  it("opens the LLM popover without a connected session", () => {
+    useLlmStore.setState({
+      instances: [
+        {
+          id: "inst-1",
+          name: "GPU server Ollama",
+          runtimeType: "ollama",
+          baseUrl: "http://192.168.0.20:11434",
+          enabled: true,
+          requestTimeoutMs: 3000,
+          pollIntervalSecs: 5,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+      telemetry: null,
+    });
+
+    render(<RemoteTelemetryBar />);
+    fireEvent.click(screen.getByText("LLM RUNTIME"));
+
+    const dialog = screen.getByRole("dialog", { name: "LLM runtime details" });
+    expect(within(dialog).getByText("Not polled yet")).toBeInTheDocument();
   });
 });
