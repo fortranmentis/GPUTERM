@@ -6,9 +6,9 @@
 
 터미널, 파일 전송, 그리고 CPU · RAM · 디스크 · GPU(NVIDIA / AMD / Intel / Apple Silicon) 실시간 모니터링 — 하나의 네이티브 창에서.
 
-[![Release](https://img.shields.io/github/v/release/fortranmentis/GPUTERM?include_prereleases&label=release&color=2ea44f&cacheSeconds=3600)](https://github.com/fortranmentis/GPUTERM/releases)
+[![Release](https://img.shields.io/github/v/release/fortranmentis/GPUTERM?include_prereleases&label=release&color=2ea44f&cacheSeconds=3600&r=1.3.1)](https://github.com/fortranmentis/GPUTERM/releases)
 [![Release Build](https://github.com/fortranmentis/GPUTERM/actions/workflows/release.yml/badge.svg)](https://github.com/fortranmentis/GPUTERM/actions/workflows/release.yml)
-[![Downloads](https://img.shields.io/github/downloads/fortranmentis/GPUTERM/total?color=8b5cf6&cacheSeconds=3600)](https://github.com/fortranmentis/GPUTERM/releases)
+[![Downloads](https://img.shields.io/github/downloads/fortranmentis/GPUTERM/total?color=8b5cf6&cacheSeconds=3600&r=1.3.1)](https://github.com/fortranmentis/GPUTERM/releases)
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue)](./LICENSE)
 [![Built with Tauri](https://img.shields.io/badge/Tauri-2-FFC131?logo=tauri&logoColor=white)](https://tauri.app)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white)](https://react.dev)
