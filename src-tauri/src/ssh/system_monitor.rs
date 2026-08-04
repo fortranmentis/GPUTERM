@@ -1,4 +1,5 @@
 use crate::ssh::agent_monitor::{self, AgentMetric, AgentMonitorState, AgentQuotaHistories};
+use crate::ssh::thermal_monitor::{self, ThermalMetric, ThermalProbe};
 use crate::ssh::gpu_monitor::{
     append_uncovered_linux_drm, parse_gpu_probe, parse_intel_gpu_top_stream, parse_linux_drm_gpus,
     parse_nvidia_smi_csv, parse_rocm_smi_json, parse_xpu_discovery, parse_xpu_stats,
@@ -139,6 +140,10 @@ pub struct TelemetryErrors {
     users: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     agents: Option<String>,
+    /// Only ever set when a temperature *command* failed or timed out. A host
+    /// with no sensors is not an error — that is `ThermalMetric::unsupported`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thermal: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -149,6 +154,7 @@ pub struct RemoteTelemetry {
     hostname: Option<String>,
     cpu: Option<CpuMetric>,
     memory: Option<MemoryMetric>,
+    thermal: Option<ThermalMetric>,
     disks: Vec<DiskMetric>,
     gpu: Vec<GpuMetric>,
     users: Vec<RemoteUserSession>,
@@ -295,6 +301,9 @@ pub fn start(
 
             let mut previous_cpu = None;
             let mut gpu_probe = None;
+            // Bound per reconnect iteration, like `gpu_probe`: a newly loaded
+            // sensor module or a hot-added drive is picked up on reconnect.
+            let mut thermal_probe = None;
             let mut host_os: Option<RemoteOs> = None;
             let mut consecutive_total_failures = 0_u32;
             while !stop.load(Ordering::SeqCst) {
@@ -323,6 +332,7 @@ pub fn start(
                     host_os.unwrap_or(RemoteOs::Linux),
                     &mut previous_cpu,
                     &mut gpu_probe,
+                    &mut thermal_probe,
                     &mut agent_state,
                 );
                 consecutive_total_failures = if telemetry_all_failed(&telemetry) {
@@ -362,6 +372,9 @@ pub fn start_local(
             apple: true,
             ..GpuProbe::default()
         });
+        // Bound for the thread's life, matching `gpu_probe`: a `modprobe
+        // drivetemp` after start-up is picked up on restart, not mid-session.
+        let mut thermal_probe = None;
 
         while !stop.load(Ordering::SeqCst) {
             let settings_snapshot = settings
@@ -374,6 +387,7 @@ pub fn start_local(
                 os,
                 &mut previous_cpu,
                 &mut gpu_probe,
+                &mut thermal_probe,
                 &mut agent_state,
             );
             emit_telemetry(&app, telemetry);
@@ -421,6 +435,7 @@ fn emit_connection_error_telemetry(app: &AppHandle, session_id: &str, error: &st
             hostname: None,
             cpu: None,
             memory: None,
+            thermal: None,
             disks: Vec::new(),
             gpu: Vec::new(),
             users: Vec::new(),
@@ -432,11 +447,31 @@ fn emit_connection_error_telemetry(app: &AppHandle, session_id: &str, error: &st
                 gpu: Some("Telemetry SSH connection failed".to_string()),
                 users: Some("Telemetry SSH connection failed".to_string()),
                 agents: Some("Telemetry SSH connection failed".to_string()),
+                // Left None on purpose: the five slots above already describe a
+                // dead connection, and `telemetry_all_failed` must stay
+                // independent of temperature.
+                thermal: None,
             },
         },
     );
 }
 
+/// Whether every section failed, which the reconnect loop reads as a dead
+/// transport.
+///
+/// `thermal` is deliberately absent from this predicate, in **both** directions:
+///
+/// * As `telemetry.thermal.is_none()`: macOS answers "unsupported" from a pure
+///   function with no command at all, so `thermal` is `Some` even when the
+///   transport is dead. ANDing it in would stop this predicate ever firing on a
+///   macOS host, and that session would never reconnect.
+/// * As `errors.thermal.is_some()`: on WSL2, containers, most VMs, and most
+///   Windows hosts there are no sensors, which is `Ok` with an `unsupported`
+///   list and therefore no error. ANDing it in would suppress reconnects on
+///   exactly the hosts where a hung transport is most likely.
+///
+/// Temperature is a nice-to-have that most hosts cannot provide; it must never
+/// influence whether the SSH session is considered alive.
 fn telemetry_all_failed(telemetry: &RemoteTelemetry) -> bool {
     telemetry.hostname.is_none()
         && telemetry.cpu.is_none()
@@ -451,6 +486,32 @@ fn telemetry_all_failed(telemetry: &RemoteTelemetry) -> bool {
         && telemetry.errors.agents.is_some()
 }
 
+/// Collects temperatures for a Linux or macOS host.
+///
+/// macOS costs no round trip: it answers from a pure function, because there is
+/// no unprivileged command-line source to ask.
+fn collect_unix_thermal<F>(
+    os: RemoteOs,
+    thermal_probe: &mut Option<ThermalProbe>,
+    errors: &mut TelemetryErrors,
+    run: F,
+) -> Option<ThermalMetric>
+where
+    F: Fn(&str) -> Result<String, String>,
+{
+    match os {
+        RemoteOs::MacOs => Some(thermal_monitor::macos_thermal_unsupported()),
+        RemoteOs::Linux => match thermal_monitor::collect_linux_thermal(thermal_probe, run) {
+            Ok(metric) => Some(metric),
+            Err(error) => {
+                errors.thermal = Some(error);
+                None
+            }
+        },
+        RemoteOs::Windows => unreachable!("Windows temperatures are collected separately"),
+    }
+}
+
 fn emit_telemetry(app: &AppHandle, telemetry: RemoteTelemetry) {
     let _ = app.emit("remote-telemetry", telemetry);
 }
@@ -461,6 +522,7 @@ fn collect_remote_telemetry(
     os: RemoteOs,
     previous_cpu: &mut Option<CpuStatSample>,
     gpu_probe: &mut Option<GpuProbe>,
+    thermal_probe: &mut Option<ThermalProbe>,
     agent_state: &mut AgentMonitorState,
 ) -> RemoteTelemetry {
     if os == RemoteOs::Windows {
@@ -469,6 +531,7 @@ fn collect_remote_telemetry(
             session,
             previous_cpu,
             gpu_probe,
+            thermal_probe,
             agent_state,
         );
     }
@@ -529,6 +592,10 @@ fn collect_remote_telemetry(
         }
     };
 
+    let thermal = collect_unix_thermal(os, thermal_probe, &mut errors, |command| {
+        run_remote_command(session, command)
+    });
+
     let gpu = match collect_gpu_metrics(session, os, gpu_probe) {
         Ok(metrics) => metrics,
         Err(error) => {
@@ -558,6 +625,7 @@ fn collect_remote_telemetry(
         hostname,
         cpu,
         memory,
+        thermal,
         disks,
         gpu,
         users,
@@ -571,6 +639,7 @@ fn collect_local_telemetry(
     os: RemoteOs,
     previous_cpu: &mut Option<CpuStatSample>,
     gpu_probe: &mut Option<GpuProbe>,
+    thermal_probe: &mut Option<ThermalProbe>,
     agent_state: &mut AgentMonitorState,
 ) -> RemoteTelemetry {
     if os == RemoteOs::Windows {
@@ -578,6 +647,7 @@ fn collect_local_telemetry(
             session_id,
             previous_cpu,
             gpu_probe,
+            thermal_probe,
             agent_state,
         );
     }
@@ -621,6 +691,10 @@ fn collect_local_telemetry(
         .map_err(|error| errors.disk = Some(error))
         .unwrap_or_default();
 
+    let thermal = collect_unix_thermal(os, thermal_probe, &mut errors, |command| {
+        run_local_command_for(os, command)
+    });
+
     let gpu = collect_local_gpu_metrics(os, gpu_probe)
         .map_err(|error| errors.gpu = Some(error))
         .unwrap_or_default();
@@ -638,6 +712,7 @@ fn collect_local_telemetry(
         hostname,
         cpu,
         memory,
+        thermal,
         disks,
         gpu,
         users,
@@ -650,6 +725,7 @@ fn collect_local_windows_telemetry(
     session_id: &str,
     previous_cpu: &mut Option<CpuStatSample>,
     gpu_probe: &mut Option<GpuProbe>,
+    thermal_probe: &mut Option<ThermalProbe>,
     agent_state: &mut AgentMonitorState,
 ) -> RemoteTelemetry {
     let mut errors = TelemetryErrors::default();
@@ -658,6 +734,7 @@ fn collect_local_windows_telemetry(
     let mut memory = None;
     let mut disks = Vec::new();
     let mut users = Vec::new();
+    let mut thermal_zones = Vec::new();
 
     match run_local_command_for(
         RemoteOs::Windows,
@@ -685,6 +762,7 @@ fn collect_local_windows_telemetry(
                 .get("USERS")
                 .map(|value| windows_monitor::parse_quser_output(value))
                 .unwrap_or_default();
+            thermal_zones = windows_monitor::parse_windows_thermal_zones(&sections);
         }
         Err(error) => {
             errors.cpu = Some(error.clone());
@@ -693,6 +771,15 @@ fn collect_local_windows_telemetry(
             errors.users = Some(error);
         }
     }
+
+    let (thermal_metric, thermal_error) = thermal_monitor::collect_windows_thermal(
+        thermal_probe,
+        thermal_zones,
+        Instant::now(),
+        |command| run_local_command_for(RemoteOs::Windows, command),
+    );
+    let thermal = Some(thermal_metric);
+    errors.thermal = thermal_error;
 
     let gpu = collect_local_gpu_metrics(RemoteOs::Windows, gpu_probe)
         .map_err(|error| errors.gpu = Some(error))
@@ -706,6 +793,7 @@ fn collect_local_windows_telemetry(
         hostname,
         cpu,
         memory,
+        thermal,
         disks,
         gpu,
         users,
@@ -1015,6 +1103,7 @@ fn collect_windows_telemetry(
     session: &Session,
     previous_cpu: &mut Option<CpuStatSample>,
     gpu_probe: &mut Option<GpuProbe>,
+    thermal_probe: &mut Option<ThermalProbe>,
     agent_state: &mut AgentMonitorState,
 ) -> RemoteTelemetry {
     let mut errors = TelemetryErrors::default();
@@ -1023,6 +1112,7 @@ fn collect_windows_telemetry(
     let mut memory = None;
     let mut disks = Vec::new();
     let mut users = Vec::new();
+    let mut thermal_zones = Vec::new();
 
     match run_remote_command_for(
         session,
@@ -1051,6 +1141,7 @@ fn collect_windows_telemetry(
                 .get("USERS")
                 .map(|value| windows_monitor::parse_quser_output(value))
                 .unwrap_or_default();
+            thermal_zones = windows_monitor::parse_windows_thermal_zones(&sections);
         }
         Err(error) => {
             // The one batched command failing fails every section, so a dead
@@ -1062,6 +1153,15 @@ fn collect_windows_telemetry(
             errors.users = Some(error);
         }
     }
+
+    let (thermal_metric, thermal_error) = thermal_monitor::collect_windows_thermal(
+        thermal_probe,
+        thermal_zones,
+        Instant::now(),
+        |command| run_remote_command_for(session, RemoteOs::Windows, command),
+    );
+    let thermal = Some(thermal_metric);
+    errors.thermal = thermal_error;
 
     let gpu = match collect_gpu_metrics(session, RemoteOs::Windows, gpu_probe) {
         Ok(metrics) => metrics,
@@ -1086,6 +1186,7 @@ fn collect_windows_telemetry(
         hostname,
         cpu,
         memory,
+        thermal,
         disks,
         gpu,
         users,
@@ -1985,12 +2086,14 @@ mod tests {
         let os = local_os();
         let mut previous_cpu = None;
         let mut gpu_probe = None;
+        let mut thermal_probe = None;
         let mut agent_state = AgentMonitorState::default();
         let telemetry = collect_local_telemetry(
             "local-test",
             os,
             &mut previous_cpu,
             &mut gpu_probe,
+            &mut thermal_probe,
             &mut agent_state,
         );
 
@@ -2044,13 +2147,68 @@ mod tests {
                 gpu: Some("failed".to_string()),
                 users: Some("failed".to_string()),
                 agents: Some("failed".to_string()),
+                thermal: None,
             },
+            thermal: None,
         };
         assert!(telemetry_all_failed(&telemetry));
 
         // A healthy hostname (or any section) means the transport is alive.
         telemetry.hostname = Some("node01".to_string());
         assert!(!telemetry_all_failed(&telemetry));
+    }
+
+    #[test]
+    fn temperature_never_influences_whether_the_transport_looks_alive() {
+        // This is the load-bearing test of the temperature feature. Getting it
+        // wrong breaks reconnection on precisely the hosts that need it most:
+        //   * Feeding `thermal.is_some()` in would stop this predicate ever
+        //     firing on macOS, which answers "unsupported" from a pure function
+        //     with no command — so a dead macOS session would never reconnect.
+        //   * Feeding `errors.thermal` in would suppress reconnects on WSL2,
+        //     containers, and most Windows hosts, where having no sensors is a
+        //     success with an `unsupported` list and therefore sets no error.
+        let dead = |thermal, thermal_error| RemoteTelemetry {
+            session_id: "session-test".to_string(),
+            timestamp: String::new(),
+            hostname: None,
+            cpu: None,
+            memory: None,
+            thermal,
+            disks: Vec::new(),
+            gpu: Vec::new(),
+            users: Vec::new(),
+            agents: Vec::new(),
+            errors: TelemetryErrors {
+                cpu: Some("failed".to_string()),
+                memory: Some("failed".to_string()),
+                disk: Some("failed".to_string()),
+                gpu: Some("failed".to_string()),
+                users: Some("failed".to_string()),
+                agents: Some("failed".to_string()),
+                thermal: thermal_error,
+            },
+        };
+
+        // A dead transport is still dead when temperatures were "collected"
+        // (the macOS shape: `Some` without a single reading).
+        assert!(telemetry_all_failed(&dead(
+            Some(thermal_monitor::macos_thermal_unsupported()),
+            None
+        )));
+        // And still dead when the temperature read also failed.
+        assert!(telemetry_all_failed(&dead(
+            None,
+            Some("read failed".to_string())
+        )));
+        // And still dead with no thermal information at all.
+        assert!(telemetry_all_failed(&dead(None, None)));
+
+        // Conversely, a live transport that simply has no sensors must not look
+        // dead — this is every WSL2 and container host.
+        let mut alive = dead(Some(thermal_monitor::macos_thermal_unsupported()), None);
+        alive.hostname = Some("wsl-host".to_string());
+        assert!(!telemetry_all_failed(&alive));
     }
 
     #[test]

@@ -132,12 +132,46 @@ export type AgentMetric = {
   backgroundTasks: AgentWorkMetric[];
 };
 
+/** One temperature-reporting device. */
+export type ThermalSensor = {
+  label: string;
+  /** Kernel driver or provider: coretemp, k10temp, jc42, nvme, acpi_thermal_zone, … */
+  source: string;
+  temperatureC: number | null;
+  highC: number | null;
+  criticalC: number | null;
+};
+
+export type ThermalGroup = {
+  headlineC: number | null;
+  /** Which sensor it came from, or how it was chosen ("hottest of 16 cores"). */
+  headlineLabel: string | null;
+  /** Set only when the reading is not a die temperature (an ACPI zone). */
+  caveat: string | null;
+  sensors: ThermalSensor[];
+};
+
+export type ThermalCategoryCode = "cpu" | "memory" | "disk";
+
+/** A category this host genuinely cannot report, with the reason named. */
+export type ThermalUnsupported = { category: ThermalCategoryCode; reason: string };
+
+export type ThermalMetric = {
+  cpu: ThermalGroup | null;
+  memory: ThermalGroup | null;
+  disk: ThermalGroup | null;
+  unsupported: ThermalUnsupported[];
+};
+
 export type RemoteTelemetry = {
   sessionId: string;
   timestamp: string;
   hostname: string | null;
   cpu: CpuMetric | null;
   memory: MemoryMetric | null;
+  /** `null` means not read yet; within it, an `unsupported` entry means the host
+   * cannot report that category. The two must never render the same way. */
+  thermal: ThermalMetric | null;
   disks: DiskMetric[];
   gpu: GpuMetric[];
   users: RemoteUserSession[];
@@ -149,6 +183,9 @@ export type RemoteTelemetry = {
     gpu?: string;
     users?: string;
     agents?: string;
+    /** Set only when a temperature command failed — never merely because a host
+     * has no sensors. */
+    thermal?: string;
   };
 };
 

@@ -482,6 +482,63 @@ describe("LlmRuntimeDetailContent", () => {
     expect(screen.queryByText(/Reached through is/)).not.toBeInTheDocument();
   });
 
+  it("scrolls the form into view when + Add is pressed", async () => {
+    const scrollIntoView = vi.spyOn(Element.prototype, "scrollIntoView");
+    const instance = ollamaInstance();
+    render(
+      <LlmRuntimeDetailContent
+        telemetry={telemetryFor([entry(instance)])}
+        instances={[instance]}
+        onInstancesChange={() => undefined}
+      />,
+    );
+
+    // The form is appended below a card that fills the viewport, so without
+    // this the button looks like it did nothing.
+    expect(scrollIntoView).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+
+    expect(await screen.findByText("Add instance")).toBeInTheDocument();
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "start" });
+    scrollIntoView.mockRestore();
+  });
+
+  it("scrolls for Edit too, which lands in the same place", async () => {
+    const scrollIntoView = vi.spyOn(Element.prototype, "scrollIntoView");
+    const instance = ollamaInstance();
+    render(
+      <LlmRuntimeDetailContent
+        telemetry={telemetryFor([entry(instance)])}
+        instances={[instance]}
+        onInstancesChange={() => undefined}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+
+    expect(await screen.findByText("Edit instance")).toBeInTheDocument();
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "start" });
+    scrollIntoView.mockRestore();
+  });
+
+  it("scrolls from the empty state's Add instance button", async () => {
+    const scrollIntoView = vi.spyOn(Element.prototype, "scrollIntoView");
+    render(
+      <LlmRuntimeDetailContent
+        telemetry={null}
+        instances={[]}
+        onInstancesChange={() => undefined}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Add instance" }));
+
+    expect(await screen.findByLabelText("Address")).toBeInTheDocument();
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "start" });
+    scrollIntoView.mockRestore();
+  });
+
   it("records a counter reset as a recent change", () => {
     const instance = vllmInstance();
     render(

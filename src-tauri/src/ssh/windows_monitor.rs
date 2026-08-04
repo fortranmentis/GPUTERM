@@ -31,6 +31,8 @@ Write-Output '__PAGEFILE__'
 Get-CimInstance Win32_PageFileUsage | Select-Object AllocatedBaseSize,CurrentUsage | ConvertTo-Json -Compress
 Write-Output '__DISK__'
 Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | Select-Object DeviceID,FileSystem,VolumeName,Size,FreeSpace | ConvertTo-Json -Compress
+Write-Output '__THERMALZONE__'
+Get-CimInstance -Namespace root\WMI -ClassName MSAcpi_ThermalZoneTemperature | Select-Object InstanceName,CurrentTemperature | ConvertTo-Json -Compress
 Write-Output '__USERS__'
 quser 2>$null
 exit 0"#;
@@ -232,6 +234,55 @@ pub(crate) fn parse_windows_cpu_output(
         online_cores: info.logical_cores,
         avg_clock_ghz: info.avg_clock_ghz,
     })
+}
+
+/// Extracts ACPI thermal-zone readings from the batched telemetry output.
+///
+/// Returns `(InstanceName, tenths-of-Kelvin)` pairs and leaves the Kelvin
+/// conversion and plausibility filtering to `thermal_monitor`, so that logic
+/// lives in one place for both operating systems that have an ACPI zone.
+///
+/// An empty result is the common case, not an error: most OEM firmware does not
+/// implement `MSAcpi_ThermalZoneTemperature` at all, and some implements it but
+/// throws on read. `$ErrorActionPreference='SilentlyContinue'` turns both into
+/// an empty section.
+pub(crate) fn parse_windows_thermal_zones(
+    sections: &HashMap<String, String>,
+) -> Vec<(String, f64)> {
+    json_section_rows(sections, "THERMALZONE")
+        .iter()
+        .filter_map(|row| {
+            let instance = value_str(row, "InstanceName")
+                .unwrap_or_else(|| "ACPI thermal zone".to_string());
+            Some((instance, value_f64(row, "CurrentTemperature")?))
+        })
+        .collect()
+}
+
+/// Extracts drive temperatures from `WINDOWS_DISK_TEMP_COMMAND` output.
+///
+/// Returns `(label, celsius, high_c)`. `Temperature` from the storage stack is
+/// already in degrees Celsius. The label prefers `FriendlyName` and falls back
+/// to the device number rather than inventing a name.
+pub(crate) fn parse_windows_disk_temps(output: &str) -> Vec<(String, Option<f64>, Option<f64>)> {
+    let sections = split_sections(output);
+    json_section_rows(&sections, "DISKTEMP")
+        .iter()
+        .map(|row| {
+            // `DeviceId` is declared a string but PowerShell may emit it as a
+            // bare number, so accept either rather than losing the fallback.
+            let number = value_str(row, "Number")
+                .or_else(|| value_u64(row, "Number").map(|value| value.to_string()));
+            let label = value_str(row, "Device")
+                .or_else(|| number.map(|number| format!("Disk {}", number)))
+                .unwrap_or_else(|| "Physical disk".to_string());
+            (
+                label,
+                value_f64(row, "Temperature"),
+                value_f64(row, "TemperatureMax"),
+            )
+        })
+        .collect()
 }
 
 pub(crate) fn parse_windows_memory_output(
@@ -762,6 +813,50 @@ mod tests {
     fn windows_memory_missing_section_is_error() {
         let sections = split_sections("__MEMORY__\n\n");
         assert!(parse_windows_memory_output(&sections).is_err());
+    }
+
+    #[test]
+    fn parses_acpi_thermal_zones_and_tolerates_their_absence() {
+        let output = "__THERMALZONE__\n[{\"InstanceName\":\"ACPI\\\\ThermalZone\\\\TZ00_0\",\"CurrentTemperature\":3132},{\"InstanceName\":\"ACPI\\\\ThermalZone\\\\TZ01_0\",\"CurrentTemperature\":3232}]\n";
+        let zones = parse_windows_thermal_zones(&split_sections(output));
+        assert_eq!(zones.len(), 2);
+        assert_eq!(zones[0].1, 3132.0);
+        assert!(zones[0].0.contains("TZ00_0"));
+
+        // PowerShell 5.1 emits a bare object rather than an array for one row.
+        let single = "__THERMALZONE__\n{\"InstanceName\":\"TZ00\",\"CurrentTemperature\":3132}\n";
+        assert_eq!(parse_windows_thermal_zones(&split_sections(single)).len(), 1);
+
+        // Firmware without the class produces an empty section, which is the
+        // common case and must not be an error here.
+        assert!(parse_windows_thermal_zones(&split_sections("__THERMALZONE__\n\n")).is_empty());
+    }
+
+    #[test]
+    fn parses_drive_temperatures_and_falls_back_to_a_device_number() {
+        let output = "__DISKTEMP__\n[{\"Device\":\"Samsung SSD 990 PRO\",\"Number\":0,\"Temperature\":41,\"TemperatureMax\":82},{\"Device\":null,\"Number\":\"1\",\"Temperature\":38,\"TemperatureMax\":null}]\n";
+        let drives = parse_windows_disk_temps(output);
+        assert_eq!(drives.len(), 2);
+        assert_eq!(drives[0].0, "Samsung SSD 990 PRO");
+        assert_eq!(drives[0].1, Some(41.0));
+        assert_eq!(drives[0].2, Some(82.0));
+        // No FriendlyName: the device number is used rather than a made-up name.
+        assert_eq!(drives[1].0, "Disk 1");
+        assert_eq!(drives[1].2, None);
+
+        assert!(parse_windows_disk_temps("__DISKTEMP__\n\n").is_empty());
+    }
+
+    #[test]
+    fn the_batched_telemetry_script_still_fits_in_an_inline_command() {
+        // Crossing the encoded-command limit silently swaps one round trip for
+        // an SFTP upload plus `-File` on *every* poll tick — a latency
+        // regression with no visible symptom. Adding the thermal-zone lines
+        // brought this closer to the limit, so it is locked down here.
+        assert!(
+            !crate::ssh::system_monitor::windows_script_needs_upload(WINDOWS_TELEMETRY_COMMAND),
+            "batched telemetry script grew past the inline limit"
+        );
     }
 
     #[test]

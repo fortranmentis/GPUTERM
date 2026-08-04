@@ -1,5 +1,6 @@
 import { MemoryStick } from "lucide-react";
 import { useEffect, useRef, useState, type RefObject } from "react";
+import type { ThermalMetric } from "../types/gpu";
 import type { MemoryDetailMetric } from "../types/resourceDetails";
 import { formatBytes } from "../utils/formatBytes";
 import { formatMiB, formatPercent, memoryLevel } from "../utils/format";
@@ -8,10 +9,13 @@ import {
   Metric,
   MetricsUnavailable,
   ResourceDetailPopover,
+  ThermalSection,
 } from "./ResourceDetailPopover";
 
 type MemoryUsagePopoverProps = {
   metric: MemoryDetailMetric | null;
+  thermal: ThermalMetric | null;
+  thermalError?: string | null;
   error?: string | null;
   loading: boolean;
   anchorRef: RefObject<HTMLElement | null>;
@@ -21,9 +25,13 @@ type MemoryUsagePopoverProps = {
 
 export function MemoryDetailContent({
   metric,
+  thermal,
+  thermalError,
   error,
 }: {
   metric: MemoryDetailMetric | null;
+  thermal: ThermalMetric | null;
+  thermalError?: string | null;
   error?: string | null;
 }) {
   const previousSwap = useRef<number | null>(null);
@@ -62,6 +70,7 @@ export function MemoryDetailContent({
         <span>Swap {formatMiB(metric.swapUsedMiB)} / {formatMiB(metric.swapTotalMiB)}</span>
         {swapIncreasing && <strong>Increasing</strong>}
       </div>
+      <ThermalSection thermal={thermal} kind="memory" error={thermalError} />
       <div className="process-table memory-process-table">
         <div className="process-row head">
           <span>PID</span><span>User</span><span>RSS</span><span>VSZ</span><span>MEM</span><span>Command</span>
@@ -83,6 +92,8 @@ export function MemoryDetailContent({
 
 export function MemoryUsagePopover({
   metric,
+  thermal,
+  thermalError,
   error,
   loading,
   anchorRef,
@@ -99,7 +110,12 @@ export function MemoryUsagePopover({
       onClose={onClose}
       onPopOut={onPopOut}
     >
-      <MemoryDetailContent metric={metric} error={error} />
+      <MemoryDetailContent
+        metric={metric}
+        thermal={thermal}
+        thermalError={thermalError}
+        error={error}
+      />
     </ResourceDetailPopover>
   );
 }

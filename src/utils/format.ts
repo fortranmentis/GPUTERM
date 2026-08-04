@@ -86,6 +86,43 @@ export function temperatureLevel(value: number | null | undefined): UsageLevel {
   return "normal";
 }
 
+/**
+ * Level for a CPU, DIMM, or drive temperature.
+ *
+ * Vendor thresholds win when the sensor exports them (`tempN_max`/`tempN_crit`,
+ * NVMe WCTEMP/CCTEMP, Intel TjMax, SMART TemperatureMax) — the hardware knows
+ * its own limits better than any constant here.
+ *
+ * Class defaults otherwise, because the GPU-tuned 80/90 pair is wrong for both
+ * other classes: it would paint a healthy Zen 4 desktop CPU critical (those
+ * parts are designed to sit at 95 C under all-core boost) while missing an NVMe
+ * that is already thermally throttling at 75 C.
+ */
+export function thermalLevel(
+  value: number | null | undefined,
+  kind: "cpu" | "memory" | "disk",
+  highC?: number | null,
+  criticalC?: number | null,
+): UsageLevel {
+  if (value == null) return "unknown";
+
+  // Intel TjMax is 100 C on modern Core parts; AMD Zen 3/4/5 desktop parts
+  // throttle at a 95 C Tctl limit and routinely operate there by design.
+  // JEDEC DDR4/DDR5 maximum operating case temperature is 85 C.
+  // Consumer NVMe drives begin throttling around 70-75 C.
+  const defaults = {
+    cpu: { warning: 90, critical: 100 },
+    memory: { warning: 80, critical: 90 },
+    disk: { warning: 70, critical: 80 },
+  }[kind];
+
+  const critical = criticalC ?? defaults.critical;
+  const warning = highC ?? defaults.warning;
+  if (value >= critical) return "critical";
+  if (value >= warning) return "warning";
+  return "normal";
+}
+
 export function vramLevel(usedMiB: number | null, totalMiB: number | null): UsageLevel {
   const value = ratio(usedMiB, totalMiB);
   if (value == null) return "unknown";

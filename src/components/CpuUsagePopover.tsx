@@ -1,5 +1,6 @@
 import { Cpu } from "lucide-react";
 import type { RefObject } from "react";
+import type { ThermalMetric } from "../types/gpu";
 import type { CpuDetailMetric } from "../types/resourceDetails";
 import {
   cpuLevel,
@@ -14,10 +15,13 @@ import {
   Metric,
   MetricsUnavailable,
   ResourceDetailPopover,
+  ThermalSection,
 } from "./ResourceDetailPopover";
 
 type CpuUsagePopoverProps = {
   metric: CpuDetailMetric | null;
+  thermal: ThermalMetric | null;
+  thermalError?: string | null;
   error?: string | null;
   loading: boolean;
   anchorRef: RefObject<HTMLElement | null>;
@@ -27,9 +31,13 @@ type CpuUsagePopoverProps = {
 
 export function CpuDetailContent({
   metric,
+  thermal,
+  thermalError,
   error,
 }: {
   metric: CpuDetailMetric | null;
+  thermal: ThermalMetric | null;
+  thermalError?: string | null;
   error?: string | null;
 }) {
   if (!metric) {
@@ -53,6 +61,8 @@ export function CpuDetailContent({
           <Metric label="Uptime" value={formatUptime(metric.uptimeSeconds)} />
         </div>
       </div>
+
+      <ThermalSection thermal={thermal} kind="cpu" error={thermalError} />
 
       {metric.logicalCoreUsagePercent.length > 0 && (
         <details className="logical-core-details">
@@ -90,6 +100,8 @@ export function CpuDetailContent({
 
 export function CpuUsagePopover({
   metric,
+  thermal,
+  thermalError,
   error,
   loading,
   anchorRef,
@@ -106,7 +118,12 @@ export function CpuUsagePopover({
       onClose={onClose}
       onPopOut={onPopOut}
     >
-      <CpuDetailContent metric={metric} error={error} />
+      <CpuDetailContent
+        metric={metric}
+        thermal={thermal}
+        thermalError={thermalError}
+        error={error}
+      />
     </ResourceDetailPopover>
   );
 }

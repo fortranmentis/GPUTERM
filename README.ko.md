@@ -79,8 +79,10 @@
 - **내장 + 외장 하이브리드 구성도 두 GPU 모두 표시** — Linux는 벤더 도구에 DRM/sysfs 어댑터 탐색을 보완하고, Windows는 DirectX LUID로 카운터를 정확히 귀속하며 WDDM 활동 카운터가 아직 없는 유휴 GPU도 유지합니다
 - **AGY·Codex·Claude Code용 AI DASH** — 하단 카드에서 사용 가능한 5시간·주간 잔여량을 초소형 게이지로 한 번에 보여주고, 상세창에는 컨텍스트·토큰과 각 CLI의 전체 자식 프로세스 트리를 합산한 CPU/RAM을 유지합니다. AGY는 `/usage` 막대 옆의 정밀 퍼센트를 사용하고 그룹별 모델 목록과 최근 24시간 추이를 표시합니다
 - **플랫폼별 로컬 AI 잔여량 보강** — macOS Claude는 Python 없이 기본 `osascript`를 사용하고, Windows Codex/AGY는 실행 중인 native 경로와 npm `.cmd` shim을 지원하며, Windows Claude는 User Profile 경로를 일관되게 사용
+- **CPU·DIMM·드라이브 온도** — 호스트가 실제로 노출하는 경우에만 표시합니다. Linux는 hwmon(`coretemp`/`k10temp`/`zenpower`로 CPU 다이, `jc42`/`spd5118`로 DDR3~DDR5 DIMM, `nvme`/`drivetemp`로 드라이브)을 읽고, Windows는 ACPI thermal zone과 SMART 드라이브 온도를 읽습니다. 임계값은 클래스별로 다르며(Zen 4 CPU의 88 °C는 정상, NVMe의 72 °C는 아님), 센서가 노출하는 `tempN_max`/`tempN_crit`이 내장 상수보다 우선합니다
+- **온도를 읽을 수 없는 호스트는 그 사실과 이유를 함께 표시** — WSL2·컨테이너·대부분의 VM은 센서를 통과시키지 않고, macOS는 root 없이 아무 온도도 노출하지 않습니다. 이런 항목은 오해를 부르는 `0` 대신 상세 팝오버에서 어떤 드라이버·인터페이스가 없는지 이름을 밝히고, 하단 카드에서는 온도 표시 자체를 생략합니다
 - **카드 내부 DISK 경로 표시** — 긴 마운트 경로는 사용률을 가리지 않고 말줄임되며 전체 경로는 hover로 확인
-- 각 섹션을 클릭하면 표가 창 크기에 맞춰 확장되는 **드래그·크기 조절 가능 상세 팝오버**: 코어별 CPU 사용률, 상위 프로세스, GPU별 VRAM/전력/온도, 전체 마운트 목록
+- 각 섹션을 클릭하면 표가 창 크기에 맞춰 확장되는 **드래그·크기 조절 가능 상세 팝오버**: 코어별 CPU 사용률, 상위 프로세스, GPU별 VRAM/전력/온도, CPU·DIMM·드라이브 센서별 온도 게이지, 전체 마운트 목록
 - **상세창을 별도 OS 창으로 분리** 가능 — 독립적으로 갱신되고 세션이 끊기면 함께 닫힘
 - 원격 텔레메트리는 전용 SSH 연결에서 자동 재연결하고, 로컬 텔레메트리는 SSH 없이 호스트에서 수집기를 직접 실행
 - **조용한 Windows 로컬 모니터링** — PowerShell 수집기를 콘솔 창 없이 실행하고 UTF-8 텍스트로 출력해 한글 장치명·볼륨명도 안정적으로 파싱
@@ -119,6 +121,9 @@
 | AMD GPU | ✅ `rocm-smi` (전체) | — | ◐ WDDM 카운터 (사용률 + VRAM) |
 | Intel GPU | ◐ `xpu-smi` / `intel_gpu_top` | — | ◐ WDDM 카운터 (사용률 + VRAM) |
 | Apple GPU | — | ◐ 사용률 + 메모리 (전력·온도는 root 필요) | — |
+| CPU 온도 | ✅ hwmon(`coretemp`/`k10temp`/`zenpower`) 또는 `/sys/class/thermal` | — (root `powermetrics` 필요) | ◐ ACPI thermal zone, 펌웨어 의존, **다이 온도 아님** |
+| DIMM 온도 | ◐ `jc42`(DDR3/DDR4 ECC) 또는 `spd5118`(DDR5, 커널 6.10+)가 있을 때만 | — | — (WMI/CIM 인터페이스 없음) |
+| NVMe / 드라이브 온도 | ✅ `nvme` / `drivetemp` hwmon | — | ✅ `GetReliabilityCounter`의 SMART 값 |
 | AGY · Codex · Claude Code 프로세스 트리 | ✅ `ps` | ✅ `ps` | ✅ CIM + `Get-Process` |
 | Ollama / vLLM 런타임 | ✅ HTTP | ✅ HTTP | ✅ HTTP |
 | 상세 팝오버 (코어별 CPU, 상위 프로세스) | ✅ | ✅ (코어별은 root 필요) | ✅ |
@@ -296,10 +301,13 @@ npm run tauri:build
 | 디스크 | `df -P -T -B1` | `df -P -k` + `mount` | `Win32_LogicalDisk` (고정 드라이브) |
 | 사용자 | `who` | `who` | `quser` |
 | GPU | `nvidia-smi`(NVIDIA), `rocm-smi --json`(AMD/ROCm), `xpu-smi` / `intel_gpu_top`(Intel), 미수집 어댑터는 `/sys/class/drm/card*/device` | `ioreg -c IOAccelerator` (Apple GPU 사용률, root 불필요) | `nvidia-smi`(NVIDIA, 전체 지표); AMD/Intel은 WDDM GPU 성능 카운터(사용률 + VRAM) |
+| 온도 | `/sys/class/hwmon/hwmon*/{name,temp*_label,temp*_input,temp*_max,temp*_crit}`, `/sys/class/thermal/thermal_zone*/{type,temp}` | — (권한 없이 읽을 수 있는 경로 없음) | `root\WMI`의 `MSAcpi_ThermalZoneTemperature`(CPU zone), `MSFT_PhysicalDisk` + `GetReliabilityCounter`(드라이브) |
 | 상위 프로세스 | `ps -eo … --sort=-%cpu` / `--sort=-rss` | `ps -Ao … -r` / `-m` | `Get-Process` (2회 샘플 CPU 델타) |
 | AI DASH | `ps -axo …`; 공급자 메타데이터; Codex 계정 한도 조회; 선택적 AGY `/usage` PTY 판독 | 동일 | `Win32_Process` + `Get-Process`; 공급자 메타데이터, Codex 계정 한도 조회, 선택적 AGY `/usage` ConPTY 판독 |
 
 LLM 런타임 모니터링만은 예외로 원격 명령을 전혀 실행하지 않습니다. 등록한 주소로 데스크톱에서 HTTP GET만 보냅니다 — Ollama는 `/api/ps`·`/api/tags`, vLLM은 `/health`·`/v1/models`·`/metrics`이며 그 외에는 아무것도 호출하지 않습니다.
+
+온도의 메타데이터(드라이버 이름, 센서 라벨, 벤더 임계값)는 연결마다 한 번만 조사하고 이후에는 값만 다시 읽습니다. Windows 드라이브 온도는 최대 30초에 한 번 별도 명령으로 읽어 잠든 하드디스크를 폴링으로 깨우지 않으며, 묶음 PowerShell 스크립트에는 의도적으로 넣지 않았습니다 — 거기서 느린 드라이브 하나가 실패하면 CPU·메모리·디스크·사용자 오류가 한꺼번에 설정되는데, 그것이 바로 재연결 로직이 '전송이 죽었다'고 읽는 상태이기 때문입니다.
 
 명령은 전용 SSH 연결에서 3초 타임아웃으로 실행됩니다(Windows는 PowerShell 기동 시간을 감안해 10초). Codex 계정 조회는 5초, 실험적 AGY PTY 판독은 15초 타임아웃을 사용합니다. Windows 명령은 폴링마다 하나의 PowerShell 5.1 스크립트로 묶으며 OpenSSH 기본 셸이 cmd.exe든 PowerShell이든 동작합니다. 짧은 스크립트는 `-EncodedCommand`로 보내고, 큰 스크립트는 내용 해시 이름으로 SFTP 업로드한 뒤 `-File`로 실행합니다 — UTF-16LE base64가 스크립트를 약 2.7배로 부풀리는데 exec 요청을 처리하는 cmd.exe의 한계가 8,191자이기 때문입니다. 업로드된 스크립트는 `~/.gputerm/scripts`에 두고 내용이 바뀔 때만 다시 전송하며 7일 후 정리합니다. 서버에 아무것도 설치하지 않고 관리자 권한도 필요 없습니다. Windows 로컬 세션에서는 동일한 수집기를 시스템 PowerShell로 직접 실행하되 `CREATE_NO_WINDOW`와 명시적인 UTF-8 텍스트 출력을 적용해 폴링 콘솔 창이 뜨지 않고 지역화된 JSON 필드도 보존됩니다. GpuTerm이 원격 OS와 GPU 도구를 호스트별로 감지해 각 카드에 벤더 태그를 표시합니다. `intel_gpu_top`은 root 또는 `CAP_PERFMON`이 필요하고, Apple GPU의 전력·온도는 root `powermetrics`가 필요해 n/a로 표시됩니다. Linux DRM/sysfs는 더 풍부한 벤더 수집기에 잡히지 않은 GPU의 어댑터 정보와 드라이버가 제공하는 사용률/VRAM 카운터를 보완합니다. GPU 소스가 하나도 없으면 GPU 섹션만 '사용 불가'로 표시되고 나머지는 계속 동작합니다.
 
@@ -482,6 +490,10 @@ GpuTerm은 [PolyForm Noncommercial 1.0.0](./LICENSE)에 따라 개인·비상업
 | 터미널에서 한글이 자모로 분리됨 | macOS/WebKit 클라이언트용으로 수정 완료 — 최신 릴리스로 업데이트하세요 |
 | LLM 인스턴스가 `127.0.0.1`에서 `connection refused` | 상세 카드의 **Reached through**를 확인하세요. `Direct`는 *이* PC의 loopback을 뜻합니다. 런타임이 다른 호스트에 있다면 **Edit**에서 **Reach through**를 그 호스트의 SSH 프로필로 바꾸세요 |
 | LLM 인스턴스가 `SSH host key not trusted` | 해당 인스턴스에서 **Test connection**을 한 번 눌러 지문을 승인하거나, 같은 SSH 세션을 터미널로 접속하세요. 백그라운드 폴러는 프롬프트를 띄울 수 없으며, 승인 후에는 자동으로 모니터링이 재개됩니다 |
+| 온도가 전부 `n/a` 또는 *이 호스트에서 사용 불가* | WSL2·컨테이너·대부분의 VM은 `/sys/class/hwmon`을 통과시키지 않고, macOS는 모든 온도 소스가 root를 요구하므로 정상 동작입니다. CPU/RAM/Disk 상세창을 열면 어떤 인터페이스가 없는지 이유가 표시됩니다. 다른 지표는 그대로 동작합니다 |
+| 베어메탈 Linux인데 RAM 온도가 없음 | `modprobe jc42`(DDR3/DDR4 ECC) 또는 `spd5118`(DDR5, 커널 6.10+)이 필요하고 **플랫폼이 SPD 버스를 노출해야** 합니다. 비 ECC 소비자용 보드는 대부분 노출하지 않으므로 올릴 드라이버 자체가 없습니다 |
+| Linux에서 드라이브 온도가 없음 | NVMe는 `nvme` 드라이버의 hwmon 센서에서, SATA/SAS는 `modprobe drivetemp`로 읽습니다. USB 브리지 및 RAID 볼륨은 SMART를 통과시키지 않는 경우가 많습니다 |
+| Windows CPU 온도가 이상해 보임 | 다이 온도가 아니라 ACPI thermal zone이며 흔히 섀시·표면 센서입니다. GpuTerm은 그렇게 라벨링하고 색을 칠하지 않습니다. Windows에는 권한 없이 다이 온도를 읽는 방법이 없습니다 |
 | vLLM 지표가 전부 *지원하지 않음* | 서버가 `--disable-log-stats`로 실행되어 `/metrics`를 노출하지 않을 가능성이 큽니다. 해당 플래그 없이 다시 실행하세요 |
 
 ## 로드맵 / 알려진 제한
@@ -493,6 +505,7 @@ GpuTerm은 [PolyForm Noncommercial 1.0.0](./LICENSE)에 따라 개인·비상업
 - GPU 모니터링은 `nvidia-smi`·`rocm-smi`·`xpu-smi`·`intel_gpu_top`·Linux DRM/sysfs·macOS `ioreg`·Windows WDDM 성능 카운터 사용; 공유 메모리 방식 GPU는 DRM에서 사용률만 제공하고 전용 VRAM·전력·온도는 n/a일 수 있음
 - CLI 프로세스가 모니터링 사용자에게 보이면 에이전트 CPU/RAM/프로세스 트리 합계는 항상 제공됩니다. AGY 1.0 토큰/컨텍스트 메타데이터에는 모니터링 호스트의 Python 3가 필요합니다. AGY 실시간 쿼터/작업 상태, Claude 비용·구독 한도 등 공급자별 필드는 CLI 버전별 로그/status 스키마 차이 때문에 가능한 범위에서 수집하며 없는 값은 n/a로 표시됩니다
 - Windows 원격: Windows PowerShell 5.1 이상 필요(기본 탑재); load average는 존재하지 않아 n/a로 표시; AMD/Intel GPU는 사용률·전용 VRAM만 제공(전력·온도 불가, Windows 10 1709+ 및 WDDM 2.x 드라이버 필요); 프로세스 소유자와 GPU 프로세스 커맨드라인은 관리자 권한이 필요해 n/a 또는 프로세스 이름으로 대체; Home 에디션에는 `quser`가 없어 사용자 섹션이 비어 있음; 내장+외장 하이브리드 호스트는 두 GPU 모두 표시(카운터는 DirectX 레지스트리의 어댑터 LUID로 정확히 매핑하며, 유휴 어댑터는 활동 카운터가 없어도 탐색 결과로 유지하고 해당 키가 없으면 위치 기반 휴리스틱으로 폴백)
+- 온도 가용성은 플랫폼별로 크게 다릅니다. macOS는 전혀 제공하지 않습니다 — `powermetrics`가 root를 요구하고 그 `smc` 샘플러는 Apple Silicon에 존재하지 않으며, IOKit SMC 센서는 셸에서 읽을 수 없습니다. Windows CPU 온도는 ACPI thermal zone으로 흔히 섀시 센서이고 상당수 OEM 펌웨어에는 구현되어 있지 않으며 다이 온도가 아니므로, 그대로 라벨링하고 색은 칠하지 않습니다. Windows에는 DIMM 온도 인터페이스가 아예 없습니다. Linux의 DIMM 라벨은 SPD i2c 주소(`DIMM 0x18`)여서 물리 슬롯을 알려주지 않습니다. `drivetemp`는 SMART를 폴링하므로 회전 디스크를 계속 깨워둘 수 있습니다(`rmmod drivetemp`로 해제). 1~150 °C를 벗어난 판독값은 미초기화 센서의 산출물로 보아 버리며, 그 결과 실제 0 °C 판독도 함께 버려집니다
 - LLM 런타임 모니터링은 엔드포인트 기반 읽기 전용입니다. 모델 다운로드·삭제·실행·종료, 서버 재시작, 추론 요청을 하지 않습니다. 따라서 Ollama에는 요청 수·대기열·TTFT·tokens/s 자체가 없고, vLLM 지표는 버전에 따라 달라지며 서버가 노출하지 않는 값은 `0`이 아니라 *지원하지 않음*으로 표시합니다
 - LLM 시계열은 최근 1시간 분량을 메모리에만 보관하며 디스크에 쓰지 않으므로 재시작하면 비어 있습니다
 - SSH 터널 LLM 인스턴스는 호스트 키가 먼저 신뢰되어 있어야 합니다(**Test connection** 또는 해당 세션을 터미널로 한 번 접속). 백그라운드 폴러는 지문 프롬프트를 띄울 수 없기 때문입니다. 포워딩된 loopback 포트는 앱이 켜져 있는 동안 같은 PC의 아무 프로세스나 접근할 수 있습니다 — 손으로 돌리는 `ssh -L`과 같은 수준의 노출입니다. `https`는 인증서가 `127.0.0.1`로 검증되므로 터널링할 수 없습니다

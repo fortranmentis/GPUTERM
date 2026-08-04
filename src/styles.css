@@ -1860,6 +1860,21 @@ button.telemetry-section:hover {
   text-transform: uppercase;
 }
 
+/* Temperature sits on the title line, which is a single fixed-height flex row.
+   The disk summary below it wraps, so an item there could add a line and change
+   the card height depending on whether the host has a sensor. */
+.telemetry-section-thermal {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  color: #cbd5e1;
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: none;
+  white-space: nowrap;
+}
+
 .gpu-vendor-tag {
   margin-left: auto;
   padding: 1px 6px;
@@ -2929,12 +2944,14 @@ button.agent-summary-section {
 
 .resource-primary-metric strong.warning,
 .gpu-gauge-grid strong.warning,
+.thermal-gauge-grid strong.warning,
 .resource-metric-grid .warning strong {
   color: var(--amber);
 }
 
 .resource-primary-metric strong.critical,
-.gpu-gauge-grid strong.critical {
+.gpu-gauge-grid strong.critical,
+.thermal-gauge-grid strong.critical {
   color: var(--red);
 }
 
@@ -3180,6 +3197,103 @@ button.agent-summary-section {
 
 .gpu-metric-grid {
   margin: 0 14px 12px;
+}
+
+.thermal-section {
+  padding: 10px 14px 12px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.thermal-section-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--subtle);
+}
+
+.thermal-section-title span {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 11px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thermal-caveat {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--amber);
+}
+
+.thermal-gauge-grid {
+  display: grid;
+  /* The sensor count is whatever the host has: 16 cores, 8 DIMMs, 12 NVMe
+     drives. Any fixed column count is wrong for some host. */
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.thermal-gauge-grid > div {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px;
+}
+
+.thermal-gauge-grid span,
+.thermal-gauge-grid strong {
+  font-size: 11px;
+}
+
+.thermal-gauge-grid span {
+  color: var(--subtle);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thermal-gauge-grid strong {
+  color: #eef5ff;
+}
+
+.thermal-gauge-grid strong.unknown {
+  color: var(--subtle);
+}
+
+.thermal-gauge-grid .resource-usage-bar {
+  grid-column: 1 / -1;
+}
+
+.thermal-gauge-grid .resource-usage-bar.unknown > div {
+  background: var(--subtle);
+}
+
+/* Deliberately unlike a gauge: "this host cannot report it" must not be
+   mistaken for "not read yet". */
+.thermal-unsupported {
+  display: grid;
+  gap: 3px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.thermal-unsupported strong {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.thermal-unsupported span {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--subtle);
 }
 
 @media (max-width: 1180px) {
@@ -4038,4 +4152,21 @@ button.agent-summary-section {
 
 .llm-form-warning strong {
   color: #fde68a;
+}
+
+/* Opening the instance form scrolls it into view. Declaring the motion here
+   rather than passing `behavior: "smooth"` from JS keeps prefers-reduced-motion
+   handling declarative and avoids needing window.matchMedia, which jsdom does
+   not implement. `scroll-behavior` affects scrolling APIs only, never the
+   user's own wheel or touch scrolling. */
+.resource-detail-content,
+.detail-window-content {
+  scroll-behavior: smooth;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .resource-detail-content,
+  .detail-window-content {
+    scroll-behavior: auto;
+  }
 }

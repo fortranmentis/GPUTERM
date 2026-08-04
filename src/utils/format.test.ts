@@ -10,6 +10,7 @@ import {
   formatPercent,
   formatUptime,
   formatWatts,
+  thermalLevel,
   memoryLevel,
   powerLevel,
   ratio,
@@ -74,5 +75,35 @@ describe("format helpers", () => {
     expect(vramLevel(50, 100)).toBe("normal");
     expect(powerLevel(95, 100)).toBe("warning");
     expect(powerLevel(null, 100)).toBe("unknown");
+  });
+
+  it("uses class-specific temperature thresholds instead of the GPU pair", () => {
+    // A Zen 4 desktop part at 88 C is doing exactly what it was designed to do,
+    // while an NVMe at 72 C is already throttling. The GPU 80/90 pair calls the
+    // first one a warning and the second one fine — both backwards.
+    expect(thermalLevel(88, "cpu")).toBe("normal");
+    expect(thermalLevel(90, "cpu")).toBe("warning");
+    expect(thermalLevel(100, "cpu")).toBe("critical");
+    expect(temperatureLevel(88)).toBe("warning");
+
+    expect(thermalLevel(72, "disk")).toBe("warning");
+    expect(thermalLevel(80, "disk")).toBe("critical");
+    expect(thermalLevel(69, "disk")).toBe("normal");
+
+    expect(thermalLevel(79, "memory")).toBe("normal");
+    expect(thermalLevel(80, "memory")).toBe("warning");
+    expect(thermalLevel(90, "memory")).toBe("critical");
+
+    expect(thermalLevel(null, "cpu")).toBe("unknown");
+    expect(thermalLevel(undefined, "disk")).toBe("unknown");
+  });
+
+  it("prefers the sensor's own thresholds over the class defaults", () => {
+    // coretemp exports Intel TjMax as temp1_crit, the nvme driver exports
+    // WCTEMP/CCTEMP: the drive knows its limits better than a constant here.
+    expect(thermalLevel(85, "cpu", 80, 90)).toBe("warning");
+    expect(thermalLevel(90, "cpu", 80, 90)).toBe("critical");
+    // A drive rated hotter than the 70/80 default must not be painted red.
+    expect(thermalLevel(75, "disk", 85, 95)).toBe("normal");
   });
 });

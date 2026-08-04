@@ -85,6 +85,7 @@ function telemetry(disks: DiskMetric[], sessionId = "session-1"): RemoteTelemetr
     hostname: "lab",
     cpu: null,
     memory: null,
+    thermal: null,
     disks,
     gpu: [],
     users: [],

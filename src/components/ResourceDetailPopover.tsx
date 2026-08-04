@@ -8,8 +8,10 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, Thermometer } from "lucide-react";
 import { createPortal } from "react-dom";
+import type { ThermalCategoryCode, ThermalMetric } from "../types/gpu";
+import { formatTemperature, thermalLevel } from "../utils/format";
 
 const MIN_POPOVER_WIDTH = 360;
 const MIN_POPOVER_HEIGHT = 240;
@@ -264,6 +266,144 @@ export function Metric({
     <div className={warning ? "warning" : ""} title={title}>
       <span>{label}</span>
       <strong title={value}>{value}</strong>
+    </div>
+  );
+}
+
+/**
+ * The headline temperature as it appears on a bar card.
+ *
+ * Renders nothing at all when the host cannot report this category — the cards
+ * are narrow, and a permanent "not supported" would cost a line on every WSL2,
+ * container, and macOS host while saying nothing actionable. The reason lives in
+ * the popover instead, one click away, the same way `.llm-unsupported` does it.
+ */
+export function ThermalChip({
+  thermal,
+  kind,
+}: {
+  thermal: ThermalMetric | null;
+  kind: ThermalCategoryCode;
+}) {
+  if (thermal?.unsupported.some((entry) => entry.category === kind)) {
+    return null;
+  }
+  const group = thermal ? thermal[kind] : null;
+  return (
+    <>
+      <Thermometer size={13} /> {formatTemperature(group?.headlineC ?? null)}
+    </>
+  );
+}
+
+const THERMAL_HEADINGS: Record<ThermalCategoryCode, string> = {
+  cpu: "CPU temperature",
+  memory: "Memory temperature",
+  disk: "Drive temperature",
+};
+
+/**
+ * Fill fraction for a temperature gauge.
+ *
+ * A temperature is not a percentage, so the bar is drawn relative to the point
+ * the hardware calls dangerous — the same number `thermalLevel` colours on.
+ * Without that anchoring a 62 C CPU and a 62 C NVMe would draw identical bars
+ * even though one is idle and the other is close to throttling.
+ */
+function thermalFill(value: number | null, criticalC: number | null, fallbackCritical: number) {
+  if (value == null) return null;
+  const ceiling = criticalC ?? fallbackCritical;
+  if (!(ceiling > 0)) return null;
+  return Math.max(0, Math.min(100, (value / ceiling) * 100));
+}
+
+const THERMAL_FALLBACK_CRITICAL: Record<ThermalCategoryCode, number> = {
+  cpu: 100,
+  memory: 90,
+  disk: 80,
+};
+
+/**
+ * Temperature block for one category, drawn as a sibling of the metric grid
+ * rather than inside it — `.resource-metric-grid` is a fixed three-column grid
+ * that both the CPU and memory popovers already fill exactly.
+ *
+ * The three possible states deliberately render as three different shapes:
+ *   * measured        → a labelled gauge per sensor
+ *   * not read yet    → the heading with an `n/a` gauge
+ *   * host cannot     → no gauge at all, and the reason spelled out
+ * Collapsing the last two would make every WSL2 and container host look broken.
+ */
+export function ThermalSection({
+  thermal,
+  kind,
+  error,
+}: {
+  thermal: ThermalMetric | null;
+  kind: ThermalCategoryCode;
+  error?: string | null;
+}) {
+  const unsupported = thermal?.unsupported.find((entry) => entry.category === kind);
+  if (unsupported) {
+    return (
+      <div className="thermal-section">
+        <div className="thermal-section-title">{THERMAL_HEADINGS[kind]}</div>
+        <div className="thermal-unsupported">
+          <strong>Not available on this host</strong>
+          <span>{unsupported.reason}</span>
+        </div>
+      </div>
+    );
+  }
+
+  const group = thermal ? thermal[kind] : null;
+  // A caveat means the number is not a die temperature (an ACPI thermal zone,
+  // which is often a chassis sensor). Reporting it is useful; colouring it
+  // would lend it an authority it does not have.
+  const colorless = group?.caveat != null;
+
+  return (
+    <div className="thermal-section">
+      <div className="thermal-section-title">
+        {THERMAL_HEADINGS[kind]}
+        {group?.headlineLabel && <span>{group.headlineLabel}</span>}
+      </div>
+      {group?.caveat && <div className="thermal-caveat">{group.caveat}</div>}
+      {error && <div className="thermal-caveat">{error}</div>}
+      <div className="thermal-gauge-grid">
+        {group && group.sensors.length > 0 ? (
+          group.sensors.map((sensor, index) => {
+            const level = colorless
+              ? "normal"
+              : thermalLevel(sensor.temperatureC, kind, sensor.highC, sensor.criticalC);
+            // A caveated reading keeps its bar *length* — that still says "near
+            // the top of the scale" — but the bar goes grey rather than green,
+            // because a 96%-full green bar reads as an endorsement of a number
+            // we have just told the user not to trust.
+            const barLevel = colorless ? "unknown" : level;
+            return (
+              <div key={`${sensor.source}-${sensor.label}-${index}`}>
+                <span title={`${sensor.label} (${sensor.source})`}>{sensor.label}</span>
+                <strong className={level}>{formatTemperature(sensor.temperatureC)}</strong>
+                <DetailUsageBar
+                  value={thermalFill(
+                    sensor.temperatureC,
+                    sensor.criticalC,
+                    THERMAL_FALLBACK_CRITICAL[kind],
+                  )}
+                  level={barLevel}
+                />
+              </div>
+            );
+          })
+        ) : (
+          <div>
+            <span>Temperature</span>
+            <strong className="unknown">{formatTemperature(null)}</strong>
+            <DetailUsageBar value={null} level="unknown" />
+          </div>
+        )}
+      </div>
     </div>
   );
 }

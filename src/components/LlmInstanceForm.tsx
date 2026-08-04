@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import type {
   LlmInstance,
   LlmRuntimeStatus,
@@ -101,6 +101,7 @@ export function LlmInstanceForm({
   );
   const [busy, setBusy] = useState(false);
   const [profiles, setProfiles] = useState<SessionProfile[]>([]);
+  const formRef = useRef<HTMLFormElement>(null);
   const [message, setMessage] = useState<{
     kind: "error" | "success";
     text: string;
@@ -110,6 +111,16 @@ export function LlmInstanceForm({
     setForm(editing ? toForm(editing) : blankForm);
     setMessage(null);
   }, [editing]);
+
+  // The form is appended below an instance card tall enough to fill the
+  // viewport, so opening it would otherwise look like nothing happened. Doing
+  // this here rather than in the parent covers every entry point — both Add
+  // buttons and Edit — without threading a ref down.
+  useEffect(() => {
+    // jsdom has no scrollIntoView, and neither do very old webviews. The
+    // optional call makes it a no-op there instead of a crash.
+    formRef.current?.scrollIntoView?.({ block: "start" });
+  }, []);
 
   useEffect(() => {
     invoke<SessionProfile[]>("load_sessions")
@@ -208,7 +219,11 @@ export function LlmInstanceForm({
   };
 
   return (
-    <form className="llm-instance-form" onSubmit={(event) => void save(event)}>
+    <form
+      className="llm-instance-form"
+      ref={formRef}
+      onSubmit={(event) => void save(event)}
+    >
       <h4>{editing ? "Edit instance" : "Add instance"}</h4>
 
       <label>

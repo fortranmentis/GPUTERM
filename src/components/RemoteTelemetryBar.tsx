@@ -28,6 +28,7 @@ import { CpuUsagePopover } from "./CpuUsagePopover";
 import { DiskUsagePopover } from "./DiskUsagePopover";
 import { GpuUsagePopover } from "./GpuUsagePopover";
 import { MemoryUsagePopover } from "./MemoryUsagePopover";
+import { ThermalChip } from "./ResourceDetailPopover";
 import { UsersPopover } from "./UsersPopover";
 import { useLlmStore } from "../stores/llmStore";
 import {
@@ -365,7 +366,7 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
               <>
                 <strong>{formatPercent(telemetry.cpu.usagePercent)}</strong>
                 <span>Load {formatNumber(telemetry.cpu.loadAvg1)} / {formatNumber(telemetry.cpu.loadAvg5)} / {formatNumber(telemetry.cpu.loadAvg15)}</span>
-                <span>{formatCoreCount(telemetry.cpu.onlineCores, telemetry.cpu.totalCores)} | {formatGhz(telemetry.cpu.avgClockGhz)}</span>
+                <span>{formatCoreCount(telemetry.cpu.onlineCores, telemetry.cpu.totalCores)} | {formatGhz(telemetry.cpu.avgClockGhz)} <ThermalChip thermal={telemetry.thermal} kind="cpu" /></span>
                 <small title={telemetry.cpu.modelName ?? undefined}>{telemetry.cpu.modelName ?? "CPU model unavailable"}</small>
               </>
             ) : (
@@ -384,7 +385,7 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
               <>
                 <strong>{formatGiBFromMiB(telemetry.memory.usedMiB)} / {formatGiBFromMiB(telemetry.memory.totalMiB)}</strong>
                 <span>Available {formatGiBFromMiB(telemetry.memory.availableMiB)}</span>
-                <span>Swap {formatGiBFromMiB(telemetry.memory.swapUsedMiB)} / {formatGiBFromMiB(telemetry.memory.swapTotalMiB)}</span>
+                <span>Swap {formatGiBFromMiB(telemetry.memory.swapUsedMiB)} / {formatGiBFromMiB(telemetry.memory.swapTotalMiB)} <ThermalChip thermal={telemetry.thermal} kind="memory" /></span>
                 <MiniBar value={telemetry.memory.usagePercent} />
               </>
             ) : (
@@ -399,7 +400,12 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
             aria-expanded={openResource === "disk"}
             onClick={() => openDetail("disk")}
           >
-            <div className="telemetry-section-title"><HardDrive size={16} /><span>Disk</span></div>
+            <div className="telemetry-section-title">
+              <HardDrive size={16} /><span>Disk</span>
+              <span className="telemetry-section-thermal">
+                <ThermalChip thermal={telemetry.thermal} kind="disk" />
+              </span>
+            </div>
             {diskSummary.visible.length > 0 ? (
               <div className="disk-summary-compact">
                 {diskSummary.visible.map((disk) => (
@@ -553,6 +559,8 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
       {openResource === "cpu" && (
         <CpuUsagePopover
           metric={resourceDetails?.cpu ?? null}
+          thermal={telemetry?.thermal ?? null}
+          thermalError={telemetry?.errors.thermal}
           error={resourceDetails?.errors.cpu ?? detailsRequestError}
           loading={detailsLoading}
           anchorRef={cpuButtonRef}
@@ -563,6 +571,8 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
       {openResource === "memory" && (
         <MemoryUsagePopover
           metric={resourceDetails?.memory ?? null}
+          thermal={telemetry?.thermal ?? null}
+          thermalError={telemetry?.errors.thermal}
           error={resourceDetails?.errors.memory ?? detailsRequestError}
           loading={detailsLoading}
           anchorRef={memoryButtonRef}
@@ -585,6 +595,8 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
       {openResource === "disk" && telemetry && (
         <DiskUsagePopover
           disks={telemetry.disks}
+          thermal={telemetry.thermal}
+          thermalError={telemetry.errors.thermal}
           ignoredFsTypes={settings.diskIgnoreFsTypes}
           anchorRef={diskButtonRef}
           onClose={() => setOpenResource(null)}

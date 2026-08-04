@@ -1,6 +1,6 @@
 import { HardDrive } from "lucide-react";
 import { useMemo, useState, type RefObject } from "react";
-import type { DiskMetric } from "../types/gpu";
+import type { DiskMetric, ThermalMetric } from "../types/gpu";
 import { formatGiBOrTiB } from "../utils/formatBytes";
 import {
   diskUsageLevel,
@@ -8,10 +8,12 @@ import {
   formatDiskUsagePercent,
   sortDisksByPriority,
 } from "../utils/diskPriority";
-import { ResourceDetailPopover } from "./ResourceDetailPopover";
+import { ResourceDetailPopover, ThermalSection } from "./ResourceDetailPopover";
 
 type DiskUsagePopoverProps = {
   disks: DiskMetric[];
+  thermal: ThermalMetric | null;
+  thermalError?: string | null;
   ignoredFsTypes: string[];
   anchorRef: RefObject<HTMLElement | null>;
   onClose: () => void;
@@ -20,9 +22,13 @@ type DiskUsagePopoverProps = {
 
 export function DiskDetailContent({
   disks,
+  thermal,
+  thermalError,
   ignoredFsTypes,
 }: {
   disks: DiskMetric[];
+  thermal: ThermalMetric | null;
+  thermalError?: string | null;
   ignoredFsTypes: string[];
 }) {
   const [showHidden, setShowHidden] = useState(false);
@@ -44,6 +50,7 @@ export function DiskDetailContent({
         />
         <span>Show hidden filesystems</span>
       </label>
+      <ThermalSection thermal={thermal} kind="disk" error={thermalError} />
       {visibleDisks.length === 0 ? (
         <div className="empty-list">Disk metrics unavailable</div>
       ) : (
@@ -83,6 +90,8 @@ export function DiskDetailContent({
 
 export function DiskUsagePopover({
   disks,
+  thermal,
+  thermalError,
   ignoredFsTypes,
   anchorRef,
   onClose,
@@ -97,7 +106,12 @@ export function DiskUsagePopover({
       onClose={onClose}
       onPopOut={onPopOut}
     >
-      <DiskDetailContent disks={disks} ignoredFsTypes={ignoredFsTypes} />
+      <DiskDetailContent
+        disks={disks}
+        thermal={thermal}
+        thermalError={thermalError}
+        ignoredFsTypes={ignoredFsTypes}
+      />
     </ResourceDetailPopover>
   );
 }

@@ -146,11 +146,21 @@ export function DetailWindow() {
     };
   }, [resource]);
 
-  // disk/users/agents render straight from the broadcast telemetry stream.
+  // disk/users/agents render straight from the broadcast telemetry stream, and
+  // cpu/memory need it too now: temperature rides on the telemetry stream, not
+  // on the per-resource detail command. Deliberately not added to
+  // `needsTelemetry` below — that gate draws "Waiting for telemetry", and an
+  // optional temperature must never block the CPU or memory detail itself.
   useEffect(() => {
     if (
       !sessionId ||
-      !(resource === "disk" || resource === "users" || resource === "agents")
+      !(
+        resource === "disk" ||
+        resource === "users" ||
+        resource === "agents" ||
+        resource === "cpu" ||
+        resource === "memory"
+      )
     ) {
       return;
     }
@@ -243,11 +253,15 @@ export function DetailWindow() {
         ) : resource === "cpu" ? (
           <CpuDetailContent
             metric={details?.cpu ?? null}
+            thermal={telemetry?.thermal ?? null}
+            thermalError={telemetry?.errors.thermal}
             error={details?.errors.cpu ?? detailsError}
           />
         ) : resource === "memory" ? (
           <MemoryDetailContent
             metric={details?.memory ?? null}
+            thermal={telemetry?.thermal ?? null}
+            thermalError={telemetry?.errors.thermal}
             error={details?.errors.memory ?? detailsError}
           />
         ) : resource === "gpu" ? (
@@ -260,6 +274,8 @@ export function DetailWindow() {
         ) : resource === "disk" ? (
           <DiskDetailContent
             disks={telemetry?.disks ?? []}
+            thermal={telemetry?.thermal ?? null}
+            thermalError={telemetry?.errors.thermal}
             ignoredFsTypes={settings.diskIgnoreFsTypes}
           />
         ) : resource === "users" ? (
