@@ -25,6 +25,7 @@ use ssh::sftp::{
     sftp_mkdir, sftp_path_exists, sftp_upload_file,
 };
 use ssh::system_monitor::{get_telemetry_settings, update_telemetry_settings};
+use ssh::tmux::{kill_tmux_session, list_tmux_sessions};
 use ssh::terminal::{
     connect_terminal, create_terminal_split, disconnect_terminal, disconnect_terminal_pane,
     terminal_resize, terminal_write,
@@ -58,6 +59,8 @@ pub fn run() {
             terminal_resize,
             disconnect_terminal_pane,
             disconnect_terminal,
+            list_tmux_sessions,
+            kill_tmux_session,
             get_telemetry_settings,
             update_telemetry_settings,
             refresh_agent_quota,

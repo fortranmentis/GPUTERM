@@ -218,8 +218,11 @@ npm run tauri:build
 
 - The **columns** button opens another independent PTY shell for the currently focused session.
 - The **+** button lists saved profiles. A live session is added immediately; a disconnected profile asks for its password/key passphrase (and jump-host password when applicable) before connecting.
+- The **terminal** button lists the tmux sessions running on the focused server. Clicking one attaches to it in a new pane, so detaching with `Ctrl-B d` leaves you at a shell instead of closing the pane. The form below creates a session — leave the name blank to let tmux number it — and each row's **×** kills that session.
 - Up to four cells can be nested horizontally and vertically. Choose a 20–80% initial size, then drag any divider to adjust the ratio. Each mixed-session cell displays its profile name.
 - Clicking a cell makes that session active for SFTP and telemetry while preserving the split layout. The cell's **×** button closes that terminal pane.
+
+The tmux picker is optional and does not install anything: `tmux` must already be available on the local or remote Unix host. GpuTerm checks the login `PATH` plus common Homebrew, `/usr/local`, user-local, and Snap locations. Native Windows hosts are reported as unsupported; WSL can be used through its SSH server as a Linux host.
 
 </details>
 

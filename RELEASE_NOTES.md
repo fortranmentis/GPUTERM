@@ -1,46 +1,34 @@
-# GpuTerm 1.3.1-beta
+# GpuTerm 1.3.2-beta
 
 ## Highlights
 
-- **CPU, DIMM, and drive temperature monitoring.** The CPU, RAM, and Disk cards now carry the host's headline temperature, and each detail popover gains a gauge per sensor. On Linux this comes from hwmon: `coretemp`/`k10temp`/`zenpower` for the CPU die, `jc42`/`spd5118` for DDR3–DDR5 DIMMs, `nvme`/`drivetemp` for drives, with `/sys/class/thermal` as the fallback on ARM boards. On Windows it is the ACPI thermal zone plus SMART drive temperatures.
-- **A host that cannot report a temperature says so, and says which interface is missing.** This is the substance of the feature, not an edge case: WSL2, containers, and most VMs expose no `/sys/class/hwmon` at all, and macOS exposes no temperature without root. Those categories render a stated reason — *"needs the jc42 module (DDR3/DDR4 ECC) or spd5118 (DDR5, kernel 6.10+), and the platform must expose the SPD bus"* — instead of a misleading `0`, and the bar card omits the reading entirely rather than spending a line on a permanent "not supported".
-- **Three distinct states, drawn three different ways.** Measured is a coloured gauge; not-read-yet is `n/a` with an empty gauge; cannot-report is a dashed block with the reason and no gauge. Collapsing the last two would make every WSL2 and container host look broken.
-- **Per-class thresholds, and the sensor's own limits win.** The GPU-tuned 80/90 pair is wrong for both other classes — it would call a Zen 4 desktop CPU critical at a temperature it is designed to hold under all-core boost, while missing an NVMe already thermally throttling. Defaults are CPU 90/100, DIMM 80/90, drive 70/80, but an exported `tempN_max`/`tempN_crit` (Intel TjMax, NVMe WCTEMP/CCTEMP, SMART TemperatureMax) overrides them, because the hardware knows its own limits better than any constant.
-- **Windows CPU temperature is read, labelled honestly, and never coloured.** `MSAcpi_ThermalZoneTemperature` is an ACPI zone, frequently a chassis or skin sensor and unimplemented on many OEM firmwares. It is shown with that caveat spelled out, and it is the one reading that never gets a warning or critical colour — including its gauge bar, which keeps its length but goes grey. Colouring it would lend authority to a number that does not have it.
-- **`Tdie` is preferred over `Tctl`.** On several Ryzen and Threadripper SKUs `Tctl` is a control value carrying a +27 °C vendor offset while `Tdie` is the actual junction temperature, so preferring `Tctl` would over-report by up to 27 °C.
-- **The `+ Add` button scrolls its form into view.** The form is appended below an instance card tall enough to fill the viewport, so pressing Add previously looked like nothing had happened.
-
-## Implementation notes
-
-- Temperature metadata — driver names, sensor labels, vendor thresholds, realpaths — is probed once per connection and only the raw values are re-read each tick, following the existing `GpuProbe` capability-caching pattern.
-- Windows drive temperatures are a **separate** command, throttled to at most once every 30 seconds so polling does not keep a sleeping spindle awake. They are deliberately kept out of the batched PowerShell script: a single failure there sets the CPU, memory, disk, and user errors at once, which is precisely the state the reconnect logic reads as a dead transport. One slow drive would have produced a reconnect loop caused by temperature.
-- macOS answers "unsupported" from a pure function with no remote command at all. `powermetrics` requires root and its `smc` sampler does not exist on Apple Silicon, `machdep.xcpm.*` oids are absent, and `ioreg -c AppleSMC` exposes zero temperature keys — all verified on hardware rather than assumed.
-- Disk temperatures are their own section rather than a column in the mount table, because that table is per mount point while temperature is per physical device; joining them would be guesswork on LVM, ZFS, and btrfs.
-- Readings outside 1–150 °C are discarded. hwmon reports 0 for uninitialized sensors, NVMe reports 0 K for unimplemented ones, and stub ACPI firmware returns exactly 2732 tenths of a kelvin. The cost is that a genuine 0 °C reading is also dropped.
-- GPU thermal drivers (`amdgpu`, `i915`, `nouveau`, `radeon`, `xe`) and super-I/O chips (`nct6775`, `it87`, whose `CPUTIN` label invites exactly this mistake) are explicitly excluded from CPU classification, the former because GPU temperature is already `gpu_monitor`'s job.
+- **tmux sessions in the terminal toolbar.** The new terminal button lists sessions on the currently focused local or remote Unix host, including window count, attached state, and creation age.
+- **Attach and create in a normal GpuTerm split pane.** Selecting a session opens a new pane and attaches by tmux's stable `$N` session ID. Detaching with `Ctrl-B d` returns to the pane's login shell instead of closing the pane. A named session can be created with attach-or-create semantics, or the name can be left blank for tmux to number it.
+- **Session lifecycle controls.** Refresh the listing in place or terminate a session from its row after an explicit confirmation. Missing tmux, an empty server, unsupported Windows hosts, and transport errors are shown as distinct non-blocking states inside the picker.
 
 ## Fixes
 
-- Fixed the ACPI thermal zone's gauge bar being drawn 96% full in green for a 96 °C reading. The value text was correctly left uncoloured, but a nearly-full green bar read as an endorsement of a number the UI had just warned not to trust. The bar keeps its length and turns grey.
-- Fixed the disk card's temperature being placed inside `.disk-summary-compact`, which is `flex-wrap: wrap` — a third item could wrap to a second line and change the card height depending on whether the host has a sensor. It also made the new item the last child, which moved the mount list's `·` separator onto the preceding entry. Temperature now sits on the fixed-height title row; card height is 132 px with or without sensors.
+- Kept tmux discovery bound to the focused split's host so changing the active session cannot list one server and attach on another.
+- Addressed existing sessions by validated tmux IDs rather than remote-controlled display names, and added POSIX single-quote escaping for new names typed into a live login shell.
+- Cleared the `TMUX` environment variable for attach/create commands so a profile that automatically enters tmux does not trigger tmux's nested-session guard.
+- Probed common Homebrew, `/usr/local`, user-local, and Snap paths in addition to the login `PATH`, covering shells whose non-interactive profile omits the interactive tmux location.
+- Treated tmux's normal “no server running” exit as an empty session list rather than a connection error, while preserving real list and kill failures in the picker.
+- Refreshed the README release and download badge URLs so GitHub's image cache no longer leaves the published version count stale after a new release.
 
 ## Validation
 
-- Backend: 292 Rust tests pass with 2 ignored (one needs host permissions, one needs a live listener). 28 are new and cover source classification for every supported driver and thermal-zone type, `Tdie` beating `Tctl`, multi-socket headline selection, the implausible-value filter for all three zero forms, DIMM SPD-address and drive-name labelling, the probe-once/read-every-tick split, Kelvin conversion, single-object and array `MSFT_PhysicalDisk` JSON, and the 30-second disk throttle with an injected clock.
-- The load-bearing test is `temperature_never_influences_whether_the_transport_looks_alive`. `telemetry_all_failed` is left unmodified and asserted independent of temperature in both directions: feeding `thermal.is_some()` in would stop it ever firing on macOS — which answers from a pure function with no command — so a dead macOS session would never reconnect; feeding `errors.thermal` in would suppress reconnects on WSL2, containers, and most Windows hosts, where having no sensors is a success and sets no error.
-- Frontend: 166 Vitest tests pass, 8 new — per-class threshold boundaries, vendor thresholds overriding them, the three states producing three different DOM shapes, unsupported scoped per category rather than all-or-nothing, and no colour class on a caveated reading.
-- The WSL2 fixture is the verbatim captured output of the probe command run through `/bin/sh` on a host with no `/sys`, not hand-written. The first hand-written version omitted the blank line each `printf '\n__SECTION__\n'` leaves before its marker — it passed while differing from what a real host produces.
-- Layout was verified by mounting the real `RemoteTelemetryBar` against the real stylesheet and switching hosts: all seven cards measure 132 px whether or not the host reports temperatures, and the sensor-less host shows no temperature fragment, no leftover `n/a`, and no gap. Both fixes above were found this way.
-- Static/build checks: TypeScript and the Vite production build succeed, ESLint reports no new warnings, Clippy passes with warnings denied across all targets.
-- No new dependencies. Every temperature source is a file read or a WMI/CIM query already reachable through the existing SSH and PowerShell paths.
+- Frontend: 184 Vitest tests pass. The new coverage exercises listing, focused-host selection, attach, named and auto-numbered creation, name validation, kill confirmation and cancellation, refresh, empty/not-installed/unsupported/error states, picker interaction, and shell quoting against command separators.
+- Backend: 303 Rust tests pass with 1 live-environment test ignored. The new coverage checks tagged listing parsing, window and attach metadata, legacy creation timestamps, hostile names and malformed rows, strict `$<digits>` ID validation, and safe kill-command construction.
+- Static/build checks: TypeScript and the Vite production build succeed, ESLint reports 0 errors (14 existing React Hook warnings), the new Rust module passes rustfmt, Clippy passes with warnings denied across all targets, and `git diff --check` passes.
+- GitHub-hosted Windows, Ubuntu, and macOS runners build a native NSIS `.exe`, Debian `.deb`, Apple Silicon `.dmg`, and `SHA256SUMS.txt`.
+- The macOS job signs every nested Mach-O and code container inside-out, applies a final deep ad-hoc signature to `GpuTerm.app`, verifies it with `codesign --deep --strict`, creates the DMG from that verified bundle, mounts it, and verifies the enclosed app again before upload.
 
 ## Notes
 
-- **What you will actually see depends heavily on the host.** A bare-metal Linux box shows CPU and drive temperatures, and DIMM temperatures only with ECC memory or DDR5 on a platform that exposes the SPD bus. WSL2, containers, and most VMs show none of the three. macOS shows none. Windows shows drive temperatures and, if the firmware implements it, one ambiguous CPU zone. This is the hardware and OS reality, not a gap in the implementation, which is why every absence names its cause.
-- Linux DIMM labels are the SPD i2c address (`DIMM 0x18`), which does not identify the physical slot — the platform does not expose that mapping.
-- `drivetemp` polls SMART and can keep spinning disks awake; `rmmod drivetemp` undoes it. NVMe drives are unaffected, since their temperature comes from the `nvme` driver's own hwmon sensor.
-- SATA HDDs are treated with the drive thresholds (70/80) although they are rated for 55–60 °C. Distinguishing rotating from solid-state media reliably over SSH would be guesswork, so the inaccuracy is documented rather than guessed at.
-- No profile, known-host, app-settings, or credential-vault migration is required when upgrading from 1.3.0-beta. Temperature adds no new file and no new setting; an older build reading newer data simply ignores the temperature fields.
-- Not verified in this release: readings from a live Linux or WSL host, and reconnect behaviour with temperature present. Both need a real SSH session, and the vault password required to open one is the user's. The three unsupported paths, the reconnect predicate, and the layout are covered by the tests and measurements above.
+- tmux integration is optional and does not install software. `tmux` must already be available on the target Unix host. Native Windows hosts are unsupported; WSL can be used by connecting to its SSH server as a Linux host.
+- Killing a tmux session stops every program running inside it and therefore always requires confirmation.
+- No profile, known-host, app-settings, or encrypted credential-vault migration is required when upgrading from 1.3.1-beta.
 - This is a beta prerelease. The Windows installer is not signed by a trusted publisher. The macOS bundle is fully ad-hoc signed for integrity but is not Developer ID signed or notarized, so SmartScreen or Gatekeeper may still require a one-time confirmation.
 - The macOS installer is Apple Silicon (`aarch64`) only. Intel Mac users can build from source.
+
+**Full changelog:** https://github.com/fortranmentis/GPUTERM/compare/v1.3.1-beta...v1.3.2-beta

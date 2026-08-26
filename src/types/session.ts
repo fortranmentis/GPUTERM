@@ -99,3 +99,24 @@ export type TerminalClosedPayload = {
   /** Human-readable reason, e.g. "Remote shell closed". */
   message: string | null;
 };
+
+/** Mirrors the Rust `TmuxStatus`; the three cases need distinct UI copy. */
+export type TmuxStatus = "ok" | "not-installed" | "unsupported-os";
+
+export type TmuxSession = {
+  /**
+   * tmux's own handle (`$0`, `$1`, …). The only field ever put back into a
+   * command — `name` is remote-controlled data and stays display-only.
+   */
+  id: string;
+  name: string;
+  windows: number;
+  attached: boolean;
+  /** Unix seconds, or null on tmux versions that emit a date string. */
+  created: number | null;
+};
+
+export type TmuxListing = {
+  status: TmuxStatus;
+  sessions: TmuxSession[];
+};

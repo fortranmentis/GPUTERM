@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { TerminalPane } from "./TerminalPane";
 import { useSessionStore } from "../stores/sessionStore";
 import type { SessionConnectRequest, SessionProfile } from "../types/session";
@@ -95,6 +96,7 @@ vi.mock("@xterm/xterm", () => ({
 }));
 
 const mockInvoke = vi.mocked(invoke);
+const mockConfirm = vi.mocked(confirm);
 
 const alpha: SessionProfile = {
   id: "alpha",
@@ -620,5 +622,307 @@ describe("TerminalPane multi-session split", () => {
       screen.queryByRole("searchbox", { name: /search terminal output/i }),
     ).toBeNull();
     field.remove();
+  });
+});
+
+describe("TerminalPane tmux picker", () => {
+  const listing = {
+    status: "ok",
+    sessions: [
+      {
+        id: "$0",
+        name: "train run",
+        windows: 3,
+        attached: false,
+        created: 1_700_000_000,
+      },
+      { id: "$1", name: "eval", windows: 1, attached: true, created: null },
+    ],
+  };
+
+  const mockTmux = (
+    result: unknown,
+    extra?: (command: string) => unknown | undefined,
+  ) => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "list_tmux_sessions") {
+        return Promise.resolve(result);
+      }
+      if (command === "create_terminal_split") {
+        return Promise.resolve({
+          sessionId: "alpha",
+          terminalId: "terminal-alpha-2",
+        });
+      }
+      const handled = extra?.(command as string);
+      return Promise.resolve(handled);
+    });
+  };
+
+  const openPicker = async () => {
+    render(<TerminalPane />);
+    await waitFor(() => expect(terminalMocks.open).toHaveBeenCalledOnce());
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "tmux sessions" }));
+    });
+    return screen.getByRole("dialog", { name: "tmux sessions" });
+  };
+
+  beforeEach(() => {
+    mockInvoke.mockReset();
+    mockInvoke.mockResolvedValue(undefined);
+    mockConfirm.mockReset();
+    mockConfirm.mockResolvedValue(true);
+    terminalMocks.open.mockReset();
+    terminalMocks.dataHandlers.length = 0;
+    eventHandlers.clear();
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+    useSessionStore.setState({
+      sessions: [alpha, beta],
+      activeSessionId: "alpha",
+      terminalViewRevision: 1,
+      connectedSessionIds: ["alpha"],
+      terminalIdsBySession: { alpha: ["terminal-alpha"] },
+      message: null,
+    });
+  });
+
+  it("lists the focused host's sessions when the picker opens", async () => {
+    mockTmux(listing);
+    const picker = await openPicker();
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("list_tmux_sessions", {
+        sessionId: "alpha",
+      }),
+    );
+    expect(await within(picker).findByText("train run")).toBeInTheDocument();
+    expect(within(picker).getByText(/3 windows/)).toBeInTheDocument();
+    expect(within(picker).getByText("eval")).toBeInTheDocument();
+    expect(within(picker).getByText("1 window")).toBeInTheDocument();
+    // The attached badge warns before the user joins a shared session.
+    expect(within(picker).getByTitle("Attached")).toBeInTheDocument();
+  });
+
+  it("attaches by tmux session id in a new split pane", async () => {
+    mockTmux(listing);
+    const picker = await openPicker();
+    const attach = await within(picker).findByTitle("Attach to train run");
+    await act(async () => {
+      fireEvent.click(attach);
+    });
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("create_terminal_split", {
+        sessionId: "alpha",
+        cols: 100,
+        rows: 30,
+      }),
+    );
+    // Addressed by id, never by the remote-controlled name, and the pane must
+    // exist before anything is written into it.
+    expect(mockInvoke).toHaveBeenCalledWith("terminal_write", {
+      terminalId: "terminal-alpha-2",
+      data: "\u0015 env TMUX= tmux attach-session -t '$0'\r",
+    });
+    const order = mockInvoke.mock.calls.map(([command]) => command);
+    expect(order.indexOf("create_terminal_split")).toBeLessThan(
+      order.indexOf("terminal_write"),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole("group", { name: "Alpha terminal pane" }),
+      ).toHaveLength(2),
+    );
+  });
+
+  it("creates a named session with attach-or-create", async () => {
+    mockTmux({ status: "ok", sessions: [] });
+    const picker = await openPicker();
+    fireEvent.change(
+      await within(picker).findByRole("textbox", { name: "New session name" }),
+      { target: { value: "  train  " } },
+    );
+    await act(async () => {
+      fireEvent.click(
+        within(picker).getByRole("button", { name: /Create & attach/ }),
+      );
+    });
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("terminal_write", {
+        terminalId: "terminal-alpha-2",
+        data: "\u0015 env TMUX= tmux new-session -A -s 'train'\r",
+      }),
+    );
+  });
+
+  it("lets tmux auto-number the session when no name is given", async () => {
+    mockTmux({ status: "ok", sessions: [] });
+    const picker = await openPicker();
+    const create = await within(picker).findByRole("button", {
+      name: /Create & attach/,
+    });
+    await act(async () => {
+      fireEvent.click(create);
+    });
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("terminal_write", {
+        terminalId: "terminal-alpha-2",
+        data: "\u0015 env TMUX= tmux new-session\r",
+      }),
+    );
+  });
+
+  it("rejects names tmux cannot accept without opening a pane", async () => {
+    mockTmux({ status: "ok", sessions: [] });
+    const picker = await openPicker();
+    const input = await within(picker).findByRole("textbox", {
+      name: "New session name",
+    });
+
+    for (const [value, message] of [
+      ["a.b", /cannot contain '\.' or ':'/],
+      ["a:b", /cannot contain '\.' or ':'/],
+      ["-X", /cannot start with '-'/],
+    ] as const) {
+      fireEvent.change(input, { target: { value } });
+      await act(async () => {
+        fireEvent.click(
+          within(picker).getByRole("button", { name: /Create & attach/ }),
+        );
+      });
+      expect(await within(picker).findByRole("alert")).toHaveTextContent(
+        message,
+      );
+      expect(mockInvoke).not.toHaveBeenCalledWith(
+        "create_terminal_split",
+        expect.anything(),
+      );
+    }
+  });
+
+  it("kills a session after confirmation and refreshes the list", async () => {
+    mockTmux(listing);
+    const picker = await openPicker();
+    const kill = await within(picker).findByRole("button", {
+      name: "Kill tmux session train run",
+    });
+    await act(async () => {
+      fireEvent.click(kill);
+    });
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("kill_tmux_session", {
+        sessionId: "alpha",
+        tmuxId: "$0",
+      }),
+    );
+    // Killing must not attach.
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "create_terminal_split",
+      expect.anything(),
+    );
+    const listCalls = mockInvoke.mock.calls.filter(
+      ([command]) => command === "list_tmux_sessions",
+    );
+    expect(listCalls.length).toBeGreaterThan(1);
+  });
+
+  it("does not kill anything when the confirmation is declined", async () => {
+    mockConfirm.mockResolvedValue(false);
+    mockTmux(listing);
+    const picker = await openPicker();
+    const kill = await within(picker).findByRole("button", {
+      name: "Kill tmux session train run",
+    });
+    await act(async () => {
+      fireEvent.click(kill);
+    });
+
+    await waitFor(() => expect(mockConfirm).toHaveBeenCalled());
+    expect(mockInvoke).not.toHaveBeenCalledWith(
+      "kill_tmux_session",
+      expect.anything(),
+    );
+  });
+
+  it("distinguishes a host without tmux from one with no sessions", async () => {
+    mockTmux({ status: "not-installed", sessions: [] });
+    const picker = await openPicker();
+    expect(
+      await within(picker).findByText(
+        "tmux was not found on this host's login PATH",
+      ),
+    ).toBeInTheDocument();
+    // The probe runs under `sh -l`, which can miss a tmux the interactive
+    // login shell would find, so creating must stay available.
+    expect(
+      within(picker).getByRole("button", { name: /Create & attach/ }),
+    ).toBeEnabled();
+  });
+
+  it("explains that Windows hosts have no tmux and blocks creating", async () => {
+    mockTmux({ status: "unsupported-os", sessions: [] });
+    const picker = await openPicker();
+    expect(
+      await within(picker).findByText(
+        "tmux is not available on Windows hosts",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(picker).getByRole("button", { name: /Create & attach/ }),
+    ).toBeDisabled();
+  });
+
+  it("reports an empty session list without an error", async () => {
+    mockTmux({ status: "ok", sessions: [] });
+    const picker = await openPicker();
+    expect(
+      await within(picker).findByText("No tmux sessions are running"),
+    ).toBeInTheDocument();
+    expect(within(picker).queryByRole("alert")).toBeNull();
+  });
+
+  it("keeps a listing failure inside the popover instead of the error modal", async () => {
+    mockInvoke.mockImplementation((command) =>
+      command === "list_tmux_sessions"
+        ? Promise.reject(new Error("transport read failed"))
+        : Promise.resolve(undefined),
+    );
+    const picker = await openPicker();
+
+    expect(await within(picker).findByRole("alert")).toHaveTextContent(
+      "transport read failed",
+    );
+    // A blocking modal for "this host has no tmux" would be far too heavy.
+    expect(useSessionStore.getState().message).toBeNull();
+  });
+
+  it("closes the split picker when the tmux picker opens", async () => {
+    mockTmux(listing);
+    render(<TerminalPane />);
+    await waitFor(() => expect(terminalMocks.open).toHaveBeenCalledOnce());
+
+    fireEvent.click(screen.getByRole("button", { name: "Split terminal" }));
+    expect(
+      screen.getByRole("dialog", { name: "Split terminal options" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "tmux sessions" }));
+    expect(
+      screen.queryByRole("dialog", { name: "Split terminal options" }),
+    ).toBeNull();
+    const picker = screen.getByRole("dialog", { name: "tmux sessions" });
+    // Let the listing settle so the fetch it kicked off does not resolve after
+    // the test ends.
+    expect(await within(picker).findByText("train run")).toBeInTheDocument();
   });
 });

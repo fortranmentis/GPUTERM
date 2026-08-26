@@ -10,4 +10,5 @@ pub mod sftp;
 pub mod system_monitor;
 pub mod terminal;
 pub mod thermal_monitor;
+pub mod tmux;
 pub mod windows_monitor;

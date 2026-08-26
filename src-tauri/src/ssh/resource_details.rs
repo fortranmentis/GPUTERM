@@ -264,7 +264,7 @@ enum ResourceDetailValue {
 /// Returns the cached remote OS for the session, detecting and caching it on
 /// first use. Detection failure (dead transport) falls back to Linux like the
 /// poller, without poisoning the cache.
-fn resolve_remote_os(
+pub(crate) fn resolve_remote_os(
     cache: &Mutex<HashMap<String, RemoteOs>>,
     session_id: &str,
     session: &Session,

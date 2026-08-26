@@ -10,6 +10,7 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { Terminal, type IDisposable } from "@xterm/xterm";
@@ -27,7 +28,9 @@ import {
   PanelTop,
   PlugZap,
   Plus,
+  RefreshCw,
   Server,
+  SquareTerminal,
   Terminal as TerminalIcon,
   X,
 } from "lucide-react";
@@ -39,6 +42,7 @@ import {
   takePendingOutput,
 } from "../utils/terminalBuffer";
 import { withHostKeyPrompt } from "../utils/hostKeyPrompt";
+import { shellQuote } from "../utils/shellQuote";
 import { attachWebKitHangulImeWorkaround } from "../utils/xtermHangulIme";
 import {
   createTerminalLayout,
@@ -56,6 +60,8 @@ import type {
   TerminalClosedPayload,
   TerminalPaneInfo,
   TerminalSessionInfo,
+  TmuxListing,
+  TmuxSession,
 } from "../types/session";
 
 type TerminalOutputPayload = {
@@ -77,6 +83,45 @@ type TermEntry = {
 };
 
 const MAX_TERMINAL_PANES = 4;
+
+/** Compact relative age for a tmux session's creation time (unix seconds). */
+function formatTmuxAge(createdSeconds: number): string {
+  const seconds = Math.max(0, Date.now() / 1000 - createdSeconds);
+  if (seconds < 60) {
+    return "just now";
+  }
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h ago`;
+  }
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+/**
+ * Returns why tmux would reject this session name, or null if it is usable.
+ * A blank name is allowed — tmux then numbers the session itself.
+ */
+function tmuxNameError(name: string): string | null {
+  if (name === "") {
+    return null;
+  }
+  if (/[.:]/.test(name)) {
+    return "Session names cannot contain '.' or ':'";
+  }
+  if (name.startsWith("-")) {
+    // Quoting does not help: tmux's own parser would read it as an option.
+    return "Session names cannot start with '-'";
+  }
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(name)) {
+    return "Session names cannot contain control characters";
+  }
+  return null;
+}
 
 type SplitPlacementControlsProps = {
   placement: TerminalSplitPlacement;
@@ -213,6 +258,7 @@ export function TerminalPane() {
   const fitTimerRef = useRef<number | null>(null);
   const splitPickerRef = useRef<HTMLDivElement | null>(null);
   const sessionPickerRef = useRef<HTMLDivElement | null>(null);
+  const tmuxPickerRef = useRef<HTMLDivElement | null>(null);
   const lastTerminalViewRevisionRef = useRef<number | null>(null);
   const [paneLayout, setPaneLayout] = useState<TerminalLayoutNode | null>(null);
   const [focusedTerminalId, setFocusedTerminalId] = useState<string | null>(null);
@@ -245,6 +291,16 @@ export function TerminalPane() {
   const [otherProxyCredentialStored, setOtherProxyCredentialStored] =
     useState(false);
   const [addingSession, setAddingSession] = useState(false);
+  const [tmuxPickerOpen, setTmuxPickerOpen] = useState(false);
+  const [tmuxListing, setTmuxListing] = useState<TmuxListing | null>(null);
+  const [tmuxLoading, setTmuxLoading] = useState(false);
+  // tmux failures stay inside the popover: `setMessage({kind:"error"})` opens a
+  // blocking modal, which is far too heavy for "this host has no tmux".
+  const [tmuxError, setTmuxError] = useState<string | null>(null);
+  const [tmuxBusy, setTmuxBusy] = useState(false);
+  const [tmuxKillingId, setTmuxKillingId] = useState<string | null>(null);
+  const [newTmuxName, setNewTmuxName] = useState("");
+  const [newTmuxNameError, setNewTmuxNameError] = useState<string | null>(null);
 
   const activeProfile =
     sessions.find((session) => session.id === activeSessionId) ?? null;
@@ -284,6 +340,17 @@ export function TerminalPane() {
   const isFocusedConnected =
     focusedSessionId != null &&
     connectedSessionIds.includes(focusedSessionId);
+  // The pane a new split is cut from. Derived once so the tmux picker cannot
+  // list one host's sessions and then attach on another: `focusedTerminalId`
+  // may not be visible, and its fallback differs from `focusedSessionId`'s.
+  const splitSourceTerminalId =
+    focusedTerminalId && visiblePaneIds.includes(focusedTerminalId)
+      ? focusedTerminalId
+      : visiblePaneIds[0] ?? null;
+  const splitSourceSessionId =
+    (splitSourceTerminalId &&
+      sessionIdByTerminalId.get(splitSourceTerminalId)) ||
+    activeSessionId;
   const selectedOtherProfile =
     sessions.find((session) => session.id === selectedOtherSessionId) ?? null;
   const selectedOtherProxyProfile =
@@ -530,29 +597,32 @@ export function TerminalPane() {
   }, [focusedTerminalId]);
 
   useEffect(() => {
-    if (!sessionPickerOpen && !splitPickerOpen) {
+    if (!sessionPickerOpen && !splitPickerOpen && !tmuxPickerOpen) {
       return;
     }
+    const closeAll = () => {
+      setSessionPickerOpen(false);
+      setSplitPickerOpen(false);
+      setSelectedOtherSessionId(null);
+      setOtherSessionPassword("");
+      setOtherProxyPassword("");
+      setTmuxPickerOpen(false);
+      setNewTmuxName("");
+      setNewTmuxNameError(null);
+    };
     const handlePointerDown = (event: MouseEvent) => {
       const target = event.target as Node;
       if (
         !sessionPickerRef.current?.contains(target) &&
-        !splitPickerRef.current?.contains(target)
+        !splitPickerRef.current?.contains(target) &&
+        !tmuxPickerRef.current?.contains(target)
       ) {
-        setSessionPickerOpen(false);
-        setSplitPickerOpen(false);
-        setSelectedOtherSessionId(null);
-        setOtherSessionPassword("");
-        setOtherProxyPassword("");
+        closeAll();
       }
     };
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setSessionPickerOpen(false);
-        setSplitPickerOpen(false);
-        setSelectedOtherSessionId(null);
-        setOtherSessionPassword("");
-        setOtherProxyPassword("");
+        closeAll();
       }
     };
     document.addEventListener("mousedown", handlePointerDown);
@@ -561,7 +631,7 @@ export function TerminalPane() {
       document.removeEventListener("mousedown", handlePointerDown);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [sessionPickerOpen, splitPickerOpen]);
+  }, [sessionPickerOpen, splitPickerOpen, tmuxPickerOpen]);
 
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -701,23 +771,27 @@ export function TerminalPane() {
     window.addEventListener("mouseup", handleUp);
   };
 
-  const addSplit = async () => {
-    const sourceTerminalId =
-      focusedTerminalId && visiblePaneIds.includes(focusedTerminalId)
-        ? focusedTerminalId
-        : visiblePaneIds[0] ?? null;
-    const sourceSessionId =
-      (sourceTerminalId &&
-        sessionIdByTerminalId.get(sourceTerminalId)) ||
-      activeSessionId;
+  /**
+   * Opens a split pane on the focused session, optionally typing a command into
+   * its fresh login shell. Returns null when the guards reject the request.
+   *
+   * Shared by the split button and the tmux picker so a tmux pane is created
+   * exactly like any other split.
+   */
+  const openSplitSourcePane = async (
+    setBusy: (busy: boolean) => void,
+    initialCommand?: string,
+  ) => {
+    const sourceTerminalId = splitSourceTerminalId;
+    const sourceSessionId = splitSourceSessionId;
     if (
       !sourceSessionId ||
       !connectedSessionIds.includes(sourceSessionId) ||
       visiblePaneIds.length >= MAX_TERMINAL_PANES
     ) {
-      return;
+      return null;
     }
-    setSplitting(true);
+    setBusy(true);
     try {
       const source =
         (sourceTerminalId &&
@@ -728,14 +802,134 @@ export function TerminalPane() {
         cols: source?.cols ?? 80,
         rows: source?.rows ?? 24,
       });
+      if (initialCommand) {
+        // Type-ahead into the new pane's login shell. Its TermEntry does not
+        // exist yet, so there is no input queue to join and no keystroke this
+        // could interleave with; the remote PTY holds the bytes until the
+        // shell first reads. Ctrl-U discards anything a profile left on the
+        // line, and the leading space keeps it out of shell history for users
+        // who set HISTCONTROL=ignorespace.
+        await invoke("terminal_write", {
+          terminalId: info.terminalId,
+          data: `\u0015 ${initialCommand}\r`,
+        });
+      }
       addTerminalPane(sourceSessionId, info.terminalId);
       insertPaneIntoLayout(info.terminalId, sourceTerminalId);
       focusPane(info.terminalId, sourceSessionId);
-      closeSplitPicker();
+      return info;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const addSplit = async () => {
+    try {
+      if (await openSplitSourcePane(setSplitting)) {
+        closeSplitPicker();
+      }
     } catch (error) {
       setMessage({ kind: "error", text: String(error) });
+    }
+  };
+
+  const closeTmuxPicker = () => {
+    setTmuxPickerOpen(false);
+    setNewTmuxName("");
+    setNewTmuxNameError(null);
+  };
+
+  const loadTmuxSessions = useCallback(async () => {
+    if (!splitSourceSessionId) {
+      return;
+    }
+    setTmuxLoading(true);
+    setTmuxError(null);
+    try {
+      const listing = await invoke<TmuxListing>("list_tmux_sessions", {
+        sessionId: splitSourceSessionId,
+      });
+      setTmuxListing(listing ?? null);
+    } catch (error) {
+      setTmuxListing(null);
+      setTmuxError(String(error));
     } finally {
-      setSplitting(false);
+      setTmuxLoading(false);
+    }
+  }, [splitSourceSessionId]);
+
+  // Fetch when the popover opens, and refetch if the focused host changes
+  // while it is still open.
+  useEffect(() => {
+    if (!tmuxPickerOpen) {
+      return;
+    }
+    void loadTmuxSessions();
+  }, [tmuxPickerOpen, loadTmuxSessions]);
+
+  const attachTmuxSession = async (session: TmuxSession) => {
+    try {
+      // Address the session by tmux's own id, never by its name: the name is
+      // remote-controlled data and this string is typed straight into a live
+      // login shell. `env TMUX=` clears the nesting guard for the common
+      // dotfile that auto-attaches tmux on interactive login.
+      const opened = await openSplitSourcePane(
+        setTmuxBusy,
+        `env TMUX= tmux attach-session -t ${shellQuote(session.id)}`,
+      );
+      if (opened) {
+        closeTmuxPicker();
+      }
+    } catch (error) {
+      setMessage({ kind: "error", text: String(error) });
+    }
+  };
+
+  const createTmuxSession = async (event: FormEvent) => {
+    event.preventDefault();
+    const name = newTmuxName.trim();
+    const nameError = tmuxNameError(name);
+    if (nameError) {
+      setNewTmuxNameError(nameError);
+      return;
+    }
+    try {
+      // `-A` attaches instead of failing if the name is already taken. A blank
+      // name lets tmux pick the next number.
+      const command = name
+        ? `env TMUX= tmux new-session -A -s ${shellQuote(name)}`
+        : "env TMUX= tmux new-session";
+      const opened = await openSplitSourcePane(setTmuxBusy, command);
+      if (opened) {
+        closeTmuxPicker();
+      }
+    } catch (error) {
+      setMessage({ kind: "error", text: String(error) });
+    }
+  };
+
+  const killTmuxSession = async (session: TmuxSession) => {
+    if (!splitSourceSessionId) {
+      return;
+    }
+    const accepted = await confirm(
+      `Kill tmux session "${session.name}"? Everything running inside it stops.`,
+      { title: "Kill tmux session", kind: "warning" },
+    );
+    if (!accepted) {
+      return;
+    }
+    setTmuxKillingId(session.id);
+    try {
+      await invoke("kill_tmux_session", {
+        sessionId: splitSourceSessionId,
+        tmuxId: session.id,
+      });
+      await loadTmuxSessions();
+    } catch (error) {
+      setTmuxError(String(error));
+    } finally {
+      setTmuxKillingId(null);
     }
   };
 
@@ -1225,6 +1419,153 @@ export function TerminalPane() {
                   )}
                   Split pane
                 </button>
+              </div>
+            )}
+          </div>
+          <div className="terminal-tmux-picker-anchor" ref={tmuxPickerRef}>
+            <button
+              className="icon-button"
+              type="button"
+              disabled={
+                !isFocusedConnected ||
+                tmuxBusy ||
+                visiblePaneIds.length >= MAX_TERMINAL_PANES
+              }
+              aria-label="tmux sessions"
+              title="tmux sessions on the focused server"
+              aria-expanded={tmuxPickerOpen}
+              onClick={() => {
+                if (tmuxPickerOpen) {
+                  closeTmuxPicker();
+                } else {
+                  setSplitPickerOpen(false);
+                  closeSessionPicker();
+                  setTmuxPickerOpen(true);
+                }
+              }}
+            >
+              {tmuxBusy ? (
+                <LoaderCircle className="spin" size={16} />
+              ) : (
+                <SquareTerminal size={16} />
+              )}
+            </button>
+            {tmuxPickerOpen && (
+              <div
+                className="terminal-tmux-picker"
+                role="dialog"
+                aria-label="tmux sessions"
+              >
+                <div className="terminal-tmux-picker-title">
+                  <span className="terminal-session-picker-heading">
+                    tmux sessions
+                  </span>
+                  <button
+                    className="icon-button ghost"
+                    type="button"
+                    aria-label="Refresh tmux sessions"
+                    title="Refresh"
+                    disabled={tmuxLoading}
+                    onClick={() => void loadTmuxSessions()}
+                  >
+                    <RefreshCw
+                      className={tmuxLoading ? "spin" : undefined}
+                      size={14}
+                    />
+                  </button>
+                </div>
+                {tmuxLoading ? (
+                  <div className="terminal-tmux-status">
+                    <LoaderCircle className="spin" size={14} />
+                    Loading sessions…
+                  </div>
+                ) : tmuxError ? (
+                  <div className="terminal-tmux-status error" role="alert">
+                    {tmuxError}
+                  </div>
+                ) : tmuxListing?.status === "unsupported-os" ? (
+                  <div className="terminal-tmux-status">
+                    tmux is not available on Windows hosts
+                  </div>
+                ) : tmuxListing?.status === "not-installed" ? (
+                  <div className="terminal-tmux-status">
+                    tmux was not found on this host's login PATH
+                  </div>
+                ) : tmuxListing && tmuxListing.sessions.length === 0 ? (
+                  <div className="terminal-tmux-status">
+                    No tmux sessions are running
+                  </div>
+                ) : (
+                  <div className="terminal-session-picker-list">
+                    {(tmuxListing?.sessions ?? []).map((session) => (
+                      <div className="terminal-tmux-row" key={session.id}>
+                        <button
+                          type="button"
+                          disabled={tmuxBusy}
+                          title={`Attach to ${session.name}`}
+                          onClick={() => void attachTmuxSession(session)}
+                        >
+                          <SquareTerminal size={15} />
+                          <span>
+                            <strong>{session.name}</strong>
+                            <small>
+                              {session.windows}{" "}
+                              {session.windows === 1 ? "window" : "windows"}
+                              {session.created == null
+                                ? ""
+                                : ` · ${formatTmuxAge(session.created)}`}
+                            </small>
+                          </span>
+                          {session.attached && <i title="Attached">Attached</i>}
+                        </button>
+                        <button
+                          className="icon-button ghost"
+                          type="button"
+                          aria-label={`Kill tmux session ${session.name}`}
+                          title="Kill session"
+                          disabled={tmuxKillingId != null}
+                          onClick={() => void killTmuxSession(session)}
+                        >
+                          {tmuxKillingId === session.id ? (
+                            <LoaderCircle className="spin" size={13} />
+                          ) : (
+                            <X size={13} />
+                          )}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <form onSubmit={(event) => void createTmuxSession(event)}>
+                  <label>
+                    <span>New session name</span>
+                    <input
+                      value={newTmuxName}
+                      placeholder="Leave blank to auto-number"
+                      onChange={(event) => {
+                        setNewTmuxName(event.target.value);
+                        setNewTmuxNameError(null);
+                      }}
+                    />
+                  </label>
+                  {newTmuxNameError && (
+                    <div className="terminal-tmux-status error" role="alert">
+                      {newTmuxNameError}
+                    </div>
+                  )}
+                  <button
+                    className="primary-button"
+                    type="submit"
+                    disabled={tmuxBusy || tmuxListing?.status === "unsupported-os"}
+                  >
+                    {tmuxBusy ? (
+                      <LoaderCircle className="spin" size={15} />
+                    ) : (
+                      <Plus size={15} />
+                    )}
+                    Create &amp; attach
+                  </button>
+                </form>
               </div>
             )}
           </div>

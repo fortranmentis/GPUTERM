@@ -699,12 +699,14 @@ button:disabled {
 }
 
 .terminal-split-picker-anchor,
-.terminal-session-picker-anchor {
+.terminal-session-picker-anchor,
+.terminal-tmux-picker-anchor {
   display: flex;
 }
 
 .terminal-split-picker,
-.terminal-session-picker {
+.terminal-session-picker,
+.terminal-tmux-picker {
   position: absolute;
   z-index: 12;
   top: calc(100% + 6px);
@@ -871,7 +873,8 @@ button:disabled {
   gap: 4px;
 }
 
-.terminal-session-picker-list > button {
+.terminal-session-picker-list > button,
+.terminal-tmux-row > button:first-child {
   display: grid;
   grid-template-columns: 20px minmax(0, 1fr) auto;
   align-items: center;
@@ -886,7 +889,8 @@ button:disabled {
   text-align: left;
 }
 
-.terminal-session-picker-list > button:hover {
+.terminal-session-picker-list > button:hover,
+.terminal-tmux-row > button:first-child:hover:not(:disabled) {
   border-color: var(--line);
   background: #121d29;
 }
@@ -4169,4 +4173,61 @@ button.agent-summary-section {
   .detail-window-content {
     scroll-behavior: auto;
   }
+}
+
+/* tmux session picker -------------------------------------------------- */
+
+.terminal-tmux-picker-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 6px;
+}
+
+/* The heading is a span here so the refresh button can sit beside it, so drop
+   the trailing padding it carries as a block in the other pickers. */
+.terminal-tmux-picker-title .terminal-session-picker-heading {
+  padding-bottom: 0;
+}
+
+/* An attach button plus a kill button, sharing the session-picker row look. */
+.terminal-tmux-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 26px;
+  align-items: center;
+  gap: 2px;
+}
+
+.terminal-tmux-row > .icon-button {
+  flex: none;
+  width: 26px;
+  height: 26px;
+}
+
+.terminal-tmux-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 4px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.terminal-tmux-status.error {
+  color: var(--red);
+}
+
+.terminal-tmux-picker form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.terminal-tmux-picker .primary-button {
+  width: 100%;
 }
