@@ -3716,7 +3716,17 @@ button.agent-summary-section {
   color: #93c5fd;
 }
 
-.llm-runtime-tag.vllm {
+.llm-runtime-tag.openai {
+  background: rgba(96, 165, 250, 0.16);
+  color: #93c5fd;
+}
+
+/* Serving engines (vLLM-style queue metrics) share the green tag. */
+.llm-runtime-tag.vllm,
+.llm-runtime-tag.sglang,
+.llm-runtime-tag.tgi,
+.llm-runtime-tag.llamacpp,
+.llm-runtime-tag.triton {
   background: rgba(52, 211, 153, 0.16);
   color: #6ee7b7;
 }

@@ -14,6 +14,17 @@ use std::fmt;
 pub enum RuntimeType {
     Ollama,
     Vllm,
+    Sglang,
+    /// Hugging Face Text Generation Inference.
+    Tgi,
+    /// llama.cpp's `llama-server`.
+    #[serde(rename = "llamacpp")]
+    LlamaCpp,
+    /// Any server with an OpenAI-style `/v1/models` (LM Studio, LocalAI, …).
+    #[serde(rename = "openai")]
+    OpenAi,
+    /// NVIDIA Triton Inference Server (including TensorRT-LLM backends).
+    Triton,
 }
 
 impl RuntimeType {
@@ -21,7 +32,19 @@ impl RuntimeType {
         match self {
             Self::Ollama => "ollama",
             Self::Vllm => "vllm",
+            Self::Sglang => "sglang",
+            Self::Tgi => "tgi",
+            Self::LlamaCpp => "llamacpp",
+            Self::OpenAi => "openai",
+            Self::Triton => "triton",
         }
+    }
+
+    /// Serving engines that report request queues and are graded on them.
+    /// Ollama and generic OpenAI-compatible servers are usually desktop or
+    /// laptop hosts, graded leniently on repeated failure instead.
+    pub fn is_serving_engine(self) -> bool {
+        !matches!(self, Self::Ollama | Self::OpenAi)
     }
 }
 
@@ -329,6 +352,23 @@ pub fn seconds_until(expires_at: Option<u64>, now: u64) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_keys_round_trip_through_serde() {
+        for runtime in [
+            RuntimeType::Ollama,
+            RuntimeType::Vllm,
+            RuntimeType::Sglang,
+            RuntimeType::Tgi,
+            RuntimeType::LlamaCpp,
+            RuntimeType::OpenAi,
+            RuntimeType::Triton,
+        ] {
+            let json = serde_json::to_string(&runtime).unwrap();
+            assert_eq!(json, format!("\"{}\"", runtime.key()));
+            assert_eq!(serde_json::from_str::<RuntimeType>(&json).unwrap(), runtime);
+        }
+    }
 
     #[test]
     fn vram_ratio_guards_a_zero_sized_model() {

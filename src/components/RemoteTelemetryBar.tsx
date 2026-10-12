@@ -536,12 +536,12 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
               {llmSummary.models === 1 ? "model" : "models"} running or served
             </span>
             <span>
-              vLLM {formatNumber(llmSummary.vllmRequestsRunning ?? 0, 0)} running
+              Queue {formatNumber(llmSummary.vllmRequestsRunning ?? 0, 0)} running
               / {formatNumber(llmSummary.vllmRequestsWaiting ?? 0, 0)} waiting
             </span>
           </>
         ) : (
-          <span>No Ollama or vLLM instance registered</span>
+          <span>No LLM runtime registered</span>
         )}
       </TelemetryButton>
 

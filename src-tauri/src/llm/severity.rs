@@ -71,9 +71,10 @@ impl Severity {
 }
 
 pub fn evaluate(input: &SeverityInput) -> Severity {
-    match input.runtime_type {
-        RuntimeType::Ollama => evaluate_ollama(input),
-        RuntimeType::Vllm => evaluate_vllm(input),
+    if input.runtime_type.is_serving_engine() {
+        evaluate_serving(input)
+    } else {
+        evaluate_ollama(input)
     }
 }
 
@@ -110,7 +111,10 @@ fn evaluate_ollama(input: &SeverityInput) -> Severity {
     Severity::new(level, reasons)
 }
 
-fn evaluate_vllm(input: &SeverityInput) -> Severity {
+/// vLLM's grading, shared by every serving engine: each exposes the same
+/// queue and KV readings (or reports them unsupported, which cannot raise the
+/// level).
+fn evaluate_serving(input: &SeverityInput) -> Severity {
     let mut level = SeverityLevel::Normal;
     let mut reasons: Vec<&str> = Vec::new();
 
@@ -153,7 +157,10 @@ fn evaluate_vllm(input: &SeverityInput) -> Severity {
         }
     }
 
-    if metrics.requests_waiting.is_some_and(|waiting| waiting >= 1.0) {
+    if metrics
+        .requests_waiting
+        .is_some_and(|waiting| waiting >= 1.0)
+    {
         if input.waiting_streak >= WAITING_SUSTAINED_TICKS {
             level = level.max(SeverityLevel::Congested);
             reasons.push("waiting_sustained");
@@ -197,6 +204,33 @@ mod tests {
             metrics: Some(metrics),
             waiting_streak: 0,
         }
+    }
+
+    #[test]
+    fn serving_engines_share_vllm_grading_and_openai_servers_ollamas() {
+        let metrics = RuntimeMetrics {
+            kv_cache_usage_ratio: Some(KV_CACHE_CRITICAL_RATIO),
+            ..Default::default()
+        };
+        for runtime in [
+            RuntimeType::Sglang,
+            RuntimeType::Tgi,
+            RuntimeType::LlamaCpp,
+            RuntimeType::Triton,
+        ] {
+            let mut input = vllm("online", &metrics);
+            input.runtime_type = runtime;
+            assert_eq!(evaluate(&input).level, SeverityLevel::Critical, "{runtime}");
+
+            let mut down = vllm("offline", &metrics);
+            down.runtime_type = runtime;
+            assert_eq!(evaluate(&down).level, SeverityLevel::Critical, "{runtime}");
+        }
+
+        // A desktop LM Studio dropping one poll is a warning, as for Ollama.
+        let mut lm_studio = ollama("offline");
+        lm_studio.runtime_type = RuntimeType::OpenAi;
+        assert_eq!(evaluate(&lm_studio).level, SeverityLevel::Warning);
     }
 
     #[test]

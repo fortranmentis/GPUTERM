@@ -1069,7 +1069,7 @@ describe("RemoteTelemetryBar LLM runtime card", () => {
     expect(screen.getByText("Telemetry unavailable")).toBeInTheDocument();
     expect(screen.getByText("LLM RUNTIME")).toBeInTheDocument();
     expect(
-      screen.getByText("No Ollama or vLLM instance registered"),
+      screen.getByText("No LLM runtime registered"),
     ).toBeInTheDocument();
   });
 
@@ -1098,7 +1098,7 @@ describe("RemoteTelemetryBar LLM runtime card", () => {
     expect(screen.getByText("3 instances")).toBeInTheDocument();
     expect(screen.getByText("1 normal / 1 attention / 1 error")).toBeInTheDocument();
     expect(screen.getByText("4 models running or served")).toBeInTheDocument();
-    expect(screen.getByText("vLLM 5 running / 2 waiting")).toBeInTheDocument();
+    expect(screen.getByText("Queue 5 running / 2 waiting")).toBeInTheDocument();
   });
 
   it("opens the LLM popover without a connected session", () => {

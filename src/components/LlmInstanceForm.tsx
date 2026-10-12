@@ -7,14 +7,10 @@ import type {
 } from "../types/llm";
 import type { SessionProfile } from "../types/session";
 import { withHostKeyPrompt } from "../utils/hostKeyPrompt";
+import { LLM_RUNTIMES, runtimeExampleUrl } from "../utils/llmRuntimes";
 
 const DEFAULT_TIMEOUT_MS = 3000;
 const DEFAULT_POLL_SECS = 5;
-
-const RUNTIME_HINTS: Record<LlmRuntimeType, string> = {
-  ollama: "http://192.168.0.20:11434",
-  vllm: "http://192.168.0.21:8000",
-};
 
 type InstanceForm = {
   id: string;
@@ -235,8 +231,11 @@ export function LlmInstanceForm({
             updateForm({ runtimeType: event.target.value as LlmRuntimeType })
           }
         >
-          <option value="ollama">Ollama</option>
-          <option value="vllm">vLLM</option>
+          {LLM_RUNTIMES.map((runtime) => (
+            <option key={runtime.key} value={runtime.key}>
+              {runtime.label}
+            </option>
+          ))}
         </select>
       </label>
 
@@ -274,7 +273,7 @@ export function LlmInstanceForm({
           placeholder={
             form.sshProfileId
               ? "http://127.0.0.1:11434"
-              : RUNTIME_HINTS[form.runtimeType]
+              : runtimeExampleUrl(form.runtimeType)
           }
           onChange={(event) => updateForm({ baseUrl: event.target.value })}
         />

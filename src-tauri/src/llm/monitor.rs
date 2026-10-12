@@ -17,9 +17,14 @@ use super::adapter::{
 };
 use super::http::{HttpClient, UreqClient};
 use super::instance::{vault_key, LlmInstance};
+use super::llamacpp::LlamaCppAdapter;
 use super::ollama::OllamaAdapter;
+use super::openai::OpenAiAdapter;
 use super::severity::{self, Severity, SeverityInput, SeverityLevel};
 use super::tunnel::{Endpoint, SshBackend, TunnelManager};
+use super::sglang::SglangAdapter;
+use super::tgi::TgiAdapter;
+use super::triton::TritonAdapter;
 use super::vllm::VllmAdapter;
 use crate::ssh::credentials::{CredentialStore, SecureCredentialStore};
 use crate::ssh::session::ActiveConnection;
@@ -197,7 +202,9 @@ pub struct LlmSummary {
     pub error: usize,
     pub unknown: usize,
     pub models: usize,
-    /// vLLM only; `None` when no vLLM instance reported a value.
+    /// Summed over serving engines (vLLM, SGLang, TGI, llama.cpp, Triton); the
+    /// field names predate the other engines and are kept for compatibility.
+    /// `None` when no engine reported a value.
     pub vllm_requests_running: Option<f64>,
     pub vllm_requests_waiting: Option<f64>,
 }
@@ -261,6 +268,11 @@ pub fn adapter_for(instance: &LlmInstance, now: u64) -> Box<dyn LlmRuntimeAdapte
     match instance.runtime_type {
         RuntimeType::Ollama => Box::new(OllamaAdapter::new(&instance.id, now)),
         RuntimeType::Vllm => Box::new(VllmAdapter::new(&instance.id, now)),
+        RuntimeType::Sglang => Box::new(SglangAdapter::new(&instance.id, now)),
+        RuntimeType::Tgi => Box::new(TgiAdapter::new(&instance.id, now)),
+        RuntimeType::LlamaCpp => Box::new(LlamaCppAdapter::new(&instance.id, now)),
+        RuntimeType::OpenAi => Box::new(OpenAiAdapter::new(&instance.id, now)),
+        RuntimeType::Triton => Box::new(TritonAdapter::new(&instance.id, now)),
     }
 }
 
@@ -488,7 +500,7 @@ fn stall_limit(instance: &LlmInstance) -> u64 {
 fn catalog_interval_secs(runtime_type: RuntimeType) -> u64 {
     match runtime_type {
         RuntimeType::Ollama => OLLAMA_CATALOG_INTERVAL_SECS,
-        RuntimeType::Vllm => VLLM_CATALOG_INTERVAL_SECS,
+        _ => VLLM_CATALOG_INTERVAL_SECS,
     }
 }
 
@@ -674,7 +686,7 @@ fn build_payload(
         summary.models += running_model_count;
 
         let metrics = state.and_then(|state| state.metrics.clone());
-        if instance.runtime_type == RuntimeType::Vllm {
+        if instance.runtime_type.is_serving_engine() {
             if let Some(metrics) = &metrics {
                 if let Some(running) = metrics.requests_running {
                     vllm_running = Some(vllm_running.unwrap_or(0.0) + running);

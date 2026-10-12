@@ -1,4 +1,5 @@
-//! Read-only monitoring for self-hosted LLM runtimes (Ollama and vLLM).
+//! Read-only monitoring for self-hosted LLM runtimes (Ollama, vLLM, SGLang,
+//! TGI, llama.cpp, OpenAI-compatible servers and Triton).
 //!
 //! Every request originates here, in the backend: the webview's CSP forbids it
 //! from reaching an external host, and the API key never leaves this process.
@@ -8,10 +9,16 @@
 pub mod adapter;
 pub mod http;
 pub mod instance;
+pub mod llamacpp;
 pub mod monitor;
 pub mod ollama;
+pub mod openai;
 pub mod prometheus;
+pub mod serving;
 pub mod severity;
+pub mod sglang;
+pub mod tgi;
+pub mod triton;
 pub mod tunnel;
 pub mod vllm;
 

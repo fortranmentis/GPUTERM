@@ -7,7 +7,14 @@
  * vault and never crosses the IPC boundary.
  */
 
-export type LlmRuntimeType = "ollama" | "vllm";
+export type LlmRuntimeType =
+  | "ollama"
+  | "vllm"
+  | "sglang"
+  | "tgi"
+  | "llamacpp"
+  | "openai"
+  | "triton";
 
 export type LlmInstance = {
   id: string;
@@ -56,7 +63,7 @@ export type LlmRuntimeStatus = {
 export type LlmRuntimeModel = {
   id: string;
   name: string;
-  /** `running` and `installed` for Ollama, `served` for vLLM. */
+  /** `running` and `installed` for Ollama, `served` for the other runtimes. */
   status: "running" | "installed" | "served";
   parameterSize: string | null;
   quantization: string | null;

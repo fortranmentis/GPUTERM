@@ -4,16 +4,13 @@
 //! a missing one is recorded as unsupported instead of failing the collection or
 //! being reported as zero.
 
-use serde::Deserialize;
-use std::collections::BTreeMap;
-
 use super::adapter::{
-    LlmRuntimeAdapter, RuntimeError, RuntimeErrorCode, RuntimeMetrics, RuntimeModel, RuntimeStatus,
-    RuntimeType,
+    LlmRuntimeAdapter, RuntimeError, RuntimeMetrics, RuntimeModel, RuntimeStatus, RuntimeType,
 };
 use super::http::{error_for_status, HttpClient};
 use super::monitor::CounterState;
 use super::prometheus::{self, Scrape};
+use super::serving::{parse_openai_models, worst_quantile};
 
 pub const HEALTH_PATH: &str = "/health";
 pub const MODELS_PATH: &str = "/v1/models";
@@ -49,57 +46,8 @@ impl VllmAdapter {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct VllmModelEntry {
-    id: String,
-    #[serde(default)]
-    object: Option<String>,
-    #[serde(default)]
-    created: Option<i64>,
-    #[serde(default)]
-    owned_by: Option<String>,
-    /// Present on some builds; absent on others. Never guessed when missing.
-    #[serde(default)]
-    max_model_len: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct VllmModelList {
-    #[serde(default)]
-    data: Vec<VllmModelEntry>,
-}
-
-fn parse_models(body: &str, now: u64) -> Result<Vec<RuntimeModel>, RuntimeError> {
-    let parsed: VllmModelList = serde_json::from_str(body).map_err(|error| {
-        RuntimeError::new(
-            RuntimeErrorCode::ParseError,
-            format!("Could not read the vLLM model list: {}", error),
-        )
-    })?;
-    let _ = now;
-
-    Ok(parsed
-        .data
-        .into_iter()
-        .map(|entry| {
-            let mut model = RuntimeModel::new(entry.id.clone(), entry.id, "served");
-            // Left as None when absent: the UI shows "unknown" rather than a
-            // guessed context window.
-            model.context_length = entry.max_model_len;
-            let mut metadata = BTreeMap::new();
-            if let Some(object) = entry.object {
-                metadata.insert("object".to_string(), object);
-            }
-            if let Some(owned_by) = entry.owned_by {
-                metadata.insert("ownedBy".to_string(), owned_by);
-            }
-            if let Some(created) = entry.created {
-                metadata.insert("created".to_string(), created.to_string());
-            }
-            model.metadata = metadata;
-            model
-        })
-        .collect())
+fn parse_models(body: &str) -> Result<Vec<RuntimeModel>, RuntimeError> {
+    parse_openai_models(body, "vLLM")
 }
 
 /// Reads the first KV cache metric this server exposes, preferring the current
@@ -125,21 +73,6 @@ fn kv_cache_usage(scrape: &Scrape) -> Option<f64> {
         }
     }
     None
-}
-
-/// Highest percentile across label sets.
-///
-/// Series for different models are never merged into one histogram — summing
-/// unrelated label sets would produce a number that describes nothing. Taking
-/// the worst is a defensible summary for a single card.
-fn worst_quantile(scrape: &Scrape, base_name: &str, quantile: f64) -> Option<f64> {
-    let mut worst: Option<f64> = None;
-    for histogram in scrape.histograms(base_name) {
-        if let Some(value) = histogram.quantile(quantile) {
-            worst = Some(worst.map_or(value, |current: f64| current.max(value)));
-        }
-    }
-    worst
 }
 
 /// Builds metrics from a scrape, folding in the previous counter reading.
@@ -237,13 +170,9 @@ impl LlmRuntimeAdapter for VllmAdapter {
                 self.now,
                 &error_for_status(response.status),
             ),
-            Err(error) => RuntimeStatus::failed(
-                &self.instance_id,
-                RuntimeType::Vllm,
-                None,
-                self.now,
-                &error,
-            ),
+            Err(error) => {
+                RuntimeStatus::failed(&self.instance_id, RuntimeType::Vllm, None, self.now, &error)
+            }
         }
     }
 
@@ -252,7 +181,7 @@ impl LlmRuntimeAdapter for VllmAdapter {
         if !response.is_success() {
             return Err(error_for_status(response.status));
         }
-        parse_models(&response.body, self.now)
+        parse_models(&response.body)
     }
 
     fn get_runtime_metrics(
@@ -274,6 +203,7 @@ impl LlmRuntimeAdapter for VllmAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::adapter::RuntimeErrorCode;
     use crate::llm::http::testing::FakeHttpClient;
 
     const TEST_NOW: u64 = 1_799_000_000;
@@ -350,7 +280,10 @@ vllm:time_to_first_token_seconds_count{model_name="m"} 100
             models[0].context_length, None,
             "never guessed when the server omits it"
         );
-        assert_eq!(models[0].metadata.get("ownedBy").map(String::as_str), Some("vllm"));
+        assert_eq!(
+            models[0].metadata.get("ownedBy").map(String::as_str),
+            Some("vllm")
+        );
     }
 
     #[test]
@@ -369,7 +302,8 @@ vllm:time_to_first_token_seconds_count{model_name="m"} 100
 
     #[test]
     fn the_legacy_gpu_cache_metric_is_used_only_as_a_fallback() {
-        let legacy = "# TYPE vllm:gpu_cache_usage_perc gauge\nvllm:gpu_cache_usage_perc{e=\"0\"} 0.7\n";
+        let legacy =
+            "# TYPE vllm:gpu_cache_usage_perc gauge\nvllm:gpu_cache_usage_perc{e=\"0\"} 0.7\n";
         let scrape = prometheus::parse(legacy);
         let mut state = CounterState::default();
         let (metrics, _) = metrics_from_scrape(&scrape, &mut state, TEST_NOW);
@@ -427,10 +361,22 @@ vllm:prefix_cache_hits{m=\"a\"} 0
 
         // 10 s later: prompt 1000 -> 1600 is 60/s, generation 500 -> 600 is 10/s.
         let later = METRICS_BODY
-            .replace("vllm:prompt_tokens_total{model_name=\"m\"} 1000", "vllm:prompt_tokens_total{model_name=\"m\"} 1600")
-            .replace("vllm:generation_tokens_total{model_name=\"m\"} 500", "vllm:generation_tokens_total{model_name=\"m\"} 600")
-            .replace("vllm:request_success_total{model_name=\"m\"} 40", "vllm:request_success_total{model_name=\"m\"} 60")
-            .replace("vllm:num_preemptions_total{model_name=\"m\"} 7", "vllm:num_preemptions_total{model_name=\"m\"} 9");
+            .replace(
+                "vllm:prompt_tokens_total{model_name=\"m\"} 1000",
+                "vllm:prompt_tokens_total{model_name=\"m\"} 1600",
+            )
+            .replace(
+                "vllm:generation_tokens_total{model_name=\"m\"} 500",
+                "vllm:generation_tokens_total{model_name=\"m\"} 600",
+            )
+            .replace(
+                "vllm:request_success_total{model_name=\"m\"} 40",
+                "vllm:request_success_total{model_name=\"m\"} 60",
+            )
+            .replace(
+                "vllm:num_preemptions_total{model_name=\"m\"} 7",
+                "vllm:num_preemptions_total{model_name=\"m\"} 9",
+            );
         let scrape = prometheus::parse(&later);
         let (second, reset) = metrics_from_scrape(&scrape, &mut state, TEST_NOW + 10);
 
@@ -450,8 +396,14 @@ vllm:prefix_cache_hits{m=\"a\"} 0
 
         // The server restarted and its counters went back to near zero.
         let restarted = METRICS_BODY
-            .replace("vllm:prompt_tokens_total{model_name=\"m\"} 1000", "vllm:prompt_tokens_total{model_name=\"m\"} 5")
-            .replace("vllm:num_preemptions_total{model_name=\"m\"} 7", "vllm:num_preemptions_total{model_name=\"m\"} 0");
+            .replace(
+                "vllm:prompt_tokens_total{model_name=\"m\"} 1000",
+                "vllm:prompt_tokens_total{model_name=\"m\"} 5",
+            )
+            .replace(
+                "vllm:num_preemptions_total{model_name=\"m\"} 7",
+                "vllm:num_preemptions_total{model_name=\"m\"} 0",
+            );
         let scrape = prometheus::parse(&restarted);
         let (metrics, reset) = metrics_from_scrape(&scrape, &mut state, TEST_NOW + 10);
 
@@ -460,8 +412,10 @@ vllm:prefix_cache_hits{m=\"a\"} 0
         assert_eq!(metrics.preemptions_delta, None);
 
         // The new value became the baseline, so the next interval works again.
-        let after = METRICS_BODY
-            .replace("vllm:prompt_tokens_total{model_name=\"m\"} 1000", "vllm:prompt_tokens_total{model_name=\"m\"} 105");
+        let after = METRICS_BODY.replace(
+            "vllm:prompt_tokens_total{model_name=\"m\"} 1000",
+            "vllm:prompt_tokens_total{model_name=\"m\"} 105",
+        );
         let scrape = prometheus::parse(&after);
         let (metrics, reset) = metrics_from_scrape(&scrape, &mut state, TEST_NOW + 20);
         assert!(!reset);

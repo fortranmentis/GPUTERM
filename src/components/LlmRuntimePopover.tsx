@@ -13,8 +13,10 @@ import type {
   LlmRuntimeModel,
   LlmSeverity,
   LlmTelemetry,
+  LlmRuntimeType,
 } from "../types/llm";
 import { formatBytes } from "../utils/formatBytes";
+import { isServingEngine, runtimeLabel } from "../utils/llmRuntimes";
 import { formatNumber, formatPercent } from "../utils/format";
 
 const CHART_WINDOW_SECONDS = 15 * 60;
@@ -173,7 +175,7 @@ export function LlmRuntimeDetailContent({
         <div className="resource-unavailable">
           <strong>No LLM runtimes registered</strong>
           <span>
-            Add an Ollama or vLLM server to monitor it. Nothing is polled until
+            Add an Ollama, vLLM, SGLang, TGI, llama.cpp, OpenAI-compatible or Triton server to monitor it. Nothing is polled until
             you do.
           </span>
         </div>
@@ -206,7 +208,7 @@ export function LlmRuntimeDetailContent({
               onClick={() => setSelectedId(row.instance.id)}
             >
               <span className={`llm-runtime-tag ${row.instance.runtimeType}`}>
-                {row.instance.runtimeType === "ollama" ? "Ollama" : "vLLM"}
+                {runtimeLabel(row.instance.runtimeType)}
               </span>
               <strong>{row.instance.name}</strong>
               <small>
@@ -287,11 +289,11 @@ function LlmSummaryStrip({ telemetry }: { telemetry: LlmTelemetry }) {
       <SummaryItem label="Error" value={String(summary.error)} tone="critical" />
       <SummaryItem label="Models" value={String(summary.models)} />
       <SummaryItem
-        label="vLLM running"
+        label="Queue running"
         value={formatCount(summary.vllmRequestsRunning)}
       />
       <SummaryItem
-        label="vLLM waiting"
+        label="Queue waiting"
         value={formatCount(summary.vllmRequestsWaiting)}
       />
     </div>
@@ -339,7 +341,7 @@ function LlmInstanceDetail({
       <header>
         <div>
           <span className={`llm-runtime-tag ${instance.runtimeType}`}>
-            {instance.runtimeType === "ollama" ? "Ollama" : "vLLM"}
+            {runtimeLabel(instance.runtimeType)}
           </span>
           <strong>{instance.name}</strong>
           <small title={instance.baseUrl}>
@@ -426,7 +428,7 @@ function LlmInstanceDetail({
         </p>
       )}
 
-      {instance.runtimeType === "vllm" && <VllmMetrics metrics={metrics} />}
+      {isServingEngine(instance.runtimeType) && <VllmMetrics metrics={metrics} />}
 
       <LlmModelList
         models={telemetry?.models ?? []}
@@ -558,7 +560,7 @@ function LlmModelList({
   runtimeType,
 }: {
   models: LlmRuntimeModel[];
-  runtimeType: "ollama" | "vllm";
+  runtimeType: LlmRuntimeType;
 }) {
   if (models.length === 0) {
     return (
@@ -679,7 +681,7 @@ function LlmCharts({
   runtimeType,
 }: {
   history: LlmHistoryPoint[];
-  runtimeType: "ollama" | "vllm";
+  runtimeType: LlmRuntimeType;
 }) {
   if (history.length === 0) {
     return null;
@@ -698,7 +700,7 @@ function LlmCharts({
           },
         ]}
       />
-      {runtimeType === "vllm" && (
+      {isServingEngine(runtimeType) && (
         <>
           <LlmHistoryChart
             label="KV cache (%)"
