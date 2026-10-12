@@ -68,6 +68,32 @@ export type LocalListResponse = {
   entries: LocalEntry[];
 };
 
+/** One `Host` alias read from an ssh_config file. */
+export type SshConfigHost = {
+  alias: string;
+  host: string;
+  user?: string | null;
+  port: number;
+  identityFile?: string | null;
+  proxyJump?: string | null;
+  /** A saved profile with the same host, port and user, updated on import. */
+  conflictProfileId?: string | null;
+  warnings: string[];
+};
+
+export type SshConfigPreview = {
+  hosts: SshConfigHost[];
+  warnings: string[];
+  sourcePath?: string;
+};
+
+export type SshConfigImportResult = {
+  created: number;
+  updated: number;
+  warnings: string[];
+  profiles: SessionProfile[];
+};
+
 export type AppSettings = {
   recentLocalPath?: string | null;
   terminalTheme?: string | null;

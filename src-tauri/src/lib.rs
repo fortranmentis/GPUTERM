@@ -25,6 +25,7 @@ use ssh::sftp::{
     sftp_mkdir, sftp_path_exists, sftp_rename, sftp_upload_file,
 };
 use ssh::snippets::{delete_snippet, list_snippets, save_snippet};
+use ssh::ssh_config::{import_ssh_config, preview_ssh_config};
 use ssh::system_monitor::{get_telemetry_settings, update_telemetry_settings};
 use ssh::tmux::{kill_tmux_session, list_tmux_sessions};
 use ssh::terminal::{
@@ -80,6 +81,8 @@ pub fn run() {
             list_snippets,
             save_snippet,
             delete_snippet,
+            preview_ssh_config,
+            import_ssh_config,
             list_llm_instances,
             save_llm_instance,
             delete_llm_instance,

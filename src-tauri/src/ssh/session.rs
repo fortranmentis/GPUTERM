@@ -515,6 +515,24 @@ pub fn upsert_profile(profile: SessionProfile) -> Result<Vec<SessionProfile>, St
     Ok(profiles)
 }
 
+/// Saves several profiles in one locked write (used by the ssh_config import).
+pub(crate) fn upsert_profiles(
+    incoming: Vec<SessionProfile>,
+) -> Result<Vec<SessionProfile>, String> {
+    let _write_guard = lock_profiles()?;
+    let mut profiles = read_profiles()?;
+    for profile in incoming.into_iter().map(normalize_profile) {
+        if let Some(existing) = profiles.iter_mut().find(|item| item.id == profile.id) {
+            *existing = profile;
+        } else {
+            profiles.push(profile);
+        }
+    }
+    profiles.sort_by_key(|profile| profile.name.to_lowercase());
+    write_profiles(&profiles)?;
+    Ok(profiles)
+}
+
 /// An open SSH session plus, when the target is reached through a jump host,
 /// the tunnel keeping the bastion connection and its forwarder thread alive.
 ///

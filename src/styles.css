@@ -4437,3 +4437,110 @@ button.agent-summary-section {
   color: var(--text);
   font-family: "Cascadia Mono", "JetBrains Mono", SFMono-Regular, Consolas, monospace;
 }
+
+/* ssh_config import ------------------------------------------------------ */
+
+.sidebar-section-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.ssh-config-import {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+.ssh-config-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.ssh-config-status.warning {
+  color: var(--amber);
+}
+
+.ssh-config-status.error {
+  color: var(--red);
+}
+
+.ssh-config-hosts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 340px;
+  overflow: auto;
+}
+
+.ssh-config-host {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.ssh-config-host input {
+  width: auto;
+  height: auto;
+  margin-top: 2px;
+}
+
+.ssh-config-host > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ssh-config-host strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.ssh-config-host strong i {
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(96, 165, 250, 0.14);
+  color: var(--blue);
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.ssh-config-host small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ssh-config-host small.ssh-config-host-warning {
+  color: var(--amber);
+  white-space: normal;
+}
+
+.ssh-config-text {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background-color: #090e15;
+  color: var(--text);
+  font-family: "Cascadia Mono", "JetBrains Mono", SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  resize: vertical;
+}

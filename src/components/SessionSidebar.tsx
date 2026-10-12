@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
+  FileInput,
   KeyRound,
   Laptop,
   PlugZap,
@@ -14,6 +15,7 @@ import {
 import { selectIsActiveConnected, useSessionStore } from "../stores/sessionStore";
 import { useDisconnectSession } from "../hooks/useDisconnectSession";
 import { withHostKeyPrompt } from "../utils/hostKeyPrompt";
+import { describeImport, SshConfigImport } from "./SshConfigImport";
 import gtLogo from "../assets/gt-logo.png";
 import type {
   SessionConnectRequest,
@@ -59,6 +61,7 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
   const disconnectSession = useDisconnectSession();
   const [form, setForm] = useState<SessionForm>(blankForm);
   const [showNewForm, setShowNewForm] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [busy, setBusy] = useState(false);
   const [storedCredentialIds, setStoredCredentialIds] = useState<Set<string>>(
     () => new Set(),
@@ -471,16 +474,48 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
 
       <div className="sidebar-section-heading">
         <div className="sidebar-section-title">Sessions</div>
-        <button
-          className="secondary-button compact"
-          disabled={busy}
-          type="button"
-          onClick={startNewProfile}
-        >
-          <Plus size={15} />
-          New
-        </button>
+        <div className="sidebar-section-actions">
+          <button
+            className="secondary-button compact"
+            disabled={busy || showImport}
+            type="button"
+            title="Import hosts from ~/.ssh/config"
+            onClick={() => {
+              setShowNewForm(false);
+              setShowImport(true);
+            }}
+          >
+            <FileInput size={15} />
+            Import
+          </button>
+          <button
+            className="secondary-button compact"
+            disabled={busy}
+            type="button"
+            onClick={() => {
+              setShowImport(false);
+              startNewProfile();
+            }}
+          >
+            <Plus size={15} />
+            New
+          </button>
+        </div>
       </div>
+
+      {showImport && (
+        <SshConfigImport
+          onClose={() => setShowImport(false)}
+          onImported={(result) => {
+            setSessions(result.profiles);
+            setShowImport(false);
+            setMessage({
+              kind: result.warnings.length > 0 ? "info" : "success",
+              text: describeImport(result),
+            });
+          }}
+        />
+      )}
 
       {showNewForm && (
         <form className="session-form new-session-form" onSubmit={connect}>
@@ -659,7 +694,7 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
         </form>
       )}
 
-      {!showNewForm && (
+      {!showNewForm && !showImport && (
         <div className="session-list">
           {sessions.map((session) => (
             <button
@@ -706,7 +741,7 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
         </div>
       )}
 
-      {!showNewForm && form.id && (
+      {!showNewForm && !showImport && form.id && (
         <form className="selected-session-actions" onSubmit={connect}>
           <span title={form.name}>{form.name}</span>
           {!form.isLocal && !connectedSessionIds.includes(form.id) && (
