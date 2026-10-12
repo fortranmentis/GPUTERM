@@ -507,20 +507,37 @@ pub fn open_ssh_session(target: &SshTarget) -> Result<SshConnection, String> {
     // normal handshake path connects to.
     let (tcp, tunnel) = match &target.proxy {
         None => {
-            let address = format!("{}:{}", target.host, target.port);
-            let socket_addr = address
+            let address = format_host_port(&target.host, target.port);
+            let socket_addrs = (host_without_brackets(&target.host), target.port)
                 .to_socket_addrs()
                 .map_err(|error| format!("Network resolution failed for {}: {}", address, error))?
-                .next()
-                .ok_or_else(|| format!("No network address found for {}", address))?;
-            let tcp = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)).map_err(
-                |error| {
-                    format!(
-                        "Network timeout or connection failure for {}: {}",
-                        address, error
-                    )
-                },
-            )?;
+                .collect::<Vec<_>>();
+            if socket_addrs.is_empty() {
+                return Err(format!("No network address found for {}", address));
+            }
+
+            // Try every resolved address (e.g. an AAAA record that is not
+            // routable here, then the A record) before giving up.
+            let mut connected = None;
+            let mut last_error = None;
+            for socket_addr in socket_addrs {
+                match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
+                    Ok(tcp) => {
+                        connected = Some(tcp);
+                        break;
+                    }
+                    Err(error) => last_error = Some(error),
+                }
+            }
+            let tcp = connected.ok_or_else(|| {
+                format!(
+                    "Network timeout or connection failure for {}: {}",
+                    address,
+                    last_error
+                        .map(|error| error.to_string())
+                        .unwrap_or_else(|| "all resolved addresses failed".to_string())
+                )
+            })?;
             (tcp, None)
         }
         Some(proxy) => open_tunneled_stream(target, proxy)?,
@@ -538,8 +555,9 @@ pub fn open_ssh_session(target: &SshTarget) -> Result<SshConnection, String> {
     session.set_timeout(10_000);
     session.handshake().map_err(|error| {
         format!(
-            "SSH handshake failed for {}:{}: {}",
-            target.host, target.port, error
+            "SSH handshake failed for {}: {}",
+            format_host_port(&target.host, target.port),
+            error
         )
     })?;
 
@@ -560,6 +578,20 @@ pub fn open_ssh_session(target: &SshTarget) -> Result<SshConnection, String> {
     })
 }
 
+pub(crate) fn format_host_port(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{}]:{}", host, port)
+    } else {
+        format!("{}:{}", host, port)
+    }
+}
+
+pub(crate) fn host_without_brackets(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host)
+}
+
 /// Connects the bastion, opens a direct-tcpip channel to `target` through it,
 /// and pumps that channel over a local loopback socket so the caller can run a
 /// normal SSH handshake against the target.
@@ -573,17 +605,22 @@ fn open_tunneled_stream(
             // bastion's own host key.
             error
         } else {
-            format!("Jump host {}:{}: {}", proxy.host, proxy.port, error)
+            format!(
+                "Jump host {}: {}",
+                format_host_port(&proxy.host, proxy.port),
+                error
+            )
         }
     })?;
 
     let channel = bastion
         .session
-        .channel_direct_tcpip(&target.host, target.port, None)
+        .channel_direct_tcpip(host_without_brackets(&target.host), target.port, None)
         .map_err(|error| {
             format!(
-                "Jump host could not open a channel to {}:{}: {}",
-                target.host, target.port, error
+                "Jump host could not open a channel to {}: {}",
+                format_host_port(&target.host, target.port),
+                error
             )
         })?;
 
@@ -1415,6 +1452,14 @@ mod tests {
                 .map(|(key_type, fp)| (key_type.to_string(), fp.to_string()))
                 .collect(),
         )
+    }
+
+    #[test]
+    fn formats_ipv4_names_and_ipv6_addresses() {
+        assert_eq!(format_host_port("example.com", 22), "example.com:22");
+        assert_eq!(format_host_port("2001:db8::1", 2222), "[2001:db8::1]:2222");
+        assert_eq!(format_host_port("[2001:db8::1]", 22), "[2001:db8::1]:22");
+        assert_eq!(host_without_brackets("[2001:db8::1]"), "2001:db8::1");
     }
 
     #[test]
