@@ -46,6 +46,19 @@ export function TransferQueue() {
               <span>{task.direction}</span>
               <small title={task.sourcePath}>{task.sourcePath}</small>
               <small title={task.targetPath}>{task.targetPath}</small>
+              {task.filesTotal != null && (
+                <small
+                  className="transfer-task-files"
+                  title={task.currentFile ?? undefined}
+                >
+                  {task.filesDone ?? 0}/{task.filesTotal}{" "}
+                  {task.filesTotal === 1 ? "file" : "files"}
+                  {task.status === "running" && task.currentFile
+                    ? ` · ${task.currentFile}`
+                    : ""}
+                  {task.skipped ? ` · ${task.skipped} skipped` : ""}
+                </small>
+              )}
             </div>
             <div className="transfer-task-side">
               <span className={`transfer-status ${task.status}`}>{task.status}</span>

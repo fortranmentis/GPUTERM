@@ -87,6 +87,12 @@ export type SftpProgressPayload = {
   /** Set when the user cancelled, so callers need not match on `error` text. */
   canceled: boolean;
   error?: string | null;
+  /** Folder transfers only. */
+  currentFile?: string;
+  filesDone?: number;
+  filesTotal?: number;
+  /** Entries left alone: kept existing files and links, never followed. */
+  skipped?: number;
 };
 
 /**

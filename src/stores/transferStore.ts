@@ -57,6 +57,10 @@ export const useTransferStore = create<TransferStore>((set) => ({
           progressPercent,
           status,
           error: payload.error ?? task.error,
+          currentFile: payload.currentFile,
+          filesDone: payload.filesDone ?? task.filesDone,
+          filesTotal: payload.filesTotal ?? task.filesTotal,
+          skipped: payload.skipped ?? task.skipped,
         };
       }),
     }));

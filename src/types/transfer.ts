@@ -19,6 +19,11 @@ export type TransferTask = {
   status: TransferStatus;
   error?: string;
   sessionId?: string;
+  /** Folder transfers only. */
+  currentFile?: string;
+  filesDone?: number;
+  filesTotal?: number;
+  skipped?: number;
 };
 
 export type LocalTransferDragFile = {

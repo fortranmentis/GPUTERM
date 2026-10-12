@@ -69,6 +69,12 @@ type RemoteFilePanelProps = {
   onNewFolderNameChange: (name: string) => void;
   onCreateFolder: () => void;
   onCancelCreateFolder: () => void;
+  /** Path of the entry being renamed inline, if any. */
+  renamingPath: string | null;
+  renameDraft: string;
+  onRenameDraftChange: (name: string) => void;
+  onConfirmRename: () => void;
+  onCancelRename: () => void;
 };
 
 export function RemoteFilePanel({
@@ -100,6 +106,11 @@ export function RemoteFilePanel({
   onNewFolderNameChange,
   onCreateFolder,
   onCancelCreateFolder,
+  renamingPath,
+  renameDraft,
+  onRenameDraftChange,
+  onConfirmRename,
+  onCancelRename,
 }: RemoteFilePanelProps) {
   const [sort, setSort] = useState<RemoteSort>(DEFAULT_REMOTE_SORT);
   const sortedEntries = useMemo(
@@ -281,8 +292,58 @@ export function RemoteFilePanel({
           />
         </div>
         <div className="file-list">
-          {sortedEntries.map((entry) => (
+          {sortedEntries.map((entry) =>
+            entry.path === renamingPath ? (
+              <form
+                key={entry.path}
+                className="new-folder-row rename-row"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  onConfirmRename();
+                }}
+              >
+                <input
+                  autoFocus
+                  value={renameDraft}
+                  aria-label={`New name for ${entry.name}`}
+                  onFocus={(event) => {
+                    // Select the stem so typing keeps the extension.
+                    const dot = entry.type === "file" ? entry.name.lastIndexOf(".") : -1;
+                    event.currentTarget.setSelectionRange(
+                      0,
+                      dot > 0 ? dot : entry.name.length,
+                    );
+                  }}
+                  onChange={(event) => onRenameDraftChange(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      event.preventDefault();
+                      onCancelRename();
+                    }
+                  }}
+                />
+                <button
+                  className="icon-button"
+                  type="submit"
+                  disabled={loading || !renameDraft.trim()}
+                  aria-label="Confirm rename"
+                  title="Rename"
+                >
+                  <Check size={16} />
+                </button>
+                <button
+                  className="icon-button ghost"
+                  type="button"
+                  aria-label="Cancel rename"
+                  title="Cancel"
+                  onClick={onCancelRename}
+                >
+                  <X size={16} />
+                </button>
+              </form>
+            ) : (
             <button
+              data-remote-directory={entry.type === "directory" ? entry.path : undefined}
               key={entry.path}
               type="button"
               className={`file-row ${selectedPaths.includes(entry.path) ? "selected" : ""}`}
@@ -323,7 +384,8 @@ export function RemoteFilePanel({
               <span>{formatFileSize(entry.size)}</span>
               <span>{formatModified(entry.modifiedTime)}</span>
             </button>
-          ))}
+            ),
+          )}
           {connected && entries.length === 0 && (
             <div className="empty-list">Empty directory</div>
           )}

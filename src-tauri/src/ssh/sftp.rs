@@ -47,6 +47,10 @@ pub struct SftpTransferRequest {
     remote_path: String,
     local_path: String,
     transfer_id: Option<String>,
+    /// Folder transfers: leave files that already exist at the destination
+    /// instead of replacing them.
+    #[serde(default)]
+    keep_existing: bool,
 }
 
 #[derive(Clone, Deserialize)]
@@ -78,6 +82,46 @@ struct SftpProgressPayload {
     /// Set when the user cancelled. The frontend must not have to match on
     /// `error` text to tell a cancellation from a real failure.
     canceled: bool,
+    /// Folder transfers only: the file being copied, how many are done, and
+    /// how many entries were left alone (kept existing files, links).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    files_done: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    files_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skipped: Option<u64>,
+}
+
+#[derive(Debug, Default)]
+struct FolderProgress {
+    current_file: Option<String>,
+    files_done: u64,
+    files_total: u64,
+    skipped: u64,
+}
+
+/// What a transfer did. A single file reports `files: 1`.
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SftpTransferSummary {
+    files: u64,
+    bytes: u64,
+    /// Relative paths left alone because they already existed.
+    skipped_existing: Vec<String>,
+    /// Relative paths of symlinks and special files, which are never followed.
+    skipped_other: Vec<String>,
+}
+
+impl SftpTransferSummary {
+    fn single(bytes: u64) -> Self {
+        Self {
+            files: 1,
+            bytes,
+            ..Default::default()
+        }
+    }
 }
 
 #[tauri::command]
@@ -175,7 +219,7 @@ pub async fn sftp_download_file(
     app: AppHandle,
     state: State<'_, AppState>,
     request: SftpTransferRequest,
-) -> Result<(), String> {
+) -> Result<SftpTransferSummary, String> {
     let target = target_for_active_session(&state, &request.session_id)?;
     let cancel = register_transfer_cancel(&state, request.transfer_id.as_deref());
     let transfer_id = request.transfer_id.clone();
@@ -193,7 +237,7 @@ pub async fn sftp_upload_file(
     app: AppHandle,
     state: State<'_, AppState>,
     request: SftpTransferRequest,
-) -> Result<(), String> {
+) -> Result<SftpTransferSummary, String> {
     let target = target_for_active_session(&state, &request.session_id)?;
     let cancel = register_transfer_cancel(&state, request.transfer_id.as_deref());
     let transfer_id = request.transfer_id.clone();
@@ -258,6 +302,48 @@ pub async fn sftp_mkdir(
     .map_err(|error| format!("SFTP mkdir task failed: {}", error))?
 }
 
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SftpRenameRequest {
+    session_id: String,
+    source_path: String,
+    target_path: String,
+}
+
+/// Renames or moves a remote entry. Refuses to replace an existing target, so
+/// a rename can never silently destroy another file or folder.
+#[tauri::command]
+pub async fn sftp_rename(
+    state: State<'_, AppState>,
+    request: SftpRenameRequest,
+) -> Result<(), String> {
+    let target = target_for_active_session(&state, &request.session_id)?;
+    let ops = Arc::clone(&state.ops_sessions);
+    tauri::async_runtime::spawn_blocking(move || {
+        with_ops_session(&ops, &target, OPS_TIMEOUT_MS, |session| {
+            let sftp = session
+                .sftp()
+                .map_err(|error| format!("SFTP failed to start: {}", error))?;
+            let source = Path::new(&request.source_path);
+            let destination = Path::new(&request.target_path);
+            if source == destination {
+                return Ok(());
+            }
+            if sftp.lstat(destination).is_ok() {
+                return Err(format!("{} already exists", request.target_path));
+            }
+            sftp.rename(source, destination, None).map_err(|error| {
+                format!(
+                    "SFTP rename failed for {} to {}: {}",
+                    request.source_path, request.target_path, error
+                )
+            })
+        })
+    })
+    .await
+    .map_err(|error| format!("SFTP rename task failed: {}", error))?
+}
+
 #[tauri::command]
 pub async fn sftp_path_exists(
     state: State<'_, AppState>,
@@ -313,7 +399,7 @@ fn download_path(
     target: SshTarget,
     request: SftpTransferRequest,
     cancel: Option<&AtomicBool>,
-) -> Result<(), String> {
+) -> Result<SftpTransferSummary, String> {
     let connection = open_ssh_session(&target)?;
     let sftp = connection
         .session
@@ -323,37 +409,39 @@ fn download_path(
     let remote_stat = sftp
         .lstat(remote_path)
         .map_err(|error| format!("SFTP stat failed for {}: {}", request.remote_path, error))?;
-    let total_bytes = remote_entry_size(&sftp, remote_path, &remote_stat)?;
-    let mut transferred_bytes = 0;
-    emit_progress(
-        &app,
-        &request,
-        "download",
-        transferred_bytes,
-        Some(total_bytes),
-        false,
-        None,
-    );
+    match file_type(&remote_stat) {
+        "directory" => return transfer_dir(&app, &sftp, &request, cancel, false),
+        "file" => {}
+        "symlink" => {
+            return Err(format!(
+                "Symbolic links are not supported for transfer: {}",
+                remote_path.display()
+            ))
+        }
+        _ => {
+            return Err(format!(
+                "Unsupported remote entry: {}",
+                remote_path.display()
+            ))
+        }
+    }
 
-    let result = download_remote_entry(
+    let total_bytes = remote_stat.size.unwrap_or(0);
+    let mut transferred_bytes = 0;
+    emit_progress(&app, &request, "download", transferred_bytes, Some(total_bytes), false, None, None);
+    let result = download_remote_file(
         &sftp,
         remote_path,
-        &remote_stat,
         Path::new(&request.local_path),
         &app,
         &request,
         Some(total_bytes),
         cancel,
         &mut transferred_bytes,
+        None,
     );
-    finish_transfer(
-        &app,
-        &request,
-        "download",
-        transferred_bytes,
-        Some(total_bytes),
-        result,
-    )
+    finish_transfer(&app, &request, "download", transferred_bytes, Some(total_bytes), result, None)?;
+    Ok(SftpTransferSummary::single(transferred_bytes))
 }
 
 fn upload_path(
@@ -361,60 +449,8 @@ fn upload_path(
     target: SshTarget,
     request: SftpTransferRequest,
     cancel: Option<&AtomicBool>,
-) -> Result<(), String> {
+) -> Result<SftpTransferSummary, String> {
     let local_path = Path::new(&request.local_path);
-    let total_bytes = local_entry_size(local_path)?;
-
-    let connection = open_ssh_session(&target)?;
-    let sftp = connection
-        .session
-        .sftp()
-        .map_err(|error| format!("SFTP failed to start: {}", error))?;
-    let token = transfer_token(request.transfer_id.as_deref());
-    let mut transferred_bytes = 0;
-    emit_progress(
-        &app,
-        &request,
-        "upload",
-        transferred_bytes,
-        Some(total_bytes),
-        false,
-        None,
-    );
-    let result = upload_local_entry(
-        &sftp,
-        local_path,
-        Path::new(&request.remote_path),
-        &token,
-        &app,
-        &request,
-        Some(total_bytes),
-        cancel,
-        &mut transferred_bytes,
-    );
-    finish_transfer(
-        &app,
-        &request,
-        "upload",
-        transferred_bytes,
-        Some(total_bytes),
-        result,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn upload_local_entry(
-    sftp: &Sftp,
-    local_path: &Path,
-    remote_path: &Path,
-    token: &str,
-    app: &AppHandle,
-    request: &SftpTransferRequest,
-    total_bytes: Option<u64>,
-    cancel: Option<&AtomicBool>,
-    transferred_bytes: &mut u64,
-) -> Result<(), String> {
-    check_transfer_canceled(cancel)?;
     let metadata = fs::symlink_metadata(local_path).map_err(|error| {
         format!(
             "Failed to inspect local path {}: {}",
@@ -424,43 +460,158 @@ fn upload_local_entry(
     })?;
     if metadata.file_type().is_symlink() {
         return Err(format!(
-            "Symbolic links are not supported for folder transfer: {}",
+            "Symbolic links are not supported for transfer: {}",
             local_path.display()
         ));
     }
-
-    if metadata.is_dir() {
-        ensure_remote_directory(sftp, remote_path)?;
-        let entries = fs::read_dir(local_path).map_err(|error| {
-            format!(
-                "Failed to read local directory {}: {}",
-                local_path.display(),
-                error
-            )
-        })?;
-        for entry in entries {
-            check_transfer_canceled(cancel)?;
-            let entry = entry
-                .map_err(|error| format!("Failed to read local directory entry: {}", error))?;
-            let child_remote = remote_child_path(remote_path, &entry.file_name());
-            upload_local_entry(
-                sftp,
-                &entry.path(),
-                &child_remote,
-                token,
-                app,
-                request,
-                total_bytes,
-                cancel,
-                transferred_bytes,
-            )?;
-        }
-        return Ok(());
-    }
-    if !metadata.is_file() {
+    if !metadata.is_dir() && !metadata.is_file() {
         return Err(format!("Unsupported local entry: {}", local_path.display()));
     }
 
+    let connection = open_ssh_session(&target)?;
+    let sftp = connection
+        .session
+        .sftp()
+        .map_err(|error| format!("SFTP failed to start: {}", error))?;
+    if metadata.is_dir() {
+        return transfer_dir(&app, &sftp, &request, cancel, true);
+    }
+
+    let total_bytes = metadata.len();
+    let token = transfer_token(request.transfer_id.as_deref());
+    let mut transferred_bytes = 0;
+    emit_progress(&app, &request, "upload", transferred_bytes, Some(total_bytes), false, None, None);
+    let result = upload_file(
+        &sftp,
+        local_path,
+        Path::new(&request.remote_path),
+        &token,
+        &app,
+        &request,
+        Some(total_bytes),
+        cancel,
+        &mut transferred_bytes,
+        None,
+    );
+    finish_transfer(&app, &request, "upload", transferred_bytes, Some(total_bytes), result, None)?;
+    Ok(SftpTransferSummary::single(transferred_bytes))
+}
+
+/// Copies a whole folder over one connection: plans the tree first (bounded,
+/// links never followed), creates folders parents-first, then copies files,
+/// skipping existing ones when the user chose to keep them.
+fn transfer_dir(
+    app: &AppHandle,
+    sftp: &Sftp,
+    request: &SftpTransferRequest,
+    cancel: Option<&AtomicBool>,
+    upload: bool,
+) -> Result<SftpTransferSummary, String> {
+    let operation = if upload { "upload" } else { "download" };
+    let mut folder = FolderProgress::default();
+    let mut transferred_bytes = 0;
+    let mut total_bytes = None;
+    emit_progress(app, request, operation, 0, None, false, None, None);
+
+    let outcome = (|| {
+        let remote_root = Path::new(&request.remote_path);
+        let local_root = Path::new(&request.local_path);
+        let plan = if upload {
+            plan_tree(|relative| {
+                check_transfer_canceled(cancel)?;
+                list_local_folder(&join_local(local_root, relative))
+            })?
+        } else {
+            plan_tree(|relative| {
+                check_transfer_canceled(cancel)?;
+                list_remote_folder(sftp, &join_remote(remote_root, relative))
+            })?
+        };
+        let mut summary = SftpTransferSummary {
+            skipped_other: plan.skipped,
+            ..Default::default()
+        };
+
+        if upload {
+            ensure_remote_directory(sftp, remote_root)?;
+            for dir in &plan.dirs {
+                ensure_remote_directory(sftp, &join_remote(remote_root, dir))?;
+            }
+        } else {
+            ensure_local_directory(local_root)?;
+            for dir in &plan.dirs {
+                ensure_local_directory(&join_local(local_root, dir))?;
+            }
+        }
+
+        let mut files = Vec::new();
+        for (relative, size) in plan.files {
+            let exists = if upload {
+                sftp.lstat(&join_remote(remote_root, &relative)).is_ok()
+            } else {
+                fs::symlink_metadata(join_local(local_root, &relative)).is_ok()
+            };
+            if exists && request.keep_existing {
+                summary.skipped_existing.push(relative);
+            } else {
+                files.push((relative, size));
+            }
+        }
+
+        total_bytes = Some(files.iter().map(|(_, size)| *size).sum::<u64>());
+        folder.files_total = files.len() as u64;
+        emit_progress(app, request, operation, 0, total_bytes, false, None, Some(&folder));
+
+        let token = transfer_token(request.transfer_id.as_deref());
+        for (index, (relative, _)) in files.iter().enumerate() {
+            check_transfer_canceled(cancel)?;
+            folder.files_done = index as u64;
+            folder.current_file = Some(relative.clone());
+            let remote = join_remote(remote_root, relative);
+            let local = join_local(local_root, relative);
+            if upload {
+                upload_file(
+                    sftp, &local, &remote, &token, app, request, total_bytes, cancel,
+                    &mut transferred_bytes, Some(&folder),
+                )?;
+            } else {
+                download_remote_file(
+                    sftp, &remote, &local, app, request, total_bytes, cancel,
+                    &mut transferred_bytes, Some(&folder),
+                )?;
+            }
+            summary.files += 1;
+        }
+        folder.files_done = files.len() as u64;
+        folder.current_file = None;
+        summary.bytes = transferred_bytes;
+        Ok(summary)
+    })();
+
+    let result = outcome.as_ref().map(|_| ()).map_err(Clone::clone);
+    folder.skipped = outcome
+        .as_ref()
+        .map(|summary| (summary.skipped_existing.len() + summary.skipped_other.len()) as u64)
+        .unwrap_or(0);
+    finish_transfer(app, request, operation, transferred_bytes, total_bytes, result, Some(&folder))?;
+    outcome
+}
+
+/// Uploads one local file through a remote part file.
+#[allow(clippy::too_many_arguments)]
+fn upload_file(
+    sftp: &Sftp,
+    local_path: &Path,
+    remote_path: &Path,
+    token: &str,
+    app: &AppHandle,
+    request: &SftpTransferRequest,
+    total_bytes: Option<u64>,
+    cancel: Option<&AtomicBool>,
+    transferred_bytes: &mut u64,
+    folder: Option<&FolderProgress>,
+) -> Result<(), String> {
+    check_transfer_canceled(cancel)?;
     // A directory occupying the destination name is never removed to make room
     // for a file: the overwrite prompt only told the user something exists, not
     // that a whole tree would be deleted.
@@ -500,6 +651,7 @@ fn upload_local_entry(
         total_bytes,
         cancel,
         transferred_bytes,
+        folder,
     ) {
         drop(remote_file);
         let _ = sftp.unlink(&part_path);
@@ -576,62 +728,6 @@ fn transfer_token(transfer_id: Option<&str>) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn download_remote_entry(
-    sftp: &Sftp,
-    remote_path: &Path,
-    remote_stat: &FileStat,
-    local_path: &Path,
-    app: &AppHandle,
-    request: &SftpTransferRequest,
-    total_bytes: Option<u64>,
-    cancel: Option<&AtomicBool>,
-    transferred_bytes: &mut u64,
-) -> Result<(), String> {
-    check_transfer_canceled(cancel)?;
-    match file_type(remote_stat) {
-        "directory" => {
-            ensure_local_directory(local_path)?;
-            for (child_path, child_stat) in remote_directory_entries(sftp, remote_path)? {
-                check_transfer_canceled(cancel)?;
-                let child_name = child_path.file_name().ok_or_else(|| {
-                    format!("Remote entry has no file name: {}", child_path.display())
-                })?;
-                download_remote_entry(
-                    sftp,
-                    &child_path,
-                    &child_stat,
-                    &local_path.join(child_name),
-                    app,
-                    request,
-                    total_bytes,
-                    cancel,
-                    transferred_bytes,
-                )?;
-            }
-            Ok(())
-        }
-        "file" => download_remote_file(
-            sftp,
-            remote_path,
-            local_path,
-            app,
-            request,
-            total_bytes,
-            cancel,
-            transferred_bytes,
-        ),
-        "symlink" => Err(format!(
-            "Symbolic links are not supported for folder transfer: {}",
-            remote_path.display()
-        )),
-        _ => Err(format!(
-            "Unsupported remote entry: {}",
-            remote_path.display()
-        )),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
 fn download_remote_file(
     sftp: &Sftp,
     remote_path: &Path,
@@ -641,7 +737,9 @@ fn download_remote_file(
     total_bytes: Option<u64>,
     cancel: Option<&AtomicBool>,
     transferred_bytes: &mut u64,
+    folder: Option<&FolderProgress>,
 ) -> Result<(), String> {
+    check_transfer_canceled(cancel)?;
     if let Some(parent) = local_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -693,6 +791,7 @@ fn download_remote_file(
         total_bytes,
         cancel,
         transferred_bytes,
+        folder,
     );
     drop(local_file);
     if let Err(error) = result {
@@ -715,6 +814,7 @@ fn copy_transfer_stream<R: Read, W: Write>(
     total_bytes: Option<u64>,
     cancel: Option<&AtomicBool>,
     transferred_bytes: &mut u64,
+    folder: Option<&FolderProgress>,
 ) -> Result<(), String> {
     // Heap-allocated: a stack buffer this size is close to the default thread
     // stack on some platforms, and this runs under recursive directory walks.
@@ -750,6 +850,7 @@ fn copy_transfer_stream<R: Read, W: Write>(
                 total_bytes,
                 false,
                 None,
+                folder,
             );
         }
     }
@@ -777,82 +878,147 @@ fn finish_transfer(
     transferred_bytes: u64,
     total_bytes: Option<u64>,
     result: Result<(), String>,
+    folder: Option<&FolderProgress>,
 ) -> Result<(), String> {
-    match result {
-        Ok(()) => {
-            emit_progress(
-                app,
-                request,
-                operation,
-                transferred_bytes,
-                total_bytes,
-                true,
-                None,
-            );
-            Ok(())
-        }
-        Err(error) => {
-            emit_progress(
-                app,
-                request,
-                operation,
-                transferred_bytes,
-                total_bytes,
-                true,
-                Some(error.clone()),
-            );
-            Err(error)
-        }
-    }
+    let error = result.as_ref().err().cloned();
+    emit_progress(
+        app,
+        request,
+        operation,
+        transferred_bytes,
+        total_bytes,
+        true,
+        error,
+        folder,
+    );
+    result
 }
 
-fn local_entry_size(path: &Path) -> Result<u64, String> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("Failed to inspect local path {}: {}", path.display(), error))?;
-    if metadata.file_type().is_symlink() {
-        return Err(format!(
-            "Symbolic links are not supported for folder transfer: {}",
-            path.display()
-        ));
-    }
-    if metadata.is_file() {
-        return Ok(metadata.len());
-    }
-    if !metadata.is_dir() {
-        return Err(format!("Unsupported local entry: {}", path.display()));
-    }
+/// What a folder holds, as paths relative to it with `/` separators.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct TreePlan {
+    /// Parents before children.
+    dirs: Vec<String>,
+    files: Vec<(String, u64)>,
+    skipped: Vec<String>,
+}
 
-    fs::read_dir(path)
-        .map_err(|error| {
-            format!(
-                "Failed to read local directory {}: {}",
-                path.display(),
-                error
-            )
-        })?
-        .try_fold(0_u64, |total, entry| {
-            let entry = entry
-                .map_err(|error| format!("Failed to read local directory entry: {}", error))?;
-            local_entry_size(&entry.path()).map(|size| total.saturating_add(size))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryKind {
+    Dir,
+    File,
+    /// Symlinks and special files: never followed, so a link cannot pull in
+    /// a tree outside the folder or loop forever.
+    Other,
+}
+
+/// One folder's entries: name, kind, size in bytes.
+type Listing = Vec<(String, EntryKind, u64)>;
+
+const MAX_TREE_ENTRIES: usize = 100_000;
+const MAX_TREE_DEPTH: usize = 64;
+
+/// Walks a folder breadth-first. `list` returns `(name, kind, size)` for the
+/// folder at a relative path ("" is the root).
+fn plan_tree(mut list: impl FnMut(&str) -> Result<Listing, String>) -> Result<TreePlan, String> {
+    let mut plan = TreePlan::default();
+    let mut queue = std::collections::VecDeque::from([(String::new(), 0_usize)]);
+    let mut seen = 0_usize;
+    while let Some((relative, depth)) = queue.pop_front() {
+        let mut entries = list(&relative)?;
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        for (name, kind, size) in entries {
+            if name == "." || name == ".." {
+                continue;
+            }
+            seen += 1;
+            if seen > MAX_TREE_ENTRIES {
+                return Err(format!(
+                    "The folder has more than {} entries; transfer smaller folders",
+                    MAX_TREE_ENTRIES
+                ));
+            }
+            let path = if relative.is_empty() {
+                name
+            } else {
+                format!("{}/{}", relative, name)
+            };
+            match kind {
+                EntryKind::Dir if depth + 1 >= MAX_TREE_DEPTH => plan.skipped.push(path),
+                EntryKind::Dir => {
+                    plan.dirs.push(path.clone());
+                    queue.push_back((path, depth + 1));
+                }
+                EntryKind::File => plan.files.push((path, size)),
+                EntryKind::Other => plan.skipped.push(path),
+            }
+        }
+    }
+    Ok(plan)
+}
+
+fn list_local_folder(path: &Path) -> Result<Listing, String> {
+    let entries = fs::read_dir(path).map_err(|error| {
+        format!(
+            "Failed to read local directory {}: {}",
+            path.display(),
+            error
+        )
+    })?;
+    let mut listed = Vec::new();
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| format!("Failed to read local directory entry: {}", error))?;
+        // symlink_metadata: a link is reported as a link, not followed.
+        let metadata = entry.path().symlink_metadata().map_err(|error| {
+            format!("Failed to inspect {}: {}", entry.path().display(), error)
+        })?;
+        let kind = if metadata.is_dir() {
+            EntryKind::Dir
+        } else if metadata.is_file() {
+            EntryKind::File
+        } else {
+            EntryKind::Other
+        };
+        listed.push((entry.file_name().to_string_lossy().into_owned(), kind, metadata.len()));
+    }
+    Ok(listed)
+}
+
+fn list_remote_folder(sftp: &Sftp, path: &Path) -> Result<Listing, String> {
+    Ok(remote_directory_entries(sftp, path)?
+        .into_iter()
+        .filter_map(|(path, stat)| {
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            // READDIR attributes describe the entry itself, so a symlink is
+            // reported as one rather than as its target.
+            let kind = match file_type(&stat) {
+                "directory" => EntryKind::Dir,
+                "file" => EntryKind::File,
+                _ => EntryKind::Other,
+            };
+            Some((name, kind, stat.size.unwrap_or(0)))
         })
+        .collect())
 }
 
-fn remote_entry_size(sftp: &Sftp, path: &Path, stat: &FileStat) -> Result<u64, String> {
-    match file_type(stat) {
-        "file" => Ok(stat.size.unwrap_or(0)),
-        "directory" => remote_directory_entries(sftp, path)?.into_iter().try_fold(
-            0_u64,
-            |total, (child_path, child_stat)| {
-                remote_entry_size(sftp, &child_path, &child_stat)
-                    .map(|size| total.saturating_add(size))
-            },
-        ),
-        "symlink" => Err(format!(
-            "Symbolic links are not supported for folder transfer: {}",
-            path.display()
-        )),
-        _ => Err(format!("Unsupported remote entry: {}", path.display())),
+/// Remote paths are POSIX whatever the local platform.
+fn join_remote(root: &Path, relative: &str) -> PathBuf {
+    if relative.is_empty() {
+        return root.to_path_buf();
     }
+    let root = root.to_string_lossy().replace('\\', "/");
+    if root == "/" {
+        return PathBuf::from(format!("/{}", relative));
+    }
+    PathBuf::from(format!("{}/{}", root.trim_end_matches('/'), relative))
+}
+
+fn join_local(root: &Path, relative: &str) -> PathBuf {
+    relative
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .fold(root.to_path_buf(), |path, part| path.join(part))
 }
 
 fn remote_directory_entries(sftp: &Sftp, path: &Path) -> Result<Vec<(PathBuf, FileStat)>, String> {
@@ -1081,6 +1247,7 @@ fn cleanup_drag_out_cache(cache_root: &Path) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_progress(
     app: &AppHandle,
     request: &SftpTransferRequest,
@@ -1089,6 +1256,7 @@ fn emit_progress(
     total_bytes: Option<u64>,
     done: bool,
     error: Option<String>,
+    folder: Option<&FolderProgress>,
 ) {
     let _ = app.emit(
         "sftp-progress",
@@ -1103,6 +1271,10 @@ fn emit_progress(
             done,
             canceled: error.as_deref() == Some(TRANSFER_CANCELED),
             error,
+            current_file: folder.and_then(|folder| folder.current_file.clone()),
+            files_done: folder.map(|folder| folder.files_done),
+            files_total: folder.map(|folder| folder.files_total),
+            skipped: folder.map(|folder| folder.skipped).filter(|count| *count > 0),
         },
     );
 }
@@ -1139,9 +1311,12 @@ fn file_type(stat: &FileStat) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_local_directory, local_entry_size, remove_local_entry_if_exists, remote_child_path,
-        remote_part_path, reserve_drag_out_paths, transfer_token,
+        ensure_local_directory, join_local, join_remote, list_local_folder, plan_tree,
+        remove_local_entry_if_exists, remote_child_path, remote_part_path, reserve_drag_out_paths,
+        transfer_token, EntryKind, Listing,
     };
+    use std::collections::HashMap;
+    use std::path::PathBuf;
     use std::fs;
     use std::path::Path;
 
@@ -1189,17 +1364,94 @@ mod tests {
         fs::remove_dir_all(root).expect("remove test directory");
     }
 
+    type FakeFolder<'a> = (&'a str, &'a [(&'a str, EntryKind, u64)]);
+
+    fn fake_tree(tree: &[FakeFolder]) -> impl FnMut(&str) -> Result<Listing, String> {
+        let map: HashMap<String, Listing> = tree
+            .iter()
+            .map(|(dir, entries)| {
+                (
+                    dir.to_string(),
+                    entries
+                        .iter()
+                        .map(|(name, kind, size)| (name.to_string(), *kind, *size))
+                        .collect(),
+                )
+            })
+            .collect();
+        move |relative: &str| {
+            map.get(relative)
+                .cloned()
+                .ok_or_else(|| format!("no such folder {relative}"))
+        }
+    }
+
     #[test]
-    fn local_entry_size_sums_nested_files() {
-        let root = std::env::temp_dir().join(format!("gputerm-sftp-{}", uuid::Uuid::new_v4()));
-        let nested = root.join("nested");
-        fs::create_dir_all(&nested).expect("create test directory");
-        fs::write(root.join("one.bin"), [1_u8, 2, 3]).expect("write first file");
-        fs::write(nested.join("two.bin"), [4_u8, 5]).expect("write nested file");
+    fn plans_parents_before_children_and_skips_links() {
+        let plan = plan_tree(fake_tree(&[
+            (
+                "",
+                &[
+                    ("b.txt", EntryKind::File, 3),
+                    ("src", EntryKind::Dir, 0),
+                    ("link", EntryKind::Other, 0),
+                    (".", EntryKind::Dir, 0),
+                ],
+            ),
+            (
+                "src",
+                &[("main.rs", EntryKind::File, 10), ("deep", EntryKind::Dir, 0)],
+            ),
+            ("src/deep", &[("x", EntryKind::File, 1)]),
+        ]))
+        .unwrap();
+        assert_eq!(plan.dirs, vec!["src", "src/deep"]);
+        assert_eq!(
+            plan.files,
+            vec![
+                ("b.txt".to_string(), 3),
+                ("src/main.rs".to_string(), 10),
+                ("src/deep/x".to_string(), 1)
+            ]
+        );
+        assert_eq!(plan.skipped, vec!["link"]);
+    }
 
-        assert_eq!(local_entry_size(&root).expect("measure directory"), 5);
+    #[test]
+    fn a_listing_error_stops_the_plan() {
+        let error = plan_tree(fake_tree(&[("", &[("gone", EntryKind::Dir, 0)])])).unwrap_err();
+        assert!(error.contains("gone"));
+    }
 
-        fs::remove_dir_all(root).expect("remove test directory");
+    #[test]
+    fn joins_relative_paths_for_each_side() {
+        assert_eq!(join_remote(Path::new("/home/u/"), "a/b"), PathBuf::from("/home/u/a/b"));
+        assert_eq!(join_remote(Path::new("/home/u"), ""), PathBuf::from("/home/u"));
+        assert_eq!(join_remote(Path::new("/"), "a"), PathBuf::from("/a"));
+        assert_eq!(
+            join_local(Path::new("/tmp/x"), "a/b"),
+            Path::new("/tmp/x").join("a").join("b")
+        );
+    }
+
+    #[test]
+    fn walks_a_real_local_folder_without_following_links() {
+        let root = std::env::temp_dir().join(format!("gputerm-tree-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("a.txt"), b"hello").unwrap();
+        fs::write(root.join("sub/b.txt"), b"hi").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&root, root.join("sub/loop")).unwrap();
+
+        let plan = plan_tree(|relative| list_local_folder(&join_local(&root, relative))).unwrap();
+        assert_eq!(plan.dirs, vec!["sub"]);
+        assert_eq!(
+            plan.files,
+            vec![("a.txt".to_string(), 5), ("sub/b.txt".to_string(), 2)]
+        );
+        #[cfg(unix)]
+        assert_eq!(plan.skipped, vec!["sub/loop"]);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

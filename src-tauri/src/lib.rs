@@ -22,7 +22,7 @@ use ssh::session::{
 };
 use ssh::sftp::{
     cancel_transfer, sftp_create_drag_out_paths, sftp_delete, sftp_download_file, sftp_list_dir,
-    sftp_mkdir, sftp_path_exists, sftp_upload_file,
+    sftp_mkdir, sftp_path_exists, sftp_rename, sftp_upload_file,
 };
 use ssh::snippets::{delete_snippet, list_snippets, save_snippet};
 use ssh::system_monitor::{get_telemetry_settings, update_telemetry_settings};
@@ -76,6 +76,7 @@ pub fn run() {
             cancel_transfer,
             sftp_delete,
             sftp_mkdir,
+            sftp_rename,
             list_snippets,
             save_snippet,
             delete_snippet,

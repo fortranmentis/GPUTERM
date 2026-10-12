@@ -44,6 +44,7 @@ vi.mock("@tauri-apps/api/webview", () => ({
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   confirm: vi.fn(),
+  message: vi.fn(),
   open: vi.fn(),
 }));
 
@@ -644,6 +645,49 @@ describe("SftpBrowser local path browse", () => {
           localPath: "C:\\Users\\me\\models",
           remotePath: "/srv/models",
         }),
+      }),
+    );
+  });
+
+  it("renames the selected remote item inline", async () => {
+    remoteEntries = [remoteFile("old.txt")];
+    render(<SftpBrowser />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /old\.txt/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^rename$/i }));
+    const input = screen.getByLabelText("New name for old.txt");
+    fireEvent.change(input, { target: { value: "new.txt" } });
+    fireEvent.click(screen.getByRole("button", { name: /confirm rename/i }));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("sftp_rename", {
+        request: {
+          sessionId: "session-1",
+          sourcePath: "/srv/old.txt",
+          targetPath: "/srv/new.txt",
+        },
+      }),
+    );
+  });
+
+  it("moves remote items dropped on a remote folder", async () => {
+    remoteEntries = [remoteDirectory("archive"), remoteFile("log.txt")];
+    render(<SftpBrowser />);
+
+    const folder = await screen.findByRole("button", { name: /archive/i });
+    fireEvent.drop(folder, {
+      dataTransfer: dragData(REMOTE_DRAG_TYPE, [
+        { name: "log.txt", path: "/srv/log.txt", type: "file", size: 20 },
+      ]),
+    });
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("sftp_rename", {
+        request: {
+          sessionId: "session-1",
+          sourcePath: "/srv/log.txt",
+          targetPath: "/srv/archive/log.txt",
+        },
       }),
     );
   });

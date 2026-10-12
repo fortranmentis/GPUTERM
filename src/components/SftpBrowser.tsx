@@ -10,8 +10,12 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { confirm as confirmDialog, open } from "@tauri-apps/plugin-dialog";
-import { Download, Trash2, Upload } from "lucide-react";
+import {
+  confirm as confirmDialog,
+  message as messageDialog,
+  open,
+} from "@tauri-apps/plugin-dialog";
+import { Download, PenLine, Trash2, Upload } from "lucide-react";
 import { LocalFilePanel } from "./LocalFilePanel";
 import { RemoteFilePanel } from "./RemoteFilePanel";
 import { TransferQueue } from "./TransferQueue";
@@ -69,7 +73,12 @@ type SftpTransferRequest = {
   remotePath: string;
   localPath: string;
   transferId: string;
+  /** Folders only: leave files that already exist at the destination. */
+  keepExisting?: boolean;
 };
+
+/** What to do when a transfer's destination already exists. */
+type OverwriteDecision = "replace" | "keep" | "skip";
 
 type SftpBrowserProps = {
   onClose?: () => void;
@@ -99,6 +108,8 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
   const [selectedLocalPaths, setSelectedLocalPaths] = useState<string[]>([]);
   const [newFolderName, setNewFolderName] = useState("");
   const [creatingFolder, setCreatingFolder] = useState(false);
+  const [renamingPath, setRenamingPath] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
   const [storageSplitPercent, setStorageSplitPercent] = useState(58);
   const [loading, setLoading] = useState(false);
   const [remoteDropActive, setRemoteDropActive] = useState(false);
@@ -116,6 +127,9 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
   >(null);
   const enqueueDownloadsRef = useRef<
     ((files: RemoteDragFile[]) => Promise<void>) | null
+  >(null);
+  const moveRemoteFilesRef = useRef<
+    ((files: RemoteDragFile[], targetDirectory: string) => Promise<void>) | null
   >(null);
   const prepareRemoteDragOutRef = useRef<
     ((files: RemoteDragFile[]) => Promise<string[]>) | null
@@ -169,6 +183,7 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
       setCreatingFolder(false);
       setNewFolderName("");
     }
+    setRenamingPath(null);
   }, [activeSessionId, connected]);
 
   useEffect(() => {
@@ -317,6 +332,99 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
     }
   };
 
+  const beginRename = () => {
+    const entry = selectedRemoteEntries[0];
+    if (selectedRemoteEntries.length !== 1 || !entry) {
+      return;
+    }
+    setCreatingFolder(false);
+    setRenamingPath(entry.path);
+    setRenameDraft(entry.name);
+  };
+
+  const applyRename = async () => {
+    const entry = entries.find((candidate) => candidate.path === renamingPath);
+    const name = renameDraft.trim();
+    if (!activeSessionId || !entry || !name) {
+      return;
+    }
+    if (name === entry.name) {
+      setRenamingPath(null);
+      return;
+    }
+    if (name.includes("/") || name === "." || name === "..") {
+      setMessage({ kind: "error", text: "A name cannot contain '/' or be '.' or '..'" });
+      return;
+    }
+    const targetPath = joinRemotePath(parentRemotePath(entry.path), name);
+    setLoading(true);
+    try {
+      await invoke("sftp_rename", {
+        request: {
+          sessionId: activeSessionId,
+          sourcePath: entry.path,
+          targetPath,
+        },
+      });
+      setRenamingPath(null);
+      setSelectedRemotePaths([targetPath]);
+      await loadDirectory(path);
+    } catch (error) {
+      setMessage({ kind: "error", text: String(error) });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  /** Moves remote items into another remote folder with a server-side rename. */
+  const moveRemoteFiles = async (
+    files: RemoteDragFile[],
+    targetDirectory: string,
+  ) => {
+    if (!activeSessionId) {
+      return;
+    }
+    const movable = files.filter(
+      (file) =>
+        file.path !== targetDirectory &&
+        // A folder cannot move into itself or its own subtree.
+        !targetDirectory.startsWith(`${file.path.replace(/\/+$/, "")}/`) &&
+        parentRemotePath(file.path) !== targetDirectory,
+    );
+    if (movable.length === 0) {
+      return;
+    }
+    setLoading(true);
+    const failures: string[] = [];
+    try {
+      for (const file of movable) {
+        try {
+          await invoke("sftp_rename", {
+            request: {
+              sessionId: activeSessionId,
+              sourcePath: file.path,
+              targetPath: joinRemotePath(targetDirectory, file.name),
+            },
+          });
+        } catch (error) {
+          failures.push(`${file.name}: ${String(error)}`);
+        }
+      }
+      await loadDirectory(path);
+      if (failures.length > 0) {
+        setMessage({ kind: "error", text: failures.join("\n") });
+      } else {
+        setMessage({
+          kind: "success",
+          text: `Moved ${movable.length === 1 ? movable[0].name : `${movable.length} items`} to ${targetDirectory}`,
+        });
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+  moveRemoteFilesRef.current = moveRemoteFiles;
+
   const createFolder = async () => {
     if (!activeSessionId || !newFolderName.trim()) {
       return;
@@ -391,9 +499,9 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
         sessionId,
       );
       addTask(task);
-      let shouldTransfer = false;
+      let decision: OverwriteDecision = "skip";
       try {
-        shouldTransfer = await confirmOverwrite(
+        decision = await confirmOverwrite(
           "sftp_path_exists",
           {
             request: {
@@ -402,6 +510,7 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
             },
           },
           remotePath,
+          file.entryType === "directory",
         );
       } catch (error) {
         updateTask(task.id, {
@@ -410,7 +519,7 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
         });
         continue;
       }
-      if (!shouldTransfer) {
+      if (decision === "skip") {
         updateTask(task.id, {
           status: "canceled",
           error: "Skipped because target item already exists",
@@ -419,7 +528,13 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
       }
       approved.push({
         task,
-        request: { sessionId, remotePath, localPath: file.path, transferId: task.id },
+        request: {
+          sessionId,
+          remotePath,
+          localPath: file.path,
+          transferId: task.id,
+          keepExisting: decision === "keep",
+        },
       });
     }
 
@@ -465,12 +580,13 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
         sessionId,
       );
       addTask(task);
-      let shouldTransfer = false;
+      let decision: OverwriteDecision = "skip";
       try {
-        shouldTransfer = await confirmOverwrite(
+        decision = await confirmOverwrite(
           "local_path_exists",
           { path: targetLocalPath },
           targetLocalPath,
+          file.type === "directory",
         );
       } catch (error) {
         updateTask(task.id, {
@@ -479,7 +595,7 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
         });
         continue;
       }
-      if (!shouldTransfer) {
+      if (decision === "skip") {
         updateTask(task.id, {
           status: "canceled",
           error: "Skipped because target item already exists",
@@ -493,6 +609,7 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
           remotePath: file.path,
           localPath: targetLocalPath,
           transferId: task.id,
+          keepExisting: decision === "keep",
         },
       });
     }
@@ -725,7 +842,16 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
           suppressPointerClickRef.current = false;
         }, 0);
 
-        if (
+        const remoteDirectory =
+          state.drag.kind === "remote"
+            ? document
+                .elementFromPoint?.(event.clientX, event.clientY)
+                ?.closest<HTMLElement>("[data-remote-directory]")?.dataset
+                .remoteDirectory
+            : undefined;
+        if (state.drag.kind === "remote" && remoteDirectory) {
+          void moveRemoteFilesRef.current?.(state.drag.files, remoteDirectory);
+        } else if (
           state.drag.kind === "local" &&
           isClientPositionInsideElement(
             event.clientX,
@@ -765,17 +891,42 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
     command: "sftp_path_exists" | "local_path_exists",
     args: Record<string, unknown>,
     targetPath: string,
-  ) => {
+    isDirectory: boolean,
+  ): Promise<OverwriteDecision> => {
     const exists = await invoke<boolean>(command, args);
     if (!exists) {
-      return true;
+      return "replace";
     }
-    return confirmDialog(`Replace or merge the existing item?\n${targetPath}`, {
-      title: "Confirm replacement",
-      kind: "warning",
-      okLabel: "Replace / Merge",
-      cancelLabel: "Skip",
-    });
+    if (!isDirectory) {
+      const replace = await confirmDialog(
+        `Replace the existing item?\n${targetPath}`,
+        {
+          title: "Confirm replacement",
+          kind: "warning",
+          okLabel: "Replace",
+          cancelLabel: "Skip",
+        },
+      );
+      return replace ? "replace" : "skip";
+    }
+    // A folder merges into the existing one; the user picks what happens to
+    // files that exist on both sides.
+    const labels = {
+      yes: "Replace files",
+      no: "Keep existing",
+      cancel: "Skip",
+    };
+    const choice = await messageDialog(
+      `A folder named "${baseName(targetPath)}" already exists.\n${targetPath}\n\nMerge into it, replacing files that exist in both, or keep the existing files?`,
+      { title: "Merge folders", kind: "warning", buttons: labels },
+    );
+    if (choice === "Yes" || choice === labels.yes) {
+      return "replace";
+    }
+    if (choice === "No" || choice === labels.no) {
+      return "keep";
+    }
+    return "skip";
   };
 
   const runTransfer = async (
@@ -998,21 +1149,19 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
   };
 
   const dropRemoteOnDirectory = (
-    _targetDirectory: SftpEntry,
+    targetDirectory: SftpEntry,
     event: DragEvent<HTMLButtonElement>,
   ) => {
     event.preventDefault();
     event.stopPropagation();
     const currentDrag = useTransferStore.getState().activeDrag;
-    if (
-      currentDrag?.kind === "remote" ||
-      readRemoteDragFiles(event.dataTransfer).length > 0
-    ) {
+    const files =
+      currentDrag?.kind === "remote"
+        ? currentDrag.files
+        : readRemoteDragFiles(event.dataTransfer);
+    if (files.length > 0) {
       clearActiveDrag();
-      setMessage({
-        kind: "info",
-        text: "Remote move/copy by drag-and-drop is not implemented yet",
-      });
+      void moveRemoteFiles(files, targetDirectory.path);
     }
   };
 
@@ -1105,6 +1254,11 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
             setNewFolderName("");
             setCreatingFolder(false);
           }}
+          renamingPath={renamingPath}
+          renameDraft={renameDraft}
+          onRenameDraftChange={setRenameDraft}
+          onConfirmRename={() => void applyRename()}
+          onCancelRename={() => setRenamingPath(null)}
         />
 
         <div
@@ -1199,6 +1353,17 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
           >
             <Upload size={16} />
             <span className="button-label">Upload</span>
+          </button>
+          <button
+            className="secondary-button"
+            type="button"
+            aria-label="Rename"
+            title="Rename the selected remote item"
+            disabled={!connected || loading || selectedRemoteEntries.length !== 1}
+            onClick={beginRename}
+          >
+            <PenLine size={16} />
+            <span className="button-label">Rename</span>
           </button>
           <button
             className="secondary-button danger"
@@ -1421,6 +1586,22 @@ function safeParseDragFiles<T>(encoded: string): T[] {
   } catch {
     return [];
   }
+}
+
+/** Last path component, for either separator. */
+function baseName(path: string) {
+  const trimmed = path.replace(/[\\/]+$/, "");
+  return trimmed.slice(Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\")) + 1);
+}
+
+/** Remote parent folder, POSIX-style. */
+function parentRemotePath(remotePath: string) {
+  const trimmed = remotePath.replace(/\/+$/, "");
+  const index = trimmed.lastIndexOf("/");
+  if (index < 0) {
+    return ".";
+  }
+  return index === 0 ? "/" : trimmed.slice(0, index);
 }
 
 function joinRemotePath(base: string, name: string) {
