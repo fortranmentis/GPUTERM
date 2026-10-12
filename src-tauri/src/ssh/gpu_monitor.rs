@@ -67,6 +67,10 @@ const BYTES_PER_MIB: f64 = 1024.0 * 1024.0;
 pub struct GpuProbe {
     pub nvidia: bool,
     pub rocm_smi: bool,
+    /// Where rocm-smi was found. ROCm installs it under /opt/rocm/bin, which
+    /// is often missing from a non-interactive PATH, so it is run by this
+    /// path rather than by bare name.
+    pub rocm_smi_path: Option<String>,
     pub amd_smi: bool,
     pub xpu_smi: bool,
     pub intel_gpu_top: bool,
@@ -159,7 +163,12 @@ pub fn parse_gpu_probe(output: &str) -> GpuProbe {
         let basename = line.rsplit(['/', '\\']).next().unwrap_or(line);
         match basename {
             "nvidia-smi" => probe.nvidia = true,
-            "rocm-smi" => probe.rocm_smi = true,
+            "rocm-smi" => {
+                probe.rocm_smi = true;
+                // `command -v` hits come before the /opt/rocm/bin fallback, so
+                // the first line is the one the host's PATH would pick.
+                probe.rocm_smi_path.get_or_insert_with(|| line.to_string());
+            }
             "amd-smi" => probe.amd_smi = true,
             "xpu-smi" => probe.xpu_smi = true,
             "intel_gpu_top" => probe.intel_gpu_top = true,
@@ -651,6 +660,20 @@ mod tests {
         assert!(!probe.intel_gpu_top);
         assert!(!probe.apple);
         assert!(probe.any());
+    }
+
+    #[test]
+    fn probe_keeps_the_rocm_smi_path_preferring_path_hits() {
+        let probe = parse_gpu_probe("/opt/rocm/bin/rocm-smi\n");
+        assert_eq!(
+            probe.rocm_smi_path.as_deref(),
+            Some("/opt/rocm/bin/rocm-smi")
+        );
+
+        let probe = parse_gpu_probe("/usr/bin/rocm-smi\n/opt/rocm/bin/rocm-smi\n");
+        assert_eq!(probe.rocm_smi_path.as_deref(), Some("/usr/bin/rocm-smi"));
+
+        assert_eq!(parse_gpu_probe("nvidia-smi\n").rocm_smi_path, None);
     }
 
     #[test]

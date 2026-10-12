@@ -802,6 +802,18 @@ fn collect_local_windows_telemetry(
     }
 }
 
+const AMD_SMI_ONLY_ERROR: &str =
+    "AMD GPU metrics unavailable: only amd-smi is installed, and GpuTerm reads rocm-smi (amd-smi is not supported yet)";
+
+/// Runs rocm-smi by the path the probe found it at: ROCm installs it under
+/// /opt/rocm/bin, which is often missing from a non-interactive PATH.
+fn rocm_smi_command(probe: &GpuProbe) -> String {
+    format!(
+        "{} --showproductname --showuniqueid --showuse --showmemuse --showmeminfo vram --showtemp --showpower --json 2>/dev/null",
+        shell_quote(probe.rocm_smi_path.as_deref().unwrap_or("rocm-smi"))
+    )
+}
+
 /// Detects available GPU tools once per connection (cached in `probe`), then
 /// collects metrics from every detected vendor and concatenates them.
 pub(crate) fn collect_gpu_metrics(
@@ -831,7 +843,7 @@ pub(crate) fn collect_gpu_metrics(
 
     if !probe.any() {
         return Err(
-            "No GPU monitoring source found (nvidia-smi / rocm-smi / xpu-smi / intel_gpu_top / macOS ioreg / Windows GPU counters)"
+            "No GPU monitoring source found (nvidia-smi / rocm-smi / amd-smi / xpu-smi / intel_gpu_top / macOS ioreg / Windows GPU counters)"
                 .to_string(),
         );
     }
@@ -862,11 +874,15 @@ pub(crate) fn collect_gpu_metrics(
     }
     // rocm-smi is the stable AMD target; amd-smi's JSON schema is still in flux.
     if probe.rocm_smi {
-        let command = "rocm-smi --showproductname --showuniqueid --showuse --showmemuse --showmeminfo vram --showtemp --showpower --json 2>/dev/null";
-        match run_remote_command(session, command).and_then(|output| parse_rocm_smi_json(&output)) {
+        let command = rocm_smi_command(probe);
+        match run_remote_command(session, &command).and_then(|output| parse_rocm_smi_json(&output)) {
             Ok(mut found) => metrics.append(&mut found),
             Err(error) => errors.push(error),
         }
+    } else if probe.amd_smi {
+        // Without this, an amd-smi-only host (newer ROCm) would report an
+        // empty GPU list as success.
+        errors.push(AMD_SMI_ONLY_ERROR.to_string());
     }
     if probe.xpu_smi && !probe.xpu_devices.is_empty() {
         let command = xpu_stats_command(&probe.xpu_devices);
@@ -936,7 +952,7 @@ pub(crate) fn collect_local_gpu_metrics(
     let probe = probe.as_ref().expect("probe is populated above");
     if !probe.any() {
         return Err(
-            "No GPU monitoring source found (nvidia-smi / rocm-smi / xpu-smi / intel_gpu_top / macOS ioreg / Windows GPU counters)"
+            "No GPU monitoring source found (nvidia-smi / rocm-smi / amd-smi / xpu-smi / intel_gpu_top / macOS ioreg / Windows GPU counters)"
                 .to_string(),
         );
     }
@@ -960,11 +976,13 @@ pub(crate) fn collect_local_gpu_metrics(
         }
     }
     if probe.rocm_smi {
-        let command = "rocm-smi --showproductname --showuniqueid --showuse --showmemuse --showmeminfo vram --showtemp --showpower --json 2>/dev/null";
-        match run_local_command_for(os, command).and_then(|output| parse_rocm_smi_json(&output)) {
+        let command = rocm_smi_command(probe);
+        match run_local_command_for(os, &command).and_then(|output| parse_rocm_smi_json(&output)) {
             Ok(mut found) => metrics.append(&mut found),
             Err(error) => errors.push(error),
         }
+    } else if probe.amd_smi {
+        errors.push(AMD_SMI_ONLY_ERROR.to_string());
     }
     if probe.xpu_smi && !probe.xpu_devices.is_empty() {
         match run_local_command_for(os, &xpu_stats_command(&probe.xpu_devices)) {
