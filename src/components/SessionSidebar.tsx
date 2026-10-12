@@ -309,11 +309,31 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
     }
     setBusy(true);
     try {
-      if (connectedSessionIds.includes(form.id)) {
-        await disconnectSession(form.id);
-      }
+      const deletedId = form.id;
       const nextSessions = await invoke<SessionProfile[]>("delete_session", {
-        id: form.id,
+        id: deletedId,
+      });
+      // The backend refuses to delete a jump host or tunnel profile and tears
+      // down the live session only after the delete succeeds. Mirror that
+      // locally; disconnecting first would drop a bastion even when the
+      // delete is refused.
+      const state = useSessionStore.getState();
+      if (state.connectedSessionIds.includes(deletedId)) {
+        state.removeConnectedSession(deletedId);
+        if (state.activeSessionId === deletedId) {
+          const remaining = state.connectedSessionIds.filter(
+            (sessionId) => sessionId !== deletedId,
+          );
+          state.showSession(remaining[remaining.length - 1] ?? null);
+        }
+      }
+      setStoredCredentialIds((current) => {
+        if (!current.has(deletedId)) {
+          return current;
+        }
+        const next = new Set(current);
+        next.delete(deletedId);
+        return next;
       });
       setSessions(nextSessions);
       setForm(blankForm);

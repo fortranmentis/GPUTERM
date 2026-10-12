@@ -20,6 +20,16 @@ use std::time::{Duration, Instant};
 use tauri::State;
 use uuid::Uuid;
 
+/// Serializes read-modify-write of `sessions.json` so a delete cannot
+/// interleave with a concurrent save and lose one of the two edits.
+static PROFILE_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock_profiles() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    PROFILE_WRITE_LOCK
+        .lock()
+        .map_err(|_| "Session storage is unavailable".to_string())
+}
+
 /// Serializes read-modify-write of `known_hosts.json`: terminal, telemetry
 /// and LLM tunnels connect in parallel, and an unserialized trust or legacy
 /// migration could overwrite another one's entry.
@@ -153,21 +163,59 @@ pub async fn delete_session(
     id: String,
 ) -> Result<Vec<SessionProfile>, String> {
     let credentials = state.credentials.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let deleted_id = id.clone();
+    let profiles = tauri::async_runtime::spawn_blocking(move || {
+        let _write_guard = lock_profiles()?;
         let mut profiles = read_profiles()?;
+        ensure_profile_unreferenced(&id, &profiles, &crate::llm::instance::read_instances()?)?;
         profiles.retain(|profile| profile.id != id);
+        write_profiles(&profiles)?;
         // Vault clean-up is best effort: a locked or not-yet-initialized vault
         // must not make profile deletion impossible. Any leftover entry is
         // unreachable once the profile is gone.
-        let vault_error = credentials.clear_password(&id).err();
-        write_profiles(&profiles)?;
-        if let Some(error) = vault_error {
+        if let Err(error) = credentials.clear_password(&id) {
             eprintln!("GpuTerm: could not clear stored credential for a deleted profile: {error}");
         }
-        Ok(profiles)
+        Ok::<_, String>(profiles)
     })
     .await
-    .map_err(|error| format!("Session deletion task failed: {}", error))?
+    .map_err(|error| format!("Session deletion task failed: {}", error))??;
+    // Only after the delete succeeded: a refused delete must leave the live
+    // session (possibly a bastion other sessions ride on) untouched.
+    crate::ssh::terminal::teardown_session(&state, &deleted_id);
+    Ok(profiles)
+}
+
+/// Refuses to delete a profile that another profile uses as its jump host or
+/// an LLM instance tunnels through; deleting it would leave dangling ids.
+fn ensure_profile_unreferenced(
+    id: &str,
+    profiles: &[SessionProfile],
+    instances: &[LlmInstance],
+) -> Result<(), String> {
+    let dependents = profiles
+        .iter()
+        .filter(|profile| profile.id != id && profile.proxy_jump_id.as_deref() == Some(id))
+        .map(|profile| profile.name.clone())
+        .collect::<Vec<_>>();
+    if !dependents.is_empty() {
+        return Err(format!(
+            "This session is the jump host for {}. Change their jump host before deleting it.",
+            dependents.join(", ")
+        ));
+    }
+    let instances = instances
+        .iter()
+        .filter(|instance| instance.ssh_profile_id.as_deref() == Some(id))
+        .map(|instance| instance.name.clone())
+        .collect::<Vec<_>>();
+    if !instances.is_empty() {
+        return Err(format!(
+            "The LLM runtime(s) {} tunnel through this session. Change or remove them before deleting it.",
+            instances.join(", ")
+        ));
+    }
+    Ok(())
 }
 
 /// Reports whether a profile has a password/passphrase in the local vault
@@ -455,6 +503,7 @@ fn build_proxy_target(
 }
 
 pub fn upsert_profile(profile: SessionProfile) -> Result<Vec<SessionProfile>, String> {
+    let _write_guard = lock_profiles()?;
     let mut profiles = read_profiles()?;
     if let Some(existing) = profiles.iter_mut().find(|item| item.id == profile.id) {
         *existing = profile;
@@ -1678,6 +1727,14 @@ mod tests {
             private_key_path: None,
             proxy_jump_id: proxy.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn refuses_to_delete_a_profile_used_as_a_jump_host() {
+        let profiles = vec![profile("jump", None), profile("gpu", Some("jump"))];
+        let error = ensure_profile_unreferenced("jump", &profiles, &[]).unwrap_err();
+        assert!(error.contains("gpu"), "{error}");
+        assert!(ensure_profile_unreferenced("gpu", &profiles, &[]).is_ok());
     }
 
     #[test]

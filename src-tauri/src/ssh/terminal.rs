@@ -827,6 +827,15 @@ fn start_local_system_monitor(app: AppHandle, state: &AppState, session_id: Stri
     );
 }
 
+/// Releases everything held for a deleted profile: terminals, pooled
+/// connection, cached host state, telemetry, and its in-memory password.
+pub(crate) fn teardown_session(state: &AppState, session_id: &str) {
+    stop_existing_session(state, session_id);
+    if let Ok(mut active) = state.active_connections.lock() {
+        active.remove(session_id);
+    }
+}
+
 fn stop_existing_session(state: &AppState, session_id: &str) {
     crate::ssh::session::drop_ops_session(&state.ops_sessions, session_id);
     if let Ok(mut cache) = state.remote_os_cache.lock() {
