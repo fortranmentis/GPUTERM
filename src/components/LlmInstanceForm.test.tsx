@@ -218,7 +218,13 @@ describe("LlmInstanceForm", () => {
       />,
     );
 
-    fireEvent.change(await screen.findByLabelText("Reach through"), {
+    // The select is rendered before the asynchronous profile list arrives.
+    // Wait for the option itself so slower CI runners do not coerce an early
+    // `wsl` selection back to the only available (Direct) option.
+    await screen.findByRole("option", {
+      name: /Wsl \(sang9604@100\.74\.103\.17\)/,
+    });
+    fireEvent.change(screen.getByLabelText("Reach through"), {
       target: { value: "wsl" },
     });
     // The caption has to say whose loopback 127.0.0.1 is.
