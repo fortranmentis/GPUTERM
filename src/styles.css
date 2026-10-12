@@ -29,6 +29,39 @@
   box-sizing: border-box;
 }
 
+.error-boundary {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  height: 100vh;
+  padding: 24px;
+  text-align: center;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.error-boundary h1 {
+  font-size: 18px;
+}
+
+.error-boundary p {
+  max-width: 480px;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.error-boundary button {
+  padding: 8px 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(96, 165, 250, 0.14);
+  color: var(--text);
+  cursor: pointer;
+}
+
 html,
 body,
 #root {
