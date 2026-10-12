@@ -49,16 +49,21 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 - **Up to four flexible terminal cells** — place a new shell or another saved session to the left, right, top, or bottom of the focused pane; choose its initial ratio and drag dividers to resize nested layouts
 - **Collapsible host selector** — hide the sidebar for more workspace and reopen it from the top-left button; full profile fields appear only for **New**, while saved profiles show a connect-time credential prompt
 - **ProxyJump** — tunnel through a saved profile as a bastion (per-key-type host verification along the way)
+- **OpenSSH config import** — preview `~/.ssh/config`, resolve `Host`, `Hostname`, `User`, `Port`, `IdentityFile`, `ProxyJump`, and forwarding rules, then select the profiles to import without overwriting collisions silently
+- **Built-in port forwarding** — save or start local (`-L`), remote (`-R`), and SOCKS5 dynamic (`-D`) rules, with live state and byte counts in the profile panel
 - **Native local terminal** — open the current machine without SSH and use the same terminal splits and monitoring UI
 - Password, private key (with passphrase), and SSH agent authentication
 - UTF-8 safe streaming — multibyte characters (한글, 日本語, emoji) survive chunked reads
 - **CJK input works correctly** — Korean IME composition in the terminal is handled with the same backspace-rewrite protocol native terminals use, fixing the jamo-splitting bug in WebKit-based webviews
 - **Scrollback search** — `Ctrl`/`Cmd`+`F` opens an in-pane find bar with match count, `Enter`/`Shift`+`Enter` to step through hits, `Escape` to return focus to the shell
+- **Saved command snippets** — keep global or host-scoped commands in the terminal toolbar; multiline snippets use bracketed paste when the shell advertises it
+- **Terminal appearance and shortcuts** — choose among five themes, desktop monospace fonts, and an 8–28 px saved font size; the settings popover lists platform-safe split, pane, search, clear, and zoom shortcuts
 - **Disconnect is visible and recoverable** — a pane whose shell or channel ends shows the reason the backend reported and a **Reconnect** button instead of silently refusing input
+- **Automatic recovery after sleep or network loss** — unexpected disconnects retry with bounded backoff when the machine comes online, the window regains focus, or a suspended heartbeat resumes; authentication and host-key failures stop for review
 - MOTD and early output are buffered and replayed, never lost to connection races
 - Serialized burst input plus a fully nonblocking SSH/TCP transport keeps simultaneous keys, modifier chords, and key repeat responsive without racing the terminal reader
 - Terminal writes avoid libssh2's incoming-data flush path, while writes, remote PTY resize, and SSH keepalive retry nonblocking operations without packet interleaving
-- Automatic remote PTY resize and SSH keepalive, including ProxyJump tunnels
+- IPv4 and IPv6 literals are accepted, every resolved address is tried with a timeout, and remote PTY resize plus SSH keepalive also cover ProxyJump tunnels
 
 ### 📁 SFTP Browser
 - Side-by-side remote/local panels with a draggable divider for adjusting their vertical ratio
@@ -69,8 +74,9 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 - **Native desktop drag-out** — drag remote files, complete folders, or multi-selections from GpuTerm into Finder, Explorer, or a Linux file manager
 - **Platform-aware drag interop** — GTK file URIs remain available until Linux file managers finish reading them, while native macOS/Linux and Windows drop coordinates are normalized correctly on scaled displays
 - Streaming 1 MiB chunked transfers with a progress queue and **per-item cancellation**
+- Uploads write to a unique remote `.gputerm-part` file and rename only after completion, preserving an existing destination across cancellation or transfer failure
 - Downloaded files are written to temporary files and atomically renamed — no partial files are exposed
-- Replace/merge confirmation, delete, contextual mkdir beside Open, and a native OS folder picker
+- Remote rename and drag-to-move, Replace / Keep existing / Skip folder-merge choices, delete, contextual mkdir beside Open, and a native OS folder picker
 - Resizable split between terminal and SFTP panes (persisted across launches)
 - **Collapsible SFTP panel** — close it with the directional panel button and restore it from the top-right; the terminal immediately expands into the freed width
 - **Responsive narrow layout** — metadata columns collapse progressively and transfer controls remain accessible when the SFTP pane is resized to its minimum width
@@ -91,12 +97,13 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 - **Quiet Windows local monitoring** — PowerShell collectors run without allocating console windows and emit UTF-8 text, so localized device and volume names remain parseable
 - Hosts without any GPU gracefully fall back to system-only metrics
 
-### 🤖 Ollama & vLLM runtime monitoring
-- Register any number of **Ollama** and **vLLM** servers by URL; each is polled independently of your SSH sessions, so the card works with no terminal connected
+### 🤖 LLM runtime monitoring
+- Register any number of **Ollama, vLLM, SGLang, Hugging Face TGI, llama.cpp, OpenAI-compatible, and NVIDIA Triton** servers by URL; each is polled independently of your SSH sessions, so the card works with no terminal connected
 - **Poll directly, or through an SSH tunnel** — pick a saved SSH profile as the instance's *Reach through* and the address is resolved on that host, so a runtime bound to its own `127.0.0.1` needs nothing exposed on the network
-- **Read-only.** GpuTerm calls `/api/ps`, `/api/tags`, `/health`, `/v1/models`, and `/metrics` only. It never sends an inference request, downloads or deletes a model, or restarts a server
+- **Read-only.** GpuTerm calls only each adapter's health, catalog, metrics, or statistics endpoints. It never sends an inference request, downloads or deletes a model, or restarts a server
 - **Ollama** — running and installed models, model size, VRAM-resident size and share, estimated non-VRAM residency, configured maximum context, and how long a loaded model stays in memory
 - **vLLM** — running/waiting/swapped requests, server-wide KV cache usage and headroom, prefix-cache hit rate, prompt and generation tokens per second, request rate, preemptions, and TTFT/latency/queue percentiles interpolated from Prometheus histogram buckets
+- **Other serving engines** — SGLang, TGI, and llama.cpp expose the health, model, queue/cache/token, and latency metrics their endpoints publish; Triton reports readiness and per-model inference statistics; generic OpenAI-compatible servers provide model catalog and reachability
 - **Nothing is faked.** A metric this build of the runtime does not publish is shown as *not supported*, and a value that has not been read yet is shown as `—`. Neither is ever displayed as `0`
 - **Counter restarts are handled** — a counter that goes backwards produces a null rate for that interval and a "server was probably restarted" event, never a negative throughput
 - API keys go straight into the encrypted `credentials.enc` vault. They are never returned to the webview, never written to `llm_instances.json`, and masked out of error text
@@ -106,7 +113,8 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 - Passwords and key passphrases are stored only in the local `credentials.enc` vault: Argon2id derives a 256-bit key from your GpuTerm master password, and AES-256-GCM encrypts and authenticates the complete credential payload
 - The master password and derived key are kept in memory only for the current app run; secrets are never written in plaintext or included in `sessions.json`
 - Saved-session password fields show a secure mask while keeping the actual secret out of the webview; leaving the field blank reuses the vault entry
-- Trust-on-first-use host key prompt with SHA-256 fingerprint; mismatches block the connection
+- Trust-on-first-use host key prompt with SHA-256 fingerprint; a changed key shows the old and new fingerprints and is replaced only after explicit confirmation
+- Profiles referenced by ProxyJump or an LLM tunnel cannot be deleted; successful deletion tears down terminals, forwards, monitoring connections, and in-memory credentials before local UI removal
 - Restrictive Tauri Content Security Policy in production and development
 
 > **Upgrading to 1.1.2-beta:** GpuTerm no longer accesses macOS Keychain, Windows Credential Manager, or Linux Secret Service/libsecret. Existing OS-vault entries are left untouched but are not imported; create a GpuTerm master password and enter each SSH password again after upgrading.
@@ -128,7 +136,7 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 | DIMM temperature | ◐ only with `jc42` (DDR3/DDR4 ECC) or `spd5118` (DDR5, kernel 6.10+) | — | — (no WMI/CIM interface) |
 | NVMe / drive temperature | ✅ `nvme` / `drivetemp` hwmon | — | ✅ SMART via `GetReliabilityCounter` |
 | AGY · Codex · Claude Code process trees | ✅ `ps` | ✅ `ps` | ✅ CIM + `Get-Process` |
-| Ollama / vLLM runtimes | ✅ HTTP | ✅ HTTP | ✅ HTTP |
+| Ollama / vLLM / SGLang / TGI / llama.cpp / OpenAI-compatible / Triton | ✅ HTTP | ✅ HTTP | ✅ HTTP |
 | Detail popovers (per-core CPU, top processes) | ✅ | ✅ (no per-core without root) | ✅ |
 
 ✅ full support ◐ partial (see [known limitations](#roadmap--known-limitations)) — the exact remote commands are listed under [Usage](#usage).
@@ -219,10 +227,22 @@ npm run tauri:build
 - The **columns** button opens another independent PTY shell for the currently focused session.
 - The **+** button lists saved profiles. A live session is added immediately; a disconnected profile asks for its password/key passphrase (and jump-host password when applicable) before connecting.
 - The **terminal** button lists the tmux sessions running on the focused server. Clicking one attaches to it in a new pane, so detaching with `Ctrl-B d` leaves you at a shell instead of closing the pane. The form below creates a session — leave the name blank to let tmux number it — and each row's **×** kills that session.
+- The **snippet** button stores reusable commands globally or for the focused profile. The **appearance** button selects theme, font, and font size and shows the active platform's terminal shortcut table.
 - Up to four cells can be nested horizontally and vertically. Choose a 20–80% initial size, then drag any divider to adjust the ratio. Each mixed-session cell displays its profile name.
 - Clicking a cell makes that session active for SFTP and telemetry while preserving the split layout. The cell's **×** button closes that terminal pane.
+- Unexpected transport loss is retried automatically after network or sleep recovery. A deliberate disconnect, authentication failure, or changed host key is never retried behind the user's back.
 
 The tmux picker is optional and does not install anything: `tmux` must already be available on the local or remote Unix host. GpuTerm checks the login `PATH` plus common Homebrew, `/usr/local`, user-local, and Snap locations. Native Windows hosts are reported as unsupported; WSL can be used through its SSH server as a Linux host.
+
+</details>
+
+<details>
+<summary>SSH config import and port forwarding</summary>
+
+- Press **Import** beside **New** to preview `~/.ssh/config`. GpuTerm expands `~/` and `%d` identity paths, resolves `ProxyJump`, and identifies profile-name collisions before importing only the selected entries.
+- Expand **Port forwards** on a saved profile to add local (`-L`), remote (`-R`), or SOCKS5 dynamic (`-D`) rules. Saved rules start with the profile; **Start once** creates a connection-only rule.
+- Bind addresses and ports are validated before saving. The live list reports starting/running/error state and byte counts; stopping a rule leaves the SSH terminal connected.
+- Ports below 1024 are accepted by the editor, but the operating system may still require elevated privileges to bind them.
 
 </details>
 
@@ -241,6 +261,8 @@ The tmux picker is optional and does not install anything: `tmux` must already b
 - Drop multiple files or folders at once; each top-level item becomes an independent queue item with progress, status, and error reporting. Folder contents are transferred recursively.
 - Running transfers can be canceled individually from the queue.
 - If the target exists, GpuTerm asks before replacing a file or merging into an existing folder.
+- Rename an item in place, or drag remote selections onto a remote directory to move them without downloading. A move is rejected if the destination name already exists.
+- Uploads are committed by remote rename from a hidden `.gputerm-part` path. If the final rename cannot be completed even after the SFTP v3 overwrite fallback, the recovery part path is kept and shown instead of deleting the only complete copy.
 - Files and folders dragged from Explorer, Finder, or Nautilus use the native desktop path payload; items copied in Nautilus and compatible file managers can also be pasted into the focused remote pane.
 - To export remote items to another application, drag them toward a GpuTerm window edge. GpuTerm materializes them in a temporary local export and then starts a native OS copy drag. Large items may finish preparing after the pointer is released; drag them again once the transfer queue reports completion.
 - On Linux, GpuTerm keeps the GTK `text/uri-list` provider alive until the native drag has ended so Nautilus and other file managers can complete their asynchronous file request. On Retina/scaled displays, native drop coordinates are converted per platform before the remote pane is selected.
@@ -264,13 +286,15 @@ The tmux picker is optional and does not install anything: `tmux` must already b
 </details>
 
 <details>
-<summary>Connecting an Ollama or vLLM server</summary>
+<summary>Connecting an LLM runtime</summary>
 
-Both are configured the same way: **LLM RUNTIME → Add**, pick the runtime, enter the address, and press **Test connection** before **Add**. Only `http` and `https` addresses are accepted; a trailing `/`, a path, or a query string is stripped, so `http://host:11434/` and `http://host:11434` are the same instance. The same runtime cannot be registered twice at the same address.
+All supported runtimes use the same flow: **LLM RUNTIME → Add**, pick the runtime, enter the address, and press **Test connection** before **Add**. Only `http` and `https` addresses are accepted; a trailing `/`, a path, or a query string is stripped, so `http://host:11434/` and `http://host:11434` are the same instance. The same runtime cannot be registered twice at the same address.
 
 **Ollama** — the default address is `http://<host>:11434`. Ollama binds to `127.0.0.1` unless told otherwise, so to monitor it from another machine either start it with `OLLAMA_HOST=0.0.0.0:11434` (or set that in the service unit) and open the port, or leave it on loopback and use the SSH tunnel described below. No API key is needed. GpuTerm reads `/api/ps` every poll and `/api/tags` every five minutes.
 
 **vLLM** — the default address is `http://<host>:8000`, i.e. the `--host`/`--port` given to `vllm serve`. If the server was started with `--api-key`, enter the same value in the **API key** field; GpuTerm sends it as `Authorization: Bearer …` on every request and stores it in the encrypted vault. `/metrics` is enabled by default; if the server runs with `--disable-log-stats` it publishes no serving metrics and GpuTerm reports them as unavailable rather than zero. GpuTerm reads `/health` and `/metrics` every poll and `/v1/models` every minute.
+
+**SGLang, TGI, llama.cpp, OpenAI-compatible, and Triton** — choose the matching adapter so GpuTerm uses the server's native read-only endpoints. SGLang and llama.cpp use `/health`, `/v1/models`, and `/metrics`; TGI uses `/health`, `/info`, and `/metrics`; generic OpenAI-compatible servers use `/v1/models`; Triton uses `/v2/health/ready` and `/v2/models/stats`. llama.cpp requires `llama-server --metrics` for Prometheus metrics; otherwise the card explains that metrics are disabled rather than showing zero.
 
 For an `https` address, the certificate is validated against the operating system trust store, so an internal CA already trusted by the machine works without extra configuration.
 
@@ -314,7 +338,7 @@ All metrics come from standard tools over SSH — nothing is installed on the se
 | Top processes | `ps -eo … --sort=-%cpu` / `--sort=-rss` | `ps -Ao … -r` / `-m` | `Get-Process` (two-sample CPU delta) |
 | AI DASH | `ps -axo …`; provider metadata; Codex app-server quota lookup; optional AGY `/usage` PTY probe | same | `Win32_Process` + `Get-Process`; provider metadata, Codex account lookup, and optional AGY `/usage` ConPTY probe |
 
-LLM runtime monitoring is the exception: it runs no remote command at all. GpuTerm issues HTTP GETs from the desktop machine to the addresses you register — `/api/ps` and `/api/tags` for Ollama, `/health`, `/v1/models`, and `/metrics` for vLLM — and nothing else.
+LLM runtime monitoring is the exception: it runs no remote command at all. GpuTerm issues read-only HTTP GETs from the desktop machine to the addresses you register. The adapter-specific endpoints are documented in [Connecting an LLM runtime](#usage); none sends an inference request or changes server state.
 
 Temperature metadata — driver names, sensor labels, vendor thresholds — is probed once per connection and only the raw values are re-read each tick. Windows drive temperatures run as their own command at most every 30 seconds so a sleeping spindle is not woken by polling, and they are deliberately kept out of the batched PowerShell script: one slow drive there would set the CPU, memory, disk, and user errors at once, which is exactly the state the reconnect logic reads as a dead transport.
 
@@ -381,12 +405,13 @@ Long-running work is isolated: blocking SSH I/O runs on `spawn_blocking` threads
 
 | Location | Contents |
 | --- | --- |
-| `sessions.json` | Session profiles — host, port, username, key *path* only |
+| `sessions.json` | Session profiles — host, port, username, key *path*, ProxyJump, and optional forwarding rules |
 | `known_hosts.json` | Approved SHA-256 host key fingerprints |
 | `app_settings.json` | UI preferences such as the last local SFTP directory |
 | `credentials.enc` | Versioned Argon2id parameters plus an AES-256-GCM encrypted and authenticated credential payload |
 | `credential_index.json` | Non-secret session ids used only to show which profiles have a saved vault entry |
-| `llm_instances.json` | Registered Ollama/vLLM instances — name, runtime, URL, poll interval, optional SSH tunnel profile id. Never the API key |
+| `snippets.json` | Saved command names, text, return behavior, and optional profile ids. Never credentials |
+| `llm_instances.json` | Registered LLM runtime instances — name, adapter, URL, poll interval, optional SSH tunnel profile id. Never the API key |
 
 Passwords and key passphrases are **never written in plaintext**. Private key contents are never copied into GpuTerm's configuration files.
 

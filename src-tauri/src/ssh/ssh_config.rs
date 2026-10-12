@@ -531,11 +531,18 @@ fn expand_identity_path(value: &str, home: &Path) -> Option<PathBuf> {
     if value == "~" {
         return Some(home.to_path_buf());
     }
-    if let Some(rest) = value.strip_prefix("~/").or_else(|| value.strip_prefix("~\\")) {
+    if let Some(rest) = value
+        .strip_prefix("~/")
+        .or_else(|| value.strip_prefix("~\\"))
+    {
         return Some(home.join(rest));
     }
     let path = PathBuf::from(&value);
-    Some(if path.is_absolute() { path } else { home.join(path) })
+    Some(if path.is_absolute() {
+        path
+    } else {
+        home.join(path)
+    })
 }
 
 /// The key file an `IdentityFile` value points at, when it exists here.

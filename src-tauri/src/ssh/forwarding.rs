@@ -515,10 +515,9 @@ fn run_listener(context: &RuleContext) -> Result<(), String> {
     let spec = &context.spec;
     let address = (spec.bind_host.trim_matches(['[', ']']), spec.bind_port);
     let listener = TcpListener::bind(address).map_err(|error| match error.kind() {
-        ErrorKind::AddrInUse => format!(
-            "Port {} is already in use on this computer",
-            spec.bind_port
-        ),
+        ErrorKind::AddrInUse => {
+            format!("Port {} is already in use on this computer", spec.bind_port)
+        }
         ErrorKind::PermissionDenied => format!(
             "Binding port {} needs administrator rights on this computer; use a port above 1023",
             spec.bind_port
