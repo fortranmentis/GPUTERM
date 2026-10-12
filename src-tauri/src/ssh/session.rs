@@ -73,6 +73,7 @@ pub struct AppState {
     pub llm_instances: Arc<Mutex<Vec<LlmInstance>>>,
     /// Latest LLM runtime telemetry plus the poller's refresh trigger.
     pub llm_monitor: Arc<MonitorHandle>,
+    pub port_forwards: Arc<crate::ssh::forwarding::ForwardManager>,
 }
 
 #[derive(Clone)]
@@ -96,6 +97,10 @@ pub struct SessionProfile {
     /// Id of another saved profile to tunnel through (ProxyJump).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_jump_id: Option<String>,
+    /// Port forwards started when the profile connects. Only
+    /// `save_profile_forwards` changes them; other saves keep what is stored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forwards: Vec<crate::ssh::forwarding::ForwardSpec>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -155,6 +160,31 @@ pub fn load_sessions() -> Result<Vec<SessionProfile>, String> {
 #[tauri::command(async)]
 pub fn save_session(profile: SessionProfile) -> Result<Vec<SessionProfile>, String> {
     upsert_profile(normalize_profile(profile))
+}
+
+/// Replaces a profile's saved port forward rules. Running forwards are not
+/// touched; the UI restarts them explicitly.
+#[tauri::command(async)]
+pub fn save_profile_forwards(
+    profile_id: String,
+    forwards: Vec<crate::ssh::forwarding::ForwardSpec>,
+) -> Result<Vec<SessionProfile>, String> {
+    let forwards = forwards
+        .into_iter()
+        .map(crate::ssh::forwarding::validate_spec)
+        .collect::<Result<Vec<_>, _>>()?;
+    let _write_guard = lock_profiles()?;
+    let mut profiles = read_profiles()?;
+    let profile = profiles
+        .iter_mut()
+        .find(|profile| profile.id == profile_id)
+        .ok_or_else(|| "That session profile no longer exists".to_string())?;
+    if profile.is_local {
+        return Err("A local terminal cannot forward ports".to_string());
+    }
+    profile.forwards = forwards;
+    write_profiles(&profiles)?;
+    Ok(profiles)
 }
 
 #[tauri::command]
@@ -382,6 +412,8 @@ pub fn profile_from_request(request: &SessionConnectRequest) -> SessionProfile {
         is_local: request.is_local,
         private_key_path: normalize_optional_string(request.private_key_path.clone()),
         proxy_jump_id: normalize_optional_string(request.proxy_jump_id.clone()),
+        // Kept from the stored profile by `upsert_profile`.
+        forwards: Vec::new(),
     })
 }
 
@@ -502,10 +534,12 @@ fn build_proxy_target(
     })))
 }
 
-pub fn upsert_profile(profile: SessionProfile) -> Result<Vec<SessionProfile>, String> {
+pub fn upsert_profile(mut profile: SessionProfile) -> Result<Vec<SessionProfile>, String> {
     let _write_guard = lock_profiles()?;
     let mut profiles = read_profiles()?;
     if let Some(existing) = profiles.iter_mut().find(|item| item.id == profile.id) {
+        // Forward rules are edited only through `save_profile_forwards`.
+        profile.forwards = std::mem::take(&mut existing.forwards);
         *existing = profile;
     } else {
         profiles.push(profile);
@@ -521,8 +555,9 @@ pub(crate) fn upsert_profiles(
 ) -> Result<Vec<SessionProfile>, String> {
     let _write_guard = lock_profiles()?;
     let mut profiles = read_profiles()?;
-    for profile in incoming.into_iter().map(normalize_profile) {
+    for mut profile in incoming.into_iter().map(normalize_profile) {
         if let Some(existing) = profiles.iter_mut().find(|item| item.id == profile.id) {
+            profile.forwards = std::mem::take(&mut existing.forwards);
             *existing = profile;
         } else {
             profiles.push(profile);
@@ -753,7 +788,7 @@ fn run_tunnel_forwarder(listener: TcpListener, mut channel: Channel, stop: Arc<A
         }
     };
 
-    pump_channel_socket(socket, channel, &stop);
+    pump_channel_socket(socket, channel, &stop, None);
 }
 
 /// Pumps bytes between one loopback socket and one direct-tcpip channel until
@@ -762,7 +797,12 @@ fn run_tunnel_forwarder(listener: TcpListener, mut channel: Channel, stop: Arc<A
 /// Both the session and the socket must already be nonblocking: a blocking read
 /// on a `Channel` holds the `Session` mutex across the syscall and would stall
 /// every other channel on the same connection.
-fn pump_channel_socket(socket: TcpStream, mut channel: Channel, stop: &AtomicBool) {
+pub(crate) fn pump_channel_socket(
+    socket: TcpStream,
+    mut channel: Channel,
+    stop: &AtomicBool,
+    bytes: Option<&std::sync::atomic::AtomicU64>,
+) {
     use std::sync::atomic::Ordering;
 
     if socket.set_nonblocking(true).is_err() {
@@ -801,6 +841,9 @@ fn pump_channel_socket(socket: TcpStream, mut channel: Channel, stop: &AtomicBoo
                 Ok(0) => {}
                 Ok(count) => {
                     to_channel.drain(..count);
+                    if let Some(bytes) = bytes {
+                        bytes.fetch_add(count as u64, Ordering::Relaxed);
+                    }
                     progressed = true;
                 }
                 Err(ref error)
@@ -831,6 +874,9 @@ fn pump_channel_socket(socket: TcpStream, mut channel: Channel, stop: &AtomicBoo
                 Ok(0) => {}
                 Ok(count) => {
                     to_socket.drain(..count);
+                    if let Some(bytes) = bytes {
+                        bytes.fetch_add(count as u64, Ordering::Relaxed);
+                    }
                     progressed = true;
                 }
                 Err(ref error)
@@ -879,7 +925,7 @@ const MAX_FORWARD_CONNECTIONS: usize = 4;
 /// forward can never be stuck alive-but-useless.
 const MAX_CONSECUTIVE_OPEN_FAILURES: u32 = 5;
 
-fn is_would_block(error: &ssh2::Error) -> bool {
+pub(crate) fn is_would_block(error: &ssh2::Error) -> bool {
     matches!(error.code(), ssh2::ErrorCode::Session(code) if code == LIBSSH2_ERROR_EAGAIN)
 }
 
@@ -888,7 +934,7 @@ fn is_would_block(error: &ssh2::Error) -> bool {
 /// `keepalive_send` is the cheapest thing that actually touches the socket. On a
 /// nonblocking session it can report `EAGAIN`, which means the write is pending
 /// rather than impossible, so that counts as alive.
-fn session_alive(session: &Session) -> bool {
+pub(crate) fn session_alive(session: &Session) -> bool {
     match session.keepalive_send() {
         Ok(_) => true,
         Err(error) => is_would_block(&error),
@@ -902,7 +948,7 @@ fn session_alive(session: &Session) -> bool {
 /// `EAGAIN`; on a nonblocking session the very first call usually returns it.
 /// Treating that as a failure would leave a bound port that never serves
 /// anything — a silent dead tunnel rather than a visible error.
-fn open_direct_channel(
+pub(crate) fn open_direct_channel(
     session: &Session,
     host: &str,
     port: u16,
@@ -942,7 +988,7 @@ impl Drop for FlagGuard {
 }
 
 /// Decrements a counter on every exit path, including a panic.
-struct CountGuard(Arc<std::sync::atomic::AtomicUsize>);
+pub(crate) struct CountGuard(pub(crate) Arc<std::sync::atomic::AtomicUsize>);
 
 impl Drop for CountGuard {
     fn drop(&mut self) {
@@ -1117,7 +1163,7 @@ fn run_persistent_forward(
         let pump_live = Arc::clone(&live);
         thread::spawn(move || {
             let _count = CountGuard(pump_live);
-            pump_channel_socket(socket, channel, &pump_stop);
+            pump_channel_socket(socket, channel, &pump_stop, None);
         });
     }
 }
@@ -1744,6 +1790,7 @@ mod tests {
             is_local: false,
             private_key_path: None,
             proxy_jump_id: proxy.map(str::to_string),
+            forwards: Vec::new(),
         }
     }
 

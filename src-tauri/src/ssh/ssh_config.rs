@@ -408,6 +408,7 @@ pub fn plan_import(
                     is_local: false,
                     private_key_path: None,
                     proxy_jump_id: None,
+                    forwards: Vec::new(),
                 }
             }
         };
@@ -473,6 +474,7 @@ pub fn plan_import(
                             is_local: false,
                             private_key_path: None,
                             proxy_jump_id: previous.clone(),
+                            forwards: Vec::new(),
                         };
                         let id = profile.id.clone();
                         hop_profiles.push(profile);
@@ -734,6 +736,7 @@ Host *
             is_local: false,
             private_key_path: None,
             proxy_jump_id: None,
+            forwards: Vec::new(),
         }];
         let (planned, created, updated, warnings) =
             plan_import(&preview, &existing, &request(&["db.internal"])).unwrap();

@@ -17,12 +17,15 @@ use ssh::local_fs::{
 use ssh::resource_details::get_resource_details;
 use ssh::session::{
     delete_session, get_credential_vault_status, has_saved_credential, initialize_credential_vault,
-    load_sessions, reset_credential_vault, save_session, test_ssh_connection, trust_host_key,
+    load_sessions, reset_credential_vault, save_profile_forwards, save_session, test_ssh_connection, trust_host_key,
     unlock_credential_vault, AppState,
 };
 use ssh::sftp::{
     cancel_transfer, sftp_create_drag_out_paths, sftp_delete, sftp_download_file, sftp_list_dir,
     sftp_mkdir, sftp_path_exists, sftp_rename, sftp_upload_file,
+};
+use ssh::forwarding::{
+    list_forwards, restart_profile_forwards, start_forward, stop_forward, validate_forward,
 };
 use ssh::snippets::{delete_snippet, list_snippets, save_snippet};
 use ssh::ssh_config::{import_ssh_config, preview_ssh_config};
@@ -83,6 +86,12 @@ pub fn run() {
             delete_snippet,
             preview_ssh_config,
             import_ssh_config,
+            save_profile_forwards,
+            start_forward,
+            restart_profile_forwards,
+            stop_forward,
+            list_forwards,
+            validate_forward,
             list_llm_instances,
             save_llm_instance,
             delete_llm_instance,

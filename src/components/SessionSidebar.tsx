@@ -16,6 +16,7 @@ import { selectIsActiveConnected, useSessionStore } from "../stores/sessionStore
 import { useDisconnectSession } from "../hooks/useDisconnectSession";
 import { withHostKeyPrompt } from "../utils/hostKeyPrompt";
 import { describeImport, SshConfigImport } from "./SshConfigImport";
+import { PortForwards } from "./PortForwards";
 import gtLogo from "../assets/gt-logo.png";
 import type {
   SessionConnectRequest,
@@ -62,6 +63,9 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
   const [form, setForm] = useState<SessionForm>(blankForm);
   const [showNewForm, setShowNewForm] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  const selectedProfile = form.id
+    ? sessions.find((session) => session.id === form.id) ?? null
+    : null;
   const [busy, setBusy] = useState(false);
   const [storedCredentialIds, setStoredCredentialIds] = useState<Set<string>>(
     () => new Set(),
@@ -817,6 +821,13 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
             </button>
           </div>
         </form>
+      )}
+
+      {!showNewForm && !showImport && selectedProfile && !selectedProfile.isLocal && (
+        <PortForwards
+          profile={selectedProfile}
+          connected={connectedSessionIds.includes(selectedProfile.id)}
+        />
       )}
 
       <button

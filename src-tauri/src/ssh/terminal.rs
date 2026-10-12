@@ -56,6 +56,7 @@ struct OpenLocalTerminal {
 #[derive(Clone)]
 struct TerminalReaderState {
     terminals: Arc<Mutex<HashMap<String, TerminalHandle>>>,
+    port_forwards: Arc<crate::ssh::forwarding::ForwardManager>,
     active_connections: Arc<Mutex<HashMap<String, ActiveConnection>>>,
     telemetry_stops: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     ops_sessions: OpsSessions,
@@ -66,6 +67,7 @@ impl TerminalReaderState {
     fn from_app_state(state: &AppState) -> Self {
         Self {
             terminals: Arc::clone(&state.terminals),
+            port_forwards: Arc::clone(&state.port_forwards),
             active_connections: Arc::clone(&state.active_connections),
             telemetry_stops: Arc::clone(&state.telemetry_stops),
             ops_sessions: Arc::clone(&state.ops_sessions),
@@ -216,6 +218,7 @@ pub async fn connect_terminal(
         stop,
         reader_state,
     );
+    start_saved_forwards(&state, &target);
     start_system_monitor(app, &state, target);
 
     Ok(TerminalSessionInfo {
@@ -776,6 +779,7 @@ fn finish_terminal_reader(
             }
         }
         crate::ssh::session::drop_ops_session(&reader_state.ops_sessions, &session_id);
+        reader_state.port_forwards.stop_profile(&session_id);
         if let Ok(mut cache) = reader_state.remote_os_cache.lock() {
             cache.remove(&session_id);
         }
@@ -789,6 +793,19 @@ fn finish_terminal_reader(
             message: close_message,
         },
     );
+}
+
+/// Starts the profile's saved port forwards on their own connection. Runs in
+/// the background: a forward that cannot start shows up in the forwards panel
+/// and must never fail or delay the terminal.
+fn start_saved_forwards(state: &AppState, target: &crate::ssh::session::SshTarget) {
+    let manager = Arc::clone(&state.port_forwards);
+    let target = target.clone();
+    std::thread::spawn(move || {
+        if let Err(error) = crate::ssh::forwarding::start_profile_forwards(&manager, &target) {
+            eprintln!("GpuTerm: could not start saved port forwards: {error}");
+        }
+    });
 }
 
 fn start_system_monitor(app: AppHandle, state: &AppState, target: crate::ssh::session::SshTarget) {
@@ -838,6 +855,7 @@ pub(crate) fn teardown_session(state: &AppState, session_id: &str) {
 
 fn stop_existing_session(state: &AppState, session_id: &str) {
     crate::ssh::session::drop_ops_session(&state.ops_sessions, session_id);
+    state.port_forwards.stop_profile(session_id);
     if let Ok(mut cache) = state.remote_os_cache.lock() {
         cache.remove(session_id);
     }

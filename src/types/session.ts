@@ -7,6 +7,37 @@ export type SessionProfile = {
   isLocal?: boolean;
   privateKeyPath?: string | null;
   proxyJumpId?: string | null;
+  /** Saved port forwards, started when the profile connects. */
+  forwards?: ForwardSpec[];
+};
+
+export type ForwardKind = "local" | "remote" | "dynamic";
+
+/** One port forward rule (`ForwardSpec` in src-tauri/src/ssh/forwarding.rs). */
+export type ForwardSpec = {
+  id: string;
+  kind: ForwardKind;
+  /** On this computer for local/dynamic forwards, on the server for remote. */
+  bindHost: string;
+  bindPort: number;
+  destHost?: string | null;
+  destPort?: number | null;
+  /** Saved rules only: start it when the profile connects. */
+  enabled: boolean;
+};
+
+export type ForwardStatus = {
+  profileId: string;
+  spec: ForwardSpec;
+  state: "starting" | "listening" | "error" | "stopped";
+  message?: string;
+  boundPort?: number;
+  activeConnections: number;
+  bytesTransferred: number;
+  /** Not saved on the profile; gone after disconnect. */
+  temporary: boolean;
+  /** Reachable from other machines, not only this one / the server. */
+  exposed: boolean;
 };
 
 export type SessionConnectRequest = {

@@ -4544,3 +4544,156 @@ button.agent-summary-section {
   font-size: 11px;
   resize: vertical;
 }
+
+/* Port forwards ----------------------------------------------------------- */
+
+.port-forwards {
+  flex: none;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.port-forwards-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 2px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+  text-align: left;
+}
+
+.port-forwards-toggle small {
+  margin-left: auto;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.port-forwards-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow: auto;
+  padding: 6px 0 2px;
+}
+
+.port-forwards-empty {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.port-forward-error {
+  color: var(--red);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.port-forward-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+}
+
+.port-forward-row.error {
+  border-color: rgba(248, 113, 113, 0.4);
+}
+
+.port-forward-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.port-forward-main strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.port-forward-main strong em {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.port-forward-main small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.port-forward-main small.port-forward-warning {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--amber);
+}
+
+.port-forward-state {
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(137, 150, 168, 0.14);
+  color: var(--muted);
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.port-forward-state.listening {
+  background: rgba(52, 211, 153, 0.12);
+  color: var(--green);
+}
+
+.port-forward-state.starting {
+  background: rgba(96, 165, 250, 0.14);
+  color: var(--blue);
+}
+
+.port-forward-state.error {
+  background: rgba(248, 113, 113, 0.14);
+  color: var(--red);
+}
+
+.port-forward-actions {
+  display: flex;
+  flex: none;
+  gap: 2px;
+}
+
+.port-forward-actions .icon-button {
+  width: 24px;
+  height: 24px;
+}
+
+.port-forward-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.port-forward-form .port-forward-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.port-forward-form .port-forward-check input {
+  width: auto;
+  height: auto;
+}
