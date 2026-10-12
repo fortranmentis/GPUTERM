@@ -12,7 +12,7 @@ use tauri::Manager;
 use ssh::agent_monitor::{configure_claude_quota_monitor, refresh_agent_quota};
 use ssh::local_fs::{
     describe_local_paths, list_local_dir, load_app_settings, local_path_exists,
-    update_recent_local_path,
+    update_recent_local_path, update_terminal_appearance,
 };
 use ssh::resource_details::get_resource_details;
 use ssh::session::{
@@ -49,6 +49,7 @@ pub fn run() {
             reset_credential_vault,
             load_app_settings,
             update_recent_local_path,
+            update_terminal_appearance,
             list_local_dir,
             describe_local_paths,
             local_path_exists,

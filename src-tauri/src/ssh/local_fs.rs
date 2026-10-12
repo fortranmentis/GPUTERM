@@ -9,6 +9,26 @@ use std::time::UNIX_EPOCH;
 pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recent_local_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_theme: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_font_family: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_font_size: Option<u8>,
+}
+
+const MIN_TERMINAL_FONT_SIZE: u8 = 8;
+const MAX_TERMINAL_FONT_SIZE: u8 = 28;
+const MAX_APPEARANCE_ID_CHARS: usize = 64;
+
+/// Terminal look chosen in the appearance popover. Theme and font are ids the
+/// frontend resolves; an unknown id falls back to its default there.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalAppearance {
+    pub theme: Option<String>,
+    pub font_family: Option<String>,
+    pub font_size: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -40,6 +60,27 @@ pub fn update_recent_local_path(path: String) -> Result<AppSettings, String> {
     settings.recent_local_path = Some(normalized);
     write_app_settings(&settings)?;
     Ok(settings)
+}
+
+#[tauri::command(async)]
+pub fn update_terminal_appearance(appearance: TerminalAppearance) -> Result<AppSettings, String> {
+    let mut settings = read_app_settings()?;
+    apply_terminal_appearance(&mut settings, appearance);
+    write_app_settings(&settings)?;
+    Ok(settings)
+}
+
+fn apply_terminal_appearance(settings: &mut AppSettings, appearance: TerminalAppearance) {
+    let clean_id = |value: Option<String>| {
+        value
+            .map(|value| value.trim().chars().take(MAX_APPEARANCE_ID_CHARS).collect::<String>())
+            .filter(|value| !value.is_empty())
+    };
+    settings.terminal_theme = clean_id(appearance.theme);
+    settings.terminal_font_family = clean_id(appearance.font_family);
+    settings.terminal_font_size = appearance
+        .font_size
+        .map(|size| size.clamp(MIN_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE));
 }
 
 #[tauri::command(async)]
@@ -181,7 +222,31 @@ fn settings_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::describe_local_paths;
+    use super::{apply_terminal_appearance, describe_local_paths, AppSettings, TerminalAppearance};
+
+    #[test]
+    fn terminal_appearance_is_cleaned_and_clamped() {
+        let mut settings = AppSettings {
+            recent_local_path: Some("/tmp".to_string()),
+            ..AppSettings::default()
+        };
+        apply_terminal_appearance(
+            &mut settings,
+            TerminalAppearance {
+                theme: Some(" dracula ".to_string()),
+                font_family: Some("  ".to_string()),
+                font_size: Some(99),
+            },
+        );
+        assert_eq!(settings.terminal_theme.as_deref(), Some("dracula"));
+        assert_eq!(settings.terminal_font_family, None);
+        assert_eq!(settings.terminal_font_size, Some(28));
+        assert_eq!(settings.recent_local_path.as_deref(), Some("/tmp"));
+
+        // Older settings files without these fields still load.
+        let loaded: AppSettings = serde_json::from_str(r#"{"recentLocalPath":"/x"}"#).unwrap();
+        assert_eq!(loaded.terminal_font_size, None);
+    }
     use std::fs;
 
     #[test]

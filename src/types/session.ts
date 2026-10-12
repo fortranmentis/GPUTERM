@@ -70,6 +70,9 @@ export type LocalListResponse = {
 
 export type AppSettings = {
   recentLocalPath?: string | null;
+  terminalTheme?: string | null;
+  terminalFontFamily?: string | null;
+  terminalFontSize?: number | null;
 };
 
 export type SftpProgressPayload = {

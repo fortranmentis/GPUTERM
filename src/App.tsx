@@ -12,9 +12,11 @@ import { SftpBrowser } from "./components/SftpBrowser";
 import { TerminalPane } from "./components/TerminalPane";
 import { useLlmStore } from "./stores/llmStore";
 import { useSessionStore } from "./stores/sessionStore";
+import { useSettingsStore } from "./stores/settingsStore";
 import type { RemoteTelemetry, TelemetrySettings } from "./types/gpu";
 import type { LlmInstance, LlmTelemetry } from "./types/llm";
 import type {
+  AppSettings,
   SessionProfile,
   SftpProgressPayload,
   TerminalClosedPayload,
@@ -40,6 +42,7 @@ function initialSftpWidth() {
 function App() {
   const setSessions = useSessionStore((state) => state.setSessions);
   const setMessage = useSessionStore((state) => state.setMessage);
+  const loadSettings = useSettingsStore((state) => state.loadSettings);
   const removeTerminalPane = useSessionStore((state) => state.removeTerminalPane);
   const showSession = useSessionStore((state) => state.showSession);
   const setSessionTelemetry = useSessionStore((state) => state.setSessionTelemetry);
@@ -92,6 +95,9 @@ function App() {
       .catch((error) =>
         setMessage({ kind: "error", text: String(error) }),
       );
+    invoke<AppSettings>("load_app_settings")
+      .then(loadSettings)
+      .catch(() => undefined);
     invoke<TelemetrySettings>("get_telemetry_settings")
       .then(setTelemetrySettings)
       .catch(() => undefined);
@@ -105,6 +111,7 @@ function App() {
       .then((payload) => payload && setLlmTelemetry(payload))
       .catch(() => undefined);
   }, [
+    loadSettings,
     setLlmInstances,
     setLlmTelemetry,
     setMessage,

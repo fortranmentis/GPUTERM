@@ -4,6 +4,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type FormEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
@@ -44,6 +45,14 @@ import {
 import { withHostKeyPrompt } from "../utils/hostKeyPrompt";
 import { snippetPayload } from "../utils/snippetPayload";
 import { SnippetsPicker } from "./SnippetsPicker";
+import { TerminalSettingsPopover } from "./TerminalSettingsPopover";
+import { useSettingsStore } from "../stores/settingsStore";
+import {
+  DEFAULT_TERMINAL_FONT_SIZE,
+  searchDecorations,
+  type TerminalAppearance,
+} from "../utils/terminalAppearance";
+import { matchTerminalShortcut } from "../utils/terminalShortcuts";
 import type { Snippet } from "../types/snippet";
 import { shellQuote } from "../utils/shellQuote";
 import { attachWebKitHangulImeWorkaround } from "../utils/xtermHangulIme";
@@ -191,38 +200,15 @@ function SplitPlacementControls({
   );
 }
 
-function createTerminal(): Terminal {
+function createTerminal(appearance: TerminalAppearance): Terminal {
   return new Terminal({
     cursorBlink: true,
     convertEol: true,
-    fontFamily:
-      "Cascadia Mono, JetBrains Mono, SFMono-Regular, Consolas, monospace",
-    fontSize: 13,
+    fontFamily: appearance.font.family,
+    fontSize: appearance.fontSize,
     lineHeight: 1.18,
     scrollback: 8000,
-    theme: {
-      background: "#080b10",
-      foreground: "#d6dde7",
-      cursor: "#67e8f9",
-      cursorAccent: "#071014",
-      selectionBackground: "#1e3a46",
-      black: "#111827",
-      blue: "#60a5fa",
-      brightBlack: "#4b5563",
-      brightBlue: "#93c5fd",
-      brightCyan: "#67e8f9",
-      brightGreen: "#86efac",
-      brightMagenta: "#f0abfc",
-      brightRed: "#fca5a5",
-      brightWhite: "#ffffff",
-      brightYellow: "#fde68a",
-      cyan: "#22d3ee",
-      green: "#34d399",
-      magenta: "#e879f9",
-      red: "#f87171",
-      white: "#e5e7eb",
-      yellow: "#fbbf24",
-    },
+    theme: appearance.theme.xterm,
   });
 }
 
@@ -253,6 +239,13 @@ export function TerminalPane() {
   const addTerminalPane = useSessionStore((state) => state.addTerminalPane);
   const removeTerminalPane = useSessionStore((state) => state.removeTerminalPane);
   const setMessage = useSessionStore((state) => state.setMessage);
+  const terminalAppearance = useSettingsStore((state) => state.terminalAppearance);
+  const setTerminalAppearance = useSettingsStore(
+    (state) => state.setTerminalAppearance,
+  );
+  // New panes read the current look without re-running the creation effect.
+  const terminalAppearanceRef = useRef(terminalAppearance);
+  terminalAppearanceRef.current = terminalAppearance;
 
   const instancesRef = useRef<Map<string, TermEntry>>(new Map());
   const hostRefs = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -540,7 +533,7 @@ export function TerminalPane() {
       ) {
         continue;
       }
-      const terminal = createTerminal();
+      const terminal = createTerminal(terminalAppearanceRef.current);
       const fitAddon = new FitAddon();
       const searchAddon = new SearchAddon();
       terminal.loadAddon(fitAddon);
@@ -740,13 +733,14 @@ export function TerminalPane() {
   const insertPaneIntoLayout = (
     terminalId: string,
     targetTerminalId = focusedTerminalId,
+    placement = splitPlacement,
   ) => {
     setPaneLayout((current) =>
       insertTerminalPane(
         current,
         targetTerminalId,
         terminalId,
-        splitPlacement,
+        placement,
         newPaneRatio,
       ),
     );
@@ -802,6 +796,7 @@ export function TerminalPane() {
   const openSplitSourcePane = async (
     setBusy: (busy: boolean) => void,
     initialCommand?: string,
+    placement = splitPlacement,
   ) => {
     const sourceTerminalId = splitSourceTerminalId;
     const sourceSessionId = splitSourceSessionId;
@@ -836,7 +831,7 @@ export function TerminalPane() {
         });
       }
       addTerminalPane(sourceSessionId, info.terminalId);
-      insertPaneIntoLayout(info.terminalId, sourceTerminalId);
+      insertPaneIntoLayout(info.terminalId, sourceTerminalId, placement);
       focusPane(info.terminalId, sourceSessionId);
       return info;
     } finally {
@@ -1079,12 +1074,7 @@ export function TerminalPane() {
       return;
     }
     const options = {
-      decorations: {
-        matchOverviewRuler: "#22d3ee",
-        activeMatchColorOverviewRuler: "#67e8f9",
-        matchBackground: "#1e3a46",
-        activeMatchBackground: "#22d3ee",
-      },
+      decorations: searchDecorations(terminalAppearance.theme),
     };
     const found =
       direction === "next"
@@ -1138,6 +1128,130 @@ export function TerminalPane() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [openSearch]);
+
+  // Restyle every live pane when the theme, font or size changes, then refit:
+  // a new font size changes how many rows and columns fit.
+  useEffect(() => {
+    for (const entry of instancesRef.current.values()) {
+      entry.terminal.options.theme = terminalAppearance.theme.xterm;
+      entry.terminal.options.fontFamily = terminalAppearance.font.family;
+      entry.terminal.options.fontSize = terminalAppearance.fontSize;
+    }
+    scheduleFit(0);
+    // scheduleFit only touches refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [terminalAppearance]);
+
+  const focusAdjacentPane = (delta: number) => {
+    if (visiblePaneIds.length < 2) {
+      return;
+    }
+    const index = focusedTerminalId ? visiblePaneIds.indexOf(focusedTerminalId) : -1;
+    const next =
+      visiblePaneIds[
+        (Math.max(index, 0) + delta + visiblePaneIds.length) % visiblePaneIds.length
+      ];
+    focusPane(next);
+    instancesRef.current.get(next)?.terminal.focus();
+  };
+
+  // Clears scrollback, then sends Ctrl-L so the shell redraws its prompt.
+  const clearFocusedScreen = () => {
+    const terminalId = splitSourceTerminalId;
+    const entry = terminalId ? instancesRef.current.get(terminalId) : undefined;
+    if (!terminalId || !entry) {
+      return;
+    }
+    entry.terminal.clear();
+    if (entry.writable) {
+      entry.inputQueue += "\u000c";
+      void flushInput(terminalId, entry);
+    }
+  };
+
+  const runShortcut = (action: NonNullable<ReturnType<typeof matchTerminalShortcut>>) => {
+    switch (action) {
+      case "splitRight":
+      case "splitDown":
+        if (!splitting) {
+          void openSplitSourcePane(
+            setSplitting,
+            undefined,
+            action === "splitRight" ? "right" : "bottom",
+          ).catch((error) => setMessage({ kind: "error", text: String(error) }));
+        }
+        return;
+      case "closePane":
+        if (focusedTerminalId && visiblePaneIds.length > 1) {
+          void closeSplit(focusedTerminalId);
+        }
+        return;
+      case "clear":
+        clearFocusedScreen();
+        return;
+      case "find":
+        openSearch();
+        return;
+      case "findNext":
+      case "findPrevious":
+        if (searchOpen && searchQuery) {
+          runSearch(searchQuery, action === "findNext" ? "next" : "previous");
+        } else {
+          openSearch();
+        }
+        return;
+      case "fontBigger":
+      case "fontSmaller":
+        setTerminalAppearance((current) => ({
+          ...current,
+          fontSize: current.fontSize + (action === "fontBigger" ? 1 : -1),
+        }));
+        return;
+      case "fontReset":
+        setTerminalAppearance((current) => ({
+          ...current,
+          fontSize: DEFAULT_TERMINAL_FONT_SIZE,
+        }));
+        return;
+      case "previousPane":
+        focusAdjacentPane(-1);
+        return;
+      case "nextPane":
+        focusAdjacentPane(1);
+        return;
+    }
+  };
+  const runShortcutRef = useRef(runShortcut);
+  runShortcutRef.current = runShortcut;
+
+  // Capture phase, so a shortcut typed into a pane is handled before xterm
+  // forwards the key to the remote shell.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const action = matchTerminalShortcut(event);
+      if (!action) {
+        return;
+      }
+      // Other text fields keep their own keys; xterm's helper textarea and
+      // the search bar do not count as such fields.
+      const { target } = event;
+      if (target instanceof Element) {
+        const field = target.closest("input, textarea, select");
+        if (
+          field &&
+          !target.closest(".xterm") &&
+          !target.closest(".terminal-search-bar")
+        ) {
+          return;
+        }
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      runShortcutRef.current(action);
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, []);
 
   // Reopens a shell for a pane whose connection ended.
   const reconnectPane = async (terminalId: string) => {
@@ -1590,6 +1704,7 @@ export function TerminalPane() {
               </div>
             )}
           </div>
+          <TerminalSettingsPopover />
           <SnippetsPicker
             profileId={splitSourceSessionId}
             profileName={
@@ -1785,7 +1900,15 @@ export function TerminalPane() {
           </button>
         </div>
       </div>
-      <div className="terminal-surface" ref={surfaceRef}>
+      <div
+        className="terminal-surface"
+        ref={surfaceRef}
+        style={
+          {
+            "--terminal-bg": terminalAppearance.theme.xterm.background,
+          } as CSSProperties
+        }
+      >
         {visiblePaneIds.length === 0 && (
           <div className="terminal-empty">No active SSH session</div>
         )}

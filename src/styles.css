@@ -997,7 +997,7 @@ button:disabled {
   position: relative;
   flex: 1;
   min-height: 0;
-  background: #080b10;
+  background: var(--terminal-bg, #080b10);
 }
 
 .terminal-split-grid {
@@ -1076,7 +1076,7 @@ button:disabled {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  background: #080b10;
+  background: var(--terminal-bg, #080b10);
   outline: 1px solid transparent;
   outline-offset: -1px;
 }
@@ -4346,4 +4346,94 @@ button.agent-summary-section {
   flex: none;
   width: 26px;
   height: 26px;
+}
+
+/* Terminal appearance popover ------------------------------------------- */
+
+.terminal-appearance-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(330px, calc(100% - 16px));
+}
+
+.terminal-appearance-picker .terminal-session-picker-heading {
+  padding-bottom: 0;
+}
+
+.terminal-theme-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.terminal-theme-grid > button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 650;
+  text-align: left;
+}
+
+.terminal-theme-grid > button.selected {
+  border-color: var(--cyan);
+  box-shadow: 0 0 0 1px var(--cyan);
+}
+
+.terminal-theme-swatches {
+  display: flex;
+  gap: 3px;
+}
+
+.terminal-theme-swatches i {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.terminal-font-size-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.terminal-font-size-row > span {
+  flex: 1;
+}
+
+.terminal-font-size-row output {
+  min-width: 38px;
+  color: var(--text);
+  text-align: center;
+}
+
+.terminal-shortcut-list {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  font-size: 11px;
+}
+
+.terminal-shortcut-list > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.terminal-shortcut-list dt {
+  color: var(--muted);
+}
+
+.terminal-shortcut-list dd {
+  margin: 0;
+  color: var(--text);
+  font-family: "Cascadia Mono", "JetBrains Mono", SFMono-Regular, Consolas, monospace;
 }
