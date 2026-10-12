@@ -42,6 +42,9 @@ import {
   takePendingOutput,
 } from "../utils/terminalBuffer";
 import { withHostKeyPrompt } from "../utils/hostKeyPrompt";
+import { snippetPayload } from "../utils/snippetPayload";
+import { SnippetsPicker } from "./SnippetsPicker";
+import type { Snippet } from "../types/snippet";
 import { shellQuote } from "../utils/shellQuote";
 import { attachWebKitHangulImeWorkaround } from "../utils/xtermHangulIme";
 import {
@@ -505,6 +508,24 @@ export function TerminalPane() {
         void flushInput(terminalId, entry);
       }
     }
+  };
+
+  // Types a saved command into the focused pane through the same queue as
+  // keystrokes, so it can never interleave with typing in flight.
+  const sendSnippet = (snippet: Snippet) => {
+    const terminalId = splitSourceTerminalId;
+    const entry = terminalId ? instancesRef.current.get(terminalId) : undefined;
+    if (!terminalId || !entry || !entry.writable) {
+      setMessage({ kind: "error", text: "The focused terminal is not connected" });
+      return;
+    }
+    entry.inputQueue += snippetPayload(
+      snippet.command,
+      snippet.appendReturn,
+      entry.terminal.modes.bracketedPasteMode,
+    );
+    void flushInput(terminalId, entry);
+    entry.terminal.focus();
   };
 
   // Create an xterm instance for every live backend pane and preserve
@@ -1569,6 +1590,15 @@ export function TerminalPane() {
               </div>
             )}
           </div>
+          <SnippetsPicker
+            profileId={splitSourceSessionId}
+            profileName={
+              sessions.find((session) => session.id === splitSourceSessionId)
+                ?.name ?? null
+            }
+            disabled={!isFocusedConnected}
+            onSend={sendSnippet}
+          />
           <div className="terminal-session-picker-anchor" ref={sessionPickerRef}>
             <button
               className="icon-button"

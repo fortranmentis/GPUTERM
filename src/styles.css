@@ -4264,3 +4264,86 @@ button.agent-summary-section {
 .terminal-tmux-picker .primary-button {
   width: 100%;
 }
+
+/* Snippets picker ------------------------------------------------------- */
+
+.terminal-snippets-picker {
+  width: min(340px, calc(100% - 16px));
+}
+
+.terminal-snippets-picker textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  outline: none;
+  background-color: #090e15;
+  color: var(--text);
+  font-family: "Cascadia Mono", "JetBrains Mono", SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  resize: vertical;
+}
+
+.terminal-snippets-picker textarea:focus {
+  border-color: var(--cyan-strong);
+  box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.12);
+}
+
+.terminal-snippets-picker .terminal-snippet-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.terminal-snippets-picker .terminal-snippet-check input {
+  width: auto;
+  height: auto;
+}
+
+.terminal-snippet-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.terminal-snippet-actions > button {
+  flex: 1;
+}
+
+/* A send button plus edit and delete, sharing the session-picker row look. */
+.terminal-snippet-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 26px 26px;
+  align-items: center;
+  gap: 2px;
+}
+
+.terminal-snippet-row > button:first-child {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  min-height: 44px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.terminal-snippet-row > button:first-child:hover {
+  border-color: var(--line);
+  background: #121d29;
+}
+
+.terminal-snippet-row > button:first-child small {
+  font-family: "Cascadia Mono", "JetBrains Mono", SFMono-Regular, Consolas, monospace;
+}
+
+.terminal-snippet-row > .icon-button {
+  flex: none;
+  width: 26px;
+  height: 26px;
+}

@@ -7,6 +7,7 @@ pub mod parse_util;
 pub mod resource_details;
 pub mod session;
 pub mod sftp;
+pub mod snippets;
 pub mod system_monitor;
 pub mod terminal;
 pub mod thermal_monitor;
