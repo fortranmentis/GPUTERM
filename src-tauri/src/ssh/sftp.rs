@@ -2,7 +2,7 @@ use crate::ssh::session::{
     open_ssh_session, target_for_active_session, with_ops_session, AppState, SshTarget,
 };
 use serde::{Deserialize, Serialize};
-use ssh2::{FileStat, Sftp};
+use ssh2::{FileStat, RenameFlags, Sftp};
 use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
@@ -370,6 +370,7 @@ fn upload_path(
         .session
         .sftp()
         .map_err(|error| format!("SFTP failed to start: {}", error))?;
+    let token = transfer_token(request.transfer_id.as_deref());
     let mut transferred_bytes = 0;
     emit_progress(
         &app,
@@ -384,6 +385,7 @@ fn upload_path(
         &sftp,
         local_path,
         Path::new(&request.remote_path),
+        &token,
         &app,
         &request,
         Some(total_bytes),
@@ -405,6 +407,7 @@ fn upload_local_entry(
     sftp: &Sftp,
     local_path: &Path,
     remote_path: &Path,
+    token: &str,
     app: &AppHandle,
     request: &SftpTransferRequest,
     total_bytes: Option<u64>,
@@ -444,6 +447,7 @@ fn upload_local_entry(
                 sftp,
                 &entry.path(),
                 &child_remote,
+                token,
                 app,
                 request,
                 total_bytes,
@@ -477,14 +481,17 @@ fn upload_local_entry(
             error
         )
     })?;
-    let mut remote_file = sftp.create(remote_path).map_err(|error| {
+    // Write to a hidden part file first so a failed or canceled upload never
+    // truncates an existing remote file the user chose to overwrite.
+    let part_path = remote_part_path(remote_path, token);
+    let mut remote_file = sftp.create(&part_path).map_err(|error| {
         format!(
             "SFTP upload create failed for {}: {}",
             remote_path.display(),
             error
         )
     })?;
-    copy_transfer_stream(
+    if let Err(error) = copy_transfer_stream(
         &mut local_file,
         &mut remote_file,
         app,
@@ -493,7 +500,79 @@ fn upload_local_entry(
         total_bytes,
         cancel,
         transferred_bytes,
-    )
+    ) {
+        drop(remote_file);
+        let _ = sftp.unlink(&part_path);
+        return Err(error);
+    }
+    drop(remote_file);
+    finalize_remote_part(sftp, &part_path, remote_path)
+}
+
+/// Moves a finished part file onto `remote_path`.
+///
+/// libssh2 only transmits rename flags once the server negotiates SFTP
+/// protocol 5, and OpenSSH's sftp-server speaks version 3. There OVERWRITE is
+/// dropped and the rename fails whenever the destination already exists, so
+/// remove it and retry. That trades atomicity for finishing an overwrite the
+/// user already confirmed; when the retry also fails the uploaded data is left
+/// in the part file instead of being discarded.
+fn finalize_remote_part(sftp: &Sftp, part_path: &Path, remote_path: &Path) -> Result<(), String> {
+    let rename_flags = RenameFlags::OVERWRITE | RenameFlags::ATOMIC | RenameFlags::NATIVE;
+    let mut finalize = sftp.rename(part_path, remote_path, Some(rename_flags));
+    let mut replaced_destination = false;
+    if finalize.is_err() && sftp.unlink(remote_path).is_ok() {
+        replaced_destination = true;
+        finalize = sftp.rename(part_path, remote_path, Some(rename_flags));
+    }
+    match finalize {
+        Ok(()) => Ok(()),
+        Err(error) if replaced_destination => Err(format!(
+            "SFTP upload finalize failed for {}: {}. The uploaded data is still at {}.",
+            remote_path.display(),
+            error,
+            part_path.display()
+        )),
+        Err(error) => {
+            let _ = sftp.unlink(part_path);
+            Err(format!(
+                "SFTP upload finalize failed for {}: {}",
+                remote_path.display(),
+                error
+            ))
+        }
+    }
+}
+
+/// `.{name}.{token}.gputerm-part` next to `remote_path`, joined with `/` so a
+/// Windows build never inserts a backslash into a remote path.
+fn remote_part_path(remote_path: &Path, token: &str) -> PathBuf {
+    let name = remote_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "upload".to_string());
+    let part_name = format!(".{}.{}{}", name, token, DOWNLOAD_PART_SUFFIX);
+    match remote_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            remote_child_path(parent, std::ffi::OsStr::new(&part_name))
+        }
+        _ => PathBuf::from(part_name),
+    }
+}
+
+/// A filesystem-safe token that keeps concurrent uploads of the same file
+/// from sharing a part file.
+fn transfer_token(transfer_id: Option<&str>) -> String {
+    transfer_id
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 64
+                && value
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        })
+        .map(str::to_string)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1061,7 +1140,7 @@ fn file_type(stat: &FileStat) -> &'static str {
 mod tests {
     use super::{
         ensure_local_directory, local_entry_size, remove_local_entry_if_exists, remote_child_path,
-        reserve_drag_out_paths,
+        remote_part_path, reserve_drag_out_paths, transfer_token,
     };
     use std::fs;
     use std::path::Path;
@@ -1121,6 +1200,20 @@ mod tests {
         assert_eq!(local_entry_size(&root).expect("measure directory"), 5);
 
         fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn remote_part_path_is_hidden_beside_the_target() {
+        assert_eq!(
+            remote_part_path(Path::new("/srv/data/model.bin"), "abc-1"),
+            Path::new("/srv/data/.model.bin.abc-1.gputerm-part")
+        );
+        assert_eq!(
+            remote_part_path(Path::new("/model.bin"), "t"),
+            Path::new("/.model.bin.t.gputerm-part")
+        );
+        assert_eq!(transfer_token(Some("upload-42")), "upload-42");
+        assert_ne!(transfer_token(Some("../evil")), "../evil");
     }
 
     #[test]
