@@ -14,7 +14,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tauri::{AppHandle, Emitter, State};
 
 pub struct TerminalHandle {
@@ -91,6 +91,9 @@ struct TerminalClosedPayload {
     terminal_id: String,
     session_closed: bool,
     message: Option<String>,
+    /// The transport failed (network drop, sleep), as opposed to the shell
+    /// exiting or the user disconnecting.
+    connection_lost: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -602,10 +605,21 @@ fn start_remote_terminal_reader(
         let mut buffer = [0_u8; 8192];
         let mut pending = Vec::new();
         let mut close_message = None;
+        // Set only for transport failures, which the UI may reconnect on its
+        // own; a shell the user exited must stay closed.
+        let mut connection_lost = false;
         let mut idle_sleep = MIN_IDLE_SLEEP;
         let mut last_keepalive = Instant::now();
+        let mut wake_check = SleepDetector::new();
+        let mut probe_now = false;
 
         while !stop.load(Ordering::SeqCst) {
+            if wake_check.woke_from_sleep() {
+                // After a sleep the server may have dropped the connection.
+                // Probe now, so a dead transport is found within seconds rather
+                // than whenever TCP gives up.
+                probe_now = true;
+            }
             let read_result = {
                 let mut channel = match channel.lock() {
                     Ok(channel) => channel,
@@ -646,12 +660,16 @@ fn start_remote_terminal_reader(
                 }
                 Err(error) => {
                     close_message = Some(format!("Terminal stream failed: {}", error));
+                    connection_lost = true;
                     break;
                 }
             };
 
             if idle {
-                if last_keepalive.elapsed() >= Duration::from_secs(KEEPALIVE_INTERVAL_SECS.into()) {
+                if probe_now
+                    || last_keepalive.elapsed() >= Duration::from_secs(KEEPALIVE_INTERVAL_SECS.into())
+                {
+                    probe_now = false;
                     // A libssh2 send that returns EAGAIN must be retried with
                     // the same operation before another packet is submitted.
                     // Hold the channel mutex so terminal input/resize cannot
@@ -668,6 +686,7 @@ fn start_remote_terminal_reader(
                     };
                     if let Err(error) = keepalive_result {
                         close_message = Some(format!("SSH keepalive failed: {}", error));
+                        connection_lost = true;
                         break;
                     }
                     last_keepalive = Instant::now();
@@ -693,8 +712,45 @@ fn start_remote_terminal_reader(
             let _ = channel.close();
         }
 
-        finish_terminal_reader(&app, session_id, terminal_id, close_message, &reader_state);
+        finish_terminal_reader(
+            &app,
+            session_id,
+            terminal_id,
+            close_message,
+            connection_lost,
+            &reader_state,
+        );
     });
+}
+
+/// Notices that the computer slept: the monotonic clock pauses during sleep
+/// on macOS and Linux while the wall clock keeps going.
+struct SleepDetector {
+    wall: SystemTime,
+    monotonic: Instant,
+}
+
+impl SleepDetector {
+    const THRESHOLD: Duration = Duration::from_secs(20);
+
+    fn new() -> Self {
+        Self {
+            wall: SystemTime::now(),
+            monotonic: Instant::now(),
+        }
+    }
+
+    fn woke_from_sleep(&mut self) -> bool {
+        let wall = SystemTime::now();
+        let monotonic = Instant::now();
+        let wall_elapsed = wall.duration_since(self.wall).unwrap_or_default();
+        let monotonic_elapsed = monotonic.duration_since(self.monotonic);
+        self.wall = wall;
+        self.monotonic = monotonic;
+        // A wall-clock jump (NTP, manual change) also lands here; probing the
+        // connection once is harmless then.
+        wall_elapsed.saturating_sub(monotonic_elapsed) >= Self::THRESHOLD
+    }
 }
 
 fn start_local_terminal_reader(
@@ -750,7 +806,7 @@ fn start_local_terminal_reader(
                 },
             );
         }
-        finish_terminal_reader(&app, session_id, terminal_id, close_message, &reader_state);
+        finish_terminal_reader(&app, session_id, terminal_id, close_message, false, &reader_state);
     });
 }
 
@@ -759,6 +815,7 @@ fn finish_terminal_reader(
     session_id: String,
     terminal_id: String,
     close_message: Option<String>,
+    connection_lost: bool,
     reader_state: &TerminalReaderState,
 ) {
     let session_closed = if let Ok(mut registered) = reader_state.terminals.lock() {
@@ -791,6 +848,7 @@ fn finish_terminal_reader(
             terminal_id,
             session_closed,
             message: close_message,
+            connection_lost,
         },
     );
 }

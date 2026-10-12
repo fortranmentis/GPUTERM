@@ -26,6 +26,8 @@ type SessionStore = {
   connectedSessionIds: string[];
   terminalIdsBySession: Record<string, string[]>;
   telemetryBySession: Record<string, RemoteTelemetry>;
+  /** Sessions whose connection dropped and are being reconnected. */
+  lostSessionIds: string[];
   message: AppMessage | null;
   telemetrySettings: TelemetrySettings;
   setSessions: (sessions: SessionProfile[]) => void;
@@ -36,6 +38,8 @@ type SessionStore = {
   removeTerminalPane: (sessionId: string, terminalId: string) => void;
   removeConnectedSession: (sessionId: string) => void;
   setSessionTelemetry: (sessionId: string, payload: RemoteTelemetry | null) => void;
+  markSessionLost: (sessionId: string) => void;
+  clearSessionLost: (sessionId: string) => void;
   setMessage: (message: AppMessage | null) => void;
   setTelemetrySettings: (settings: TelemetrySettings) => void;
 };
@@ -47,6 +51,7 @@ export const useSessionStore = create<SessionStore>((set) => ({
   connectedSessionIds: [],
   terminalIdsBySession: {},
   telemetryBySession: {},
+  lostSessionIds: [],
   message: null,
   telemetrySettings: defaultTelemetrySettings,
   setSessions: (sessions) => set({ sessions }),
@@ -121,6 +126,18 @@ export const useSessionStore = create<SessionStore>((set) => ({
         telemetryBySession: { ...state.telemetryBySession, [sessionId]: payload },
       };
     }),
+  markSessionLost: (sessionId) =>
+    set((state) =>
+      state.lostSessionIds.includes(sessionId)
+        ? state
+        : { lostSessionIds: [...state.lostSessionIds, sessionId] },
+    ),
+  clearSessionLost: (sessionId) =>
+    set((state) =>
+      state.lostSessionIds.includes(sessionId)
+        ? { lostSessionIds: state.lostSessionIds.filter((id) => id !== sessionId) }
+        : state,
+    ),
   setMessage: (message) => set({ message }),
   setTelemetrySettings: (telemetrySettings) => set({ telemetrySettings }),
 }));

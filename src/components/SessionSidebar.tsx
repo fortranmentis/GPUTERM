@@ -325,6 +325,7 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
       // locally; disconnecting first would drop a bastion even when the
       // delete is refused.
       const state = useSessionStore.getState();
+      state.clearSessionLost(deletedId);
       if (state.connectedSessionIds.includes(deletedId)) {
         state.removeConnectedSession(deletedId);
         if (state.activeSessionId === deletedId) {

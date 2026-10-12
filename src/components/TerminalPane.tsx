@@ -44,6 +44,7 @@ import {
 } from "../utils/terminalBuffer";
 import { withHostKeyPrompt } from "../utils/hostKeyPrompt";
 import { snippetPayload } from "../utils/snippetPayload";
+import { reconnectRequest } from "../utils/reconnectRequest";
 import { SnippetsPicker } from "./SnippetsPicker";
 import { TerminalSettingsPopover } from "./TerminalSettingsPopover";
 import { useSettingsStore } from "../stores/settingsStore";
@@ -1266,23 +1267,7 @@ export function TerminalPane() {
     }
 
     const source = instancesRef.current.get(terminalId)?.terminal;
-    const request: SessionConnectRequest = {
-      id: profile.id,
-      name: profile.name,
-      host: profile.host,
-      port: profile.port,
-      username: profile.username,
-      isLocal: profile.isLocal ?? false,
-      password: null,
-      privateKeyPath: profile.isLocal ? null : profile.privateKeyPath ?? null,
-      proxyJumpId: profile.isLocal ? null : profile.proxyJumpId ?? null,
-      proxyJumpPassword: null,
-      // Credentials stay in memory for the process lifetime, so a reconnect
-      // does not re-prompt for a password that already worked.
-      reuseStoredCredentials: true,
-      cols: source?.cols ?? 80,
-      rows: source?.rows ?? 24,
-    };
+    const request = reconnectRequest(profile, source?.cols, source?.rows);
 
     setReconnectingPane(terminalId);
     try {
@@ -1291,6 +1276,7 @@ export function TerminalPane() {
       );
       const nextTerminalId = info.terminalId ?? info.sessionId;
       addConnectedSession(info.sessionId, nextTerminalId);
+      useSessionStore.getState().clearSessionLost(info.sessionId);
       setClosedPanes((current) => {
         const { [terminalId]: _closed, ...rest } = current;
         return rest;

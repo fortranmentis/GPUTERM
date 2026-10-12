@@ -15,6 +15,10 @@ export function useDisconnectSession() {
 
   return async (sessionId?: string) => {
     const id = sessionId ?? useSessionStore.getState().activeSessionId;
+    if (id) {
+      // A manual disconnect also cancels any automatic reconnect.
+      useSessionStore.getState().clearSessionLost(id);
+    }
     if (!id || !useSessionStore.getState().connectedSessionIds.includes(id)) {
       return;
     }

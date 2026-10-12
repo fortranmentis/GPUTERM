@@ -164,6 +164,8 @@ export type TerminalClosedPayload = {
   sessionClosed: boolean;
   /** Human-readable reason, e.g. "Remote shell closed". */
   message: string | null;
+  /** The transport failed (network drop, sleep), not a shell exit. */
+  connectionLost?: boolean;
 };
 
 /** Mirrors the Rust `TmuxStatus`; the three cases need distinct UI copy. */

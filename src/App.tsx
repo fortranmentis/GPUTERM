@@ -13,6 +13,7 @@ import { TerminalPane } from "./components/TerminalPane";
 import { useLlmStore } from "./stores/llmStore";
 import { useSessionStore } from "./stores/sessionStore";
 import { useSettingsStore } from "./stores/settingsStore";
+import { useAutoReconnect } from "./hooks/useAutoReconnect";
 import type { RemoteTelemetry, TelemetrySettings } from "./types/gpu";
 import type { LlmInstance, LlmTelemetry } from "./types/llm";
 import type {
@@ -43,6 +44,7 @@ function App() {
   const setSessions = useSessionStore((state) => state.setSessions);
   const setMessage = useSessionStore((state) => state.setMessage);
   const loadSettings = useSettingsStore((state) => state.loadSettings);
+  useAutoReconnect();
   const removeTerminalPane = useSessionStore((state) => state.removeTerminalPane);
   const showSession = useSessionStore((state) => state.showSession);
   const setSessionTelemetry = useSessionStore((state) => state.setSessionTelemetry);
@@ -187,6 +189,12 @@ function App() {
         );
         showSession(remainingSessions[remainingSessions.length - 1] ?? null);
       }
+      // A dropped connection (network change, sleep) is retried in the
+      // background; a shell the user exited stays closed.
+      const reconnecting = sessionClosed && event.payload.connectionLost === true;
+      if (reconnecting) {
+        state.markSessionLost(event.payload.sessionId);
+      }
       if (event.payload.message) {
         const isActive = event.payload.sessionId === state.activeSessionId;
         const profileName = state.sessions.find(
@@ -194,9 +202,10 @@ function App() {
         )?.name;
         const prefix = !isActive && profileName ? `${profileName}: ` : "";
         const paneSuffix = sessionClosed ? "" : " (terminal pane)";
+        const reconnectSuffix = reconnecting ? " Reconnecting automatically…" : "";
         setMessage({
           kind: "info",
-          text: `${prefix}${event.payload.message}${paneSuffix}`,
+          text: `${prefix}${event.payload.message}${paneSuffix}${reconnectSuffix}`,
         });
       }
     }).then((unlisten) => {
