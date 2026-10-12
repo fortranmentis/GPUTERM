@@ -11,7 +11,9 @@ use crate::ssh::parse_util::{
     kib_to_mib, parse_average_clock, parse_cpu_model, parse_first_u64, parse_loadavg,
     parse_lscpu_value, parse_meminfo_values, required_section, split_sections,
 };
-use crate::ssh::session::{open_ssh_session, AgentQuotaRefreshes, AppState, SshTarget};
+use crate::ssh::session::{
+    open_ssh_session, readable_connect_error, AgentQuotaRefreshes, AppState, SshTarget,
+};
 use crate::ssh::windows_monitor;
 use base64::Engine as _;
 use chrono::{SecondsFormat, Utc};
@@ -289,7 +291,11 @@ pub fn start(
             let connection = match open_ssh_session(&target) {
                 Ok(connection) => connection,
                 Err(error) => {
-                    emit_connection_error_telemetry(&app, &target.session_id, &error);
+                    emit_connection_error_telemetry(
+                        &app,
+                        &target.session_id,
+                        &readable_connect_error(&error),
+                    );
                     sleep_with_stop_duration(backoff, &stop);
                     backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
                     continue;

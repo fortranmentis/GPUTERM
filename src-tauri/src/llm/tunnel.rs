@@ -22,7 +22,7 @@ use crate::ssh::credentials::SecureCredentialStore;
 use crate::ssh::session::{
     host_keys_trusted, open_forwarding_session, open_persistent_forward, target_for_profile,
     target_signature, ActiveConnection, PersistentForward, SshConnection, SshTarget,
-    UNKNOWN_HOST_KEY_PREFIX,
+    HOST_KEY_CHANGED_PREFIX, UNKNOWN_HOST_KEY_PREFIX,
 };
 
 /// Deliberately parallel to `monitor::BACKOFF_STEPS_SECS`, but per SSH profile:
@@ -46,6 +46,16 @@ fn backoff_secs(failures: u32) -> u64 {
 pub fn classify_ssh_error(profile_label: &str, error: &str) -> RuntimeError {
     if error.starts_with(UNKNOWN_HOST_KEY_PREFIX) {
         return untrusted_error(profile_label);
+    }
+    if error.starts_with(HOST_KEY_CHANGED_PREFIX) {
+        return RuntimeError::new(
+            RuntimeErrorCode::SshHostUntrusted,
+            format!(
+                "The SSH host key for {} has changed. Open that SSH session in a terminal to \
+                 review and replace it. Monitoring resumes automatically after that.",
+                profile_label
+            ),
+        );
     }
     RuntimeError::new(
         RuntimeErrorCode::SshTunnelError,
@@ -975,6 +985,20 @@ mod tests {
             other => panic!("expected a failure, got {other:?}"),
         }
         assert_eq!(state.borrow().resolve_calls, 0);
+    }
+
+    #[test]
+    fn the_changed_key_sentinel_is_translated_and_never_leaked() {
+        let sentinel = format!("{}aa|bb|ssh-ed25519|host:22", HOST_KEY_CHANGED_PREFIX);
+        let error = classify_ssh_error("host:22", &sentinel);
+
+        assert_eq!(error.code, RuntimeErrorCode::SshHostUntrusted);
+        assert!(
+            !error.message.contains(HOST_KEY_CHANGED_PREFIX),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains("changed"), "{}", error.message);
     }
 
     #[test]

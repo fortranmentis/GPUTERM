@@ -7,7 +7,8 @@
 //! authentication fields are never serialized into GpuTerm telemetry.
 
 use crate::ssh::session::{
-    open_ssh_session, target_for_active_session, with_ops_session, AppState, SshTarget,
+    open_ssh_session, readable_connect_error, target_for_active_session, with_ops_session,
+    AppState, SshTarget,
 };
 use crate::ssh::system_monitor::{
     detect_remote_os, local_os, native_remote_path, remote_join, run_local_command_for,
@@ -1055,7 +1056,8 @@ fn refresh_provider_quotas_remote(
         // poll, and libssh2 requires one session to be used serially.
         let target = target.clone();
         spawn_quota_probe(&state.quota_probes, Provider::Codex, move || {
-            let connection = open_ssh_session(&target)?;
+            let connection =
+                open_ssh_session(&target).map_err(|error| readable_connect_error(&error))?;
             query_codex_quota_remote(connection.session(), os, now_epoch_seconds())
         });
     }
@@ -1067,7 +1069,8 @@ fn refresh_provider_quotas_remote(
             .insert(Provider::Agy, Instant::now());
         let target = target.clone();
         spawn_quota_probe(&state.quota_probes, Provider::Agy, move || {
-            let connection = open_ssh_session(&target)?;
+            let connection =
+                open_ssh_session(&target).map_err(|error| readable_connect_error(&error))?;
             query_agy_quota_remote(connection.session(), os, now_epoch_seconds())
         });
     }

@@ -20,6 +20,17 @@ use std::time::{Duration, Instant};
 use tauri::State;
 use uuid::Uuid;
 
+/// Serializes read-modify-write of `known_hosts.json`: terminal, telemetry
+/// and LLM tunnels connect in parallel, and an unserialized trust or legacy
+/// migration could overwrite another one's entry.
+static KNOWN_HOSTS_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock_known_hosts() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    KNOWN_HOSTS_WRITE_LOCK
+        .lock()
+        .map_err(|_| "Known hosts storage is unavailable".to_string())
+}
+
 /// Shared per-session SSH connections reused for short operations
 /// (directory listings, stat calls, resource details). `ssh2::Session` is
 /// internally synchronized but operations on one session must be serialized,
@@ -600,7 +611,7 @@ fn open_tunneled_stream(
     proxy: &SshTarget,
 ) -> Result<(TcpStream, Option<SshTunnel>), String> {
     let bastion = open_ssh_session(proxy).map_err(|error| {
-        if error.starts_with(UNKNOWN_HOST_KEY_PREFIX) {
+        if is_host_key_sentinel(&error) {
             // Keep the sentinel intact so the frontend can prompt for the
             // bastion's own host key.
             error
@@ -1179,6 +1190,39 @@ fn authenticate(session: &Session, target: &SshTarget) -> Result<(), String> {
 /// `|` delimiters are unambiguous (IPv6 hosts may contain `:`).
 pub const UNKNOWN_HOST_KEY_PREFIX: &str = "UNKNOWN_HOST_KEY:";
 
+/// Prefix of the sentinel error raised when a host presents a different key
+/// than the one trusted for its key type. Format:
+/// `HOST_KEY_CHANGED:{expected}|{fingerprint}|{key_type}|{host}:{port}`. The
+/// user can replace the key with `trust_host_key`, which overwrites the
+/// fingerprint for that key type.
+pub const HOST_KEY_CHANGED_PREFIX: &str = "HOST_KEY_CHANGED:";
+
+/// Whether `error` is one of the host-key sentinels the interactive prompt
+/// consumes, which callers must pass through without rewording.
+pub fn is_host_key_sentinel(error: &str) -> bool {
+    error.starts_with(UNKNOWN_HOST_KEY_PREFIX) || error.starts_with(HOST_KEY_CHANGED_PREFIX)
+}
+
+/// Rewords a host-key sentinel for places that cannot show the prompt
+/// (background telemetry, quota probes); other errors pass through unchanged.
+pub fn readable_connect_error(error: &str) -> String {
+    if let Some(rest) = error.strip_prefix(HOST_KEY_CHANGED_PREFIX) {
+        let host = rest.splitn(4, '|').nth(3).unwrap_or("this host");
+        return format!(
+            "The host key for {} has changed. Reconnect the session to review it.",
+            host
+        );
+    }
+    if let Some(rest) = error.strip_prefix(UNKNOWN_HOST_KEY_PREFIX) {
+        let host = rest.splitn(3, '|').nth(2).unwrap_or("this host");
+        return format!(
+            "{} has not been trusted yet. Reconnect the session to review its host key.",
+            host
+        );
+    }
+    error.to_string()
+}
+
 const KNOWN_KEY_TYPES: &[&str] = &[
     "ssh-rsa",
     "ssh-dss",
@@ -1265,6 +1309,7 @@ pub fn trust_host_key(
     if !KNOWN_KEY_TYPES.contains(&key_type.as_str()) {
         return Err(format!("Unsupported host key type: {}", key_type));
     }
+    let _write_guard = lock_known_hosts()?;
     let mut known_hosts = read_known_hosts()?;
     match known_hosts.get_mut(&host_key) {
         Some(KnownHostEntry::PerType(fingerprints)) => {
@@ -1291,28 +1336,45 @@ fn verify_known_host(session: &Session, target: &SshTarget) -> Result<(), String
         .map(|(_, key_type)| host_key_type_name(key_type))
         .ok_or_else(|| "Unable to determine remote host key type".to_string())?;
     let host_key = format!("{}:{}", target.host.to_lowercase(), target.port);
-    let mut known_hosts = read_known_hosts()?;
+    let known_hosts = read_known_hosts()?;
 
     match evaluate_host_key(known_hosts.get(&host_key), key_type, &fingerprint) {
         HostKeyDecision::Trusted => Ok(()),
         HostKeyDecision::TrustedMigrateLegacy => {
-            let mut fingerprints = BTreeMap::new();
-            fingerprints.insert(key_type.to_string(), fingerprint);
-            known_hosts.insert(host_key, KnownHostEntry::PerType(fingerprints));
             // The connection is already verified; a failed rewrite must not
             // block it. The migration will be retried on the next connect.
-            let _ = write_known_hosts(&known_hosts);
+            let _ = migrate_legacy_host_key(&host_key, key_type, &fingerprint);
             Ok(())
         }
         HostKeyDecision::Mismatch { expected } => Err(format!(
-            "Host key mismatch for {} ({}). Expected {}, got {}. Inspect known_hosts.json before reconnecting.",
-            host_key, key_type, expected, fingerprint
+            "{}{}|{}|{}|{}",
+            HOST_KEY_CHANGED_PREFIX, expected, fingerprint, key_type, host_key
         )),
         HostKeyDecision::Unknown => Err(format!(
             "{}{}|{}|{}",
             UNKNOWN_HOST_KEY_PREFIX, fingerprint, key_type, host_key
         )),
     }
+}
+
+/// Rewrites a legacy flat fingerprint under its negotiated key type. Re-reads
+/// under the write lock so a trust recorded since the caller's read survives.
+fn migrate_legacy_host_key(
+    host_key: &str,
+    key_type: &str,
+    fingerprint: &str,
+) -> Result<(), String> {
+    let _write_guard = lock_known_hosts()?;
+    let mut known_hosts = read_known_hosts()?;
+    if evaluate_host_key(known_hosts.get(host_key), key_type, fingerprint)
+        != HostKeyDecision::TrustedMigrateLegacy
+    {
+        return Ok(());
+    }
+    let mut fingerprints = BTreeMap::new();
+    fingerprints.insert(key_type.to_string(), fingerprint.to_string());
+    known_hosts.insert(host_key.to_string(), KnownHostEntry::PerType(fingerprints));
+    write_known_hosts(&known_hosts)
 }
 
 fn normalize_profile(mut profile: SessionProfile) -> SessionProfile {
@@ -1452,6 +1514,26 @@ mod tests {
                 .map(|(key_type, fp)| (key_type.to_string(), fp.to_string()))
                 .collect(),
         )
+    }
+
+    #[test]
+    fn host_key_sentinels_are_reworded_for_background_callers() {
+        let changed = format!("{}aa|bb|ssh-ed25519|gpu.lab:22", HOST_KEY_CHANGED_PREFIX);
+        let unknown = format!("{}bb|ssh-ed25519|gpu.lab:22", UNKNOWN_HOST_KEY_PREFIX);
+        assert!(is_host_key_sentinel(&changed));
+        assert!(is_host_key_sentinel(&unknown));
+        assert!(!is_host_key_sentinel("Authentication failed"));
+
+        let message = readable_connect_error(&changed);
+        assert!(
+            message.contains("gpu.lab:22") && message.contains("changed"),
+            "{message}"
+        );
+        assert!(!message.contains(HOST_KEY_CHANGED_PREFIX));
+        let message = readable_connect_error(&unknown);
+        assert!(message.contains("gpu.lab:22"), "{message}");
+        assert!(!message.contains(UNKNOWN_HOST_KEY_PREFIX));
+        assert_eq!(readable_connect_error("timed out"), "timed out");
     }
 
     #[test]
