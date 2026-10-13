@@ -313,6 +313,11 @@ pub fn start(
                         &target.session_id,
                         &readable_connect_error(&error),
                     );
+                    // A server that wants a code will not stop wanting one;
+                    // retry rarely rather than spin through backoff steps.
+                    if error.starts_with(crate::ssh::kbdint::INTERACTIVE_AUTH_PREFIX) {
+                        backoff = RECONNECT_BACKOFF_MAX;
+                    }
                     sleep_with_stop_duration(backoff, &stop);
                     backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
                     continue;

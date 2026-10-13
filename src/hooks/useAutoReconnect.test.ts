@@ -52,7 +52,12 @@ describe("useAutoReconnect", () => {
     });
 
     expect(mockInvoke).toHaveBeenCalledWith("connect_terminal", {
-      request: expect.objectContaining({ id: "gpu", reuseStoredCredentials: true }),
+      request: expect.objectContaining({
+        id: "gpu",
+        reuseStoredCredentials: true,
+        // An automatic reconnect must never pop up a sign-in dialog.
+        allowInteractiveAuth: false,
+      }),
     });
     const state = useSessionStore.getState();
     expect(state.connectedSessionIds).toEqual(["gpu"]);
@@ -95,5 +100,6 @@ describe("reconnect policy", () => {
     expect(reconnectDelayMs(99)).toBe(60_000);
     expect(isPermanentReconnectError("SSH authentication failed")).toBe(true);
     expect(isPermanentReconnectError("Network timeout")).toBe(false);
+    expect(isPermanentReconnectError("INTERACTIVE_AUTH_REQUIRED:alice@gpu.lab:22")).toBe(true);
   });
 });

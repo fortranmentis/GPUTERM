@@ -1267,7 +1267,7 @@ export function TerminalPane() {
     }
 
     const source = instancesRef.current.get(terminalId)?.terminal;
-    const request = reconnectRequest(profile, source?.cols, source?.rows);
+    const request = reconnectRequest(profile, source?.cols, source?.rows, { interactive: true });
 
     setReconnectingPane(terminalId);
     try {

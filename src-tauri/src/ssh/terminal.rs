@@ -1,5 +1,6 @@
 use crate::ssh::credentials::CredentialStore;
-use crate::ssh::session::{open_ssh_session, probe_reply, ProbeFailure, SshConnection};
+use crate::ssh::kbdint::{AuthResponder, NonInteractive, UiResponder};
+use crate::ssh::session::{open_ssh_session_with, probe_reply, ProbeFailure, SshConnection};
 use crate::ssh::session::{
     profile_from_request, target_for_active_session, target_from_request, upsert_profile,
     ActiveConnection, AppState, OpsSessions, SessionConnectRequest, SshTarget, TerminalSessionInfo,
@@ -127,14 +128,20 @@ pub async fn connect_terminal(
     let credentials = state.credentials.clone();
     let reuse_stored_credentials = request.reuse_stored_credentials;
     let clear_missing_credentials = request.id.is_some() && !reuse_stored_credentials;
+    let mut auth = sign_in_responder(&app, &state, &target.session_id, request.allow_interactive_auth);
     let opened = tauri::async_runtime::spawn_blocking(move || {
         let mut target = target;
         let mut credential_warnings = Vec::new();
         if reuse_stored_credentials {
             fill_stored_credentials(&mut target, &credentials, &mut credential_warnings);
         }
-        let (connection, channel) =
-            open_terminal_channel(&target, cols, rows).map_err(|error| {
+        let opened = open_terminal_channel(&target, cols, rows, auth.as_mut());
+        // A password typed into the sign-in dialog is saved like one typed
+        // into the form, so background connections can use it too.
+        for (session_id, password) in auth.take_captured() {
+            apply_typed_password(&mut target, &session_id, password);
+        }
+        let (connection, channel) = opened.map_err(|error| {
                 if credential_warnings.is_empty() {
                     error
                 } else {
@@ -376,8 +383,9 @@ pub async fn create_terminal_split(
 
     let target = target_for_active_session(&state, &session_id)?;
     let connect_target = target.clone();
+    let mut auth = sign_in_responder(&app, &state, &session_id, true);
     let opened = tauri::async_runtime::spawn_blocking(move || {
-        open_terminal_channel(&connect_target, cols.max(1), rows.max(1))
+        open_terminal_channel(&connect_target, cols.max(1), rows.max(1), auth.as_mut())
     })
     .await
     .map_err(|error| format!("Terminal split task failed: {}", error))??;
@@ -1163,12 +1171,47 @@ fn open_local_terminal_with_shell(
     })
 }
 
+/// Who answers sign-in questions for a connection the user started: a dialog
+/// in the main window, or nobody for an automatic reconnect.
+pub(crate) fn sign_in_responder(
+    app: &AppHandle,
+    state: &AppState,
+    session_id: &str,
+    allow_interactive: bool,
+) -> Box<dyn AuthResponder> {
+    if allow_interactive {
+        Box::new(UiResponder::new(
+            app.clone(),
+            Arc::clone(&state.auth_prompts),
+            session_id.to_string(),
+        ))
+    } else {
+        Box::new(NonInteractive::default())
+    }
+}
+
+/// Puts a password typed at a sign-in question on the hop it was for. A hop
+/// with a key file keeps its passphrase: the answer was the account password.
+fn apply_typed_password(target: &mut SshTarget, session_id: &str, password: String) {
+    let mut hop = Some(target);
+    while let Some(current) = hop {
+        if current.session_id == session_id {
+            if current.private_key_path.is_none() {
+                current.password = Some(password);
+            }
+            return;
+        }
+        hop = current.proxy.as_deref_mut();
+    }
+}
+
 fn open_terminal_channel(
     target: &SshTarget,
     cols: u32,
     rows: u32,
+    auth: &mut dyn AuthResponder,
 ) -> Result<(SshConnection, Channel), String> {
-    let connection = open_ssh_session(target)?;
+    let connection = open_ssh_session_with(target, auth)?;
     connection
         .session
         .set_keepalive(true, KEEPALIVE_INTERVAL_SECS);
@@ -1285,12 +1328,31 @@ fn resize_remote_pty_nonblocking(
 #[cfg(test)]
 mod tests {
     use super::{
-        drain_utf8_stream, fill_stored_credentials, is_closed_channel_error, is_ssh_would_block,
-        open_local_terminal_with_shell, pty_size, write_all_nonblocking,
+        apply_typed_password, drain_utf8_stream, fill_stored_credentials, is_closed_channel_error,
+        is_ssh_would_block, open_local_terminal_with_shell, pty_size, write_all_nonblocking,
     };
     use crate::ssh::credentials::{CredentialStore, MemoryCredentialStore};
     use crate::ssh::session::SshTarget;
     use std::io::{Error, ErrorKind, Read, Write};
+
+    #[test]
+    fn a_password_typed_at_sign_in_goes_to_its_hop() {
+        let hop = |id: &str, key: Option<&str>, proxy: Option<SshTarget>| SshTarget {
+            session_id: id.into(),
+            host: id.into(),
+            port: 22,
+            username: "u".into(),
+            password: None,
+            private_key_path: key.map(str::to_string),
+            proxy: proxy.map(Box::new),
+        };
+        let mut target = hop("gpu", None, Some(hop("jump", Some("/k"), None)));
+        apply_typed_password(&mut target, "gpu", "pw".into());
+        apply_typed_password(&mut target, "jump", "account-password".into());
+        assert_eq!(target.password.as_deref(), Some("pw"));
+        // The jump host's stored secret is its key passphrase; keep it.
+        assert_eq!(target.proxy.as_ref().unwrap().password, None);
+    }
 
     #[derive(Default)]
     struct BurstyWriter {

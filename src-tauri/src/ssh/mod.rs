@@ -2,6 +2,7 @@ pub mod agent_monitor;
 pub mod credentials;
 pub mod forwarding;
 pub mod gpu_monitor;
+pub mod kbdint;
 pub mod local_fs;
 pub mod macos_monitor;
 pub mod parse_util;

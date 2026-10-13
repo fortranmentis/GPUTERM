@@ -52,7 +52,7 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 - **OpenSSH config import** — preview `~/.ssh/config`, resolve `Host`, `Hostname`, `User`, `Port`, `IdentityFile`, `ProxyJump`, and forwarding rules, then select the profiles to import without overwriting collisions silently
 - **Built-in port forwarding** — save or start local (`-L`), remote (`-R`), and SOCKS5 dynamic (`-D`) rules, with live state and byte counts in the profile panel
 - **Native local terminal** — open the current machine without SSH and use the same terminal splits and monitoring UI
-- Password, private key (with passphrase), and SSH agent authentication
+- Password, private key (with passphrase), SSH agent, and keyboard-interactive authentication — one-time codes (Google Authenticator, Duo) and PAM password prompts are asked in a dialog, including for each jump host
 - UTF-8 safe streaming — multibyte characters (한글, 日本語, emoji) survive chunked reads
 - **CJK input works correctly** — Korean IME composition in the terminal is handled with the same backspace-rewrite protocol native terminals use, fixing the jamo-splitting bug in WebKit-based webviews
 - **Scrollback search** — `Ctrl`/`Cmd`+`F` opens an in-pane find bar with match count, `Enter`/`Shift`+`Enter` to step through hits, `Escape` to return focus to the shell
@@ -537,7 +537,7 @@ GpuTerm is free for personal and noncommercial use under [PolyForm Noncommercial
 
 ## Roadmap / Known limitations
 
-- Keyboard-interactive SSH authentication is not implemented
+- A host that asks for a one-time code at every sign-in can only be used by connections you start: background monitoring, SFTP, port forwards, and LLM tunnels open their own connections and cannot ask for a code, so they report that instead of retrying
 - Usage history and alert state are kept in memory per session and reset when a session reconnects or the app restarts; alert thresholds are the same for every host
 - Interrupted transfer resume is not implemented
 - `known_hosts.json` uses SHA-256 fingerprints, not the OpenSSH known_hosts format

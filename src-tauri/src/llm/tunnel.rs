@@ -47,6 +47,16 @@ pub fn classify_ssh_error(profile_label: &str, error: &str) -> RuntimeError {
     if error.starts_with(UNKNOWN_HOST_KEY_PREFIX) {
         return untrusted_error(profile_label);
     }
+    if error.starts_with(crate::ssh::kbdint::INTERACTIVE_AUTH_PREFIX) {
+        return RuntimeError::new(
+            RuntimeErrorCode::SshTunnelError,
+            format!(
+                "{} asks for a password or one-time code at sign-in, so the tunnel cannot \
+                 connect on its own. Use a key or a saved password for this profile.",
+                profile_label
+            ),
+        );
+    }
     if error.starts_with(HOST_KEY_CHANGED_PREFIX) {
         return RuntimeError::new(
             RuntimeErrorCode::SshHostUntrusted,

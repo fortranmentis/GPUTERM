@@ -52,6 +52,11 @@ export type SessionConnectRequest = {
   proxyJumpId?: string | null;
   proxyJumpPassword?: string | null;
   reuseStoredCredentials?: boolean;
+  /**
+   * Whether the server's sign-in questions (a one-time code) may be shown.
+   * Defaults to true; automatic reconnects send false and stop instead.
+   */
+  allowInteractiveAuth?: boolean;
   cols?: number;
   rows?: number;
 };

@@ -2,6 +2,10 @@ use crate::llm::instance::LlmInstance;
 use crate::llm::monitor::MonitorHandle;
 use crate::ssh::agent_monitor::AgentQuotaHistories;
 use crate::ssh::credentials::{CredentialStore, CredentialVaultStatus, SecureCredentialStore};
+use crate::ssh::kbdint::{
+    asks_for_codes, AuthAbort, AuthResponder, HopInfo, NonInteractive, PendingAuthPrompts,
+    PromptAdapter, INTERACTIVE_AUTH_PREFIX,
+};
 use crate::ssh::system_monitor::{RemoteOs, SystemMonitorSettings};
 use crate::ssh::terminal::TerminalHandle;
 use serde::{Deserialize, Serialize};
@@ -72,6 +76,8 @@ pub struct AppState {
     pub telemetry_history: Arc<crate::ssh::telemetry_history::TelemetryHistory>,
     /// Threshold alerts and their per-rule state.
     pub alerts: Arc<crate::alerts::AlertEngine>,
+    /// Sign-in questions waiting for the user's answers.
+    pub auth_prompts: PendingAuthPrompts,
     /// Provider names queued by the UI for an immediate account-quota refresh.
     pub agent_quota_refreshes: AgentQuotaRefreshes,
     /// In-memory AGY quota history keyed by monitored host/account identity.
@@ -132,6 +138,10 @@ pub struct SessionConnectRequest {
     /// Reuses credentials held only in memory for double-click reconnects.
     #[serde(default)]
     pub reuse_stored_credentials: bool,
+    /// Whether sign-in questions (a one-time code) may be shown to the user.
+    /// Automatic reconnects send false, so they stop instead of prompting.
+    #[serde(default = "default_true")]
+    pub allow_interactive_auth: bool,
     #[serde(default)]
     pub cols: Option<u32>,
     #[serde(default)]
@@ -158,6 +168,10 @@ pub struct SshTarget {
     pub private_key_path: Option<String>,
     /// Jump host to tunnel through, resolved from the saved profile chain.
     pub proxy: Option<Box<SshTarget>>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[tauri::command(async)]
@@ -349,10 +363,17 @@ pub async fn reset_credential_vault(
 
 #[tauri::command]
 pub async fn test_ssh_connection(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     request: SessionConnectRequest,
 ) -> Result<String, String> {
     let credentials = state.credentials.clone();
+    let mut auth = crate::ssh::terminal::sign_in_responder(
+        &app,
+        &state,
+        request.id.as_deref().unwrap_or_default(),
+        request.allow_interactive_auth,
+    );
     tauri::async_runtime::spawn_blocking(move || {
         let profile = profile_from_request(&request);
         if profile.is_local {
@@ -362,7 +383,7 @@ pub async fn test_ssh_connection(
         if request.reuse_stored_credentials {
             restore_stored_credentials(&mut target, &credentials)?;
         }
-        let connection = open_ssh_session(&target)?;
+        let connection = open_ssh_session_with(&target, auth.as_mut())?;
         let _ = connection
             .session
             .disconnect(None, "GpuTerm connection test complete", None);
@@ -691,7 +712,19 @@ impl Drop for SshTunnel {
     }
 }
 
+/// Opens and authenticates a connection nobody is watching; a server that
+/// needs an answer only the user can give fails with the
+/// `INTERACTIVE_AUTH_PREFIX` sentinel.
 pub fn open_ssh_session(target: &SshTarget) -> Result<SshConnection, String> {
+    open_ssh_session_with(target, &mut NonInteractive::default())
+}
+
+/// `open_ssh_session`, with `auth` answering keyboard-interactive questions
+/// for the target and every jump host before it.
+pub fn open_ssh_session_with(
+    target: &SshTarget,
+    auth: &mut dyn AuthResponder,
+) -> Result<SshConnection, String> {
     // Direct connection: TCP straight to the target.
     // Proxied connection: connect the bastion first, open a direct-tcpip
     // channel to the target through it, and expose it as a local socket the
@@ -732,7 +765,7 @@ pub fn open_ssh_session(target: &SshTarget) -> Result<SshConnection, String> {
             enable_tcp_keepalive(&tcp);
             (tcp, None)
         }
-        Some(proxy) => open_tunneled_stream(target, proxy)?,
+        Some(proxy) => open_tunneled_stream(target, proxy, auth)?,
     };
 
     let _ = tcp.set_read_timeout(Some(Duration::from_secs(10)));
@@ -754,7 +787,7 @@ pub fn open_ssh_session(target: &SshTarget) -> Result<SshConnection, String> {
     })?;
 
     verify_known_host(&session, target)?;
-    authenticate(&session, target)?;
+    authenticate(&session, target, auth)?;
 
     if !session.authenticated() {
         return Err(
@@ -791,9 +824,10 @@ pub(crate) fn host_without_brackets(host: &str) -> &str {
 fn open_tunneled_stream(
     target: &SshTarget,
     proxy: &SshTarget,
+    auth: &mut dyn AuthResponder,
 ) -> Result<(TcpStream, Option<SshTunnel>), String> {
-    let bastion = open_ssh_session(proxy).map_err(|error| {
-        if is_host_key_sentinel(&error) {
+    let bastion = open_ssh_session_with(proxy, auth).map_err(|error| {
+        if is_host_key_sentinel(&error) || error.starts_with(INTERACTIVE_AUTH_PREFIX) {
             // Keep the sentinel intact so the frontend can prompt for the
             // bastion's own host key.
             error
@@ -1542,42 +1576,160 @@ pub fn target_signature(target: &SshTarget) -> String {
     signature
 }
 
-fn authenticate(session: &Session, target: &SshTarget) -> Result<(), String> {
-    if let Some(private_key_path) = normalize_optional_string(target.private_key_path.clone()) {
-        let private_key = Path::new(&private_key_path);
-        if !private_key.exists() {
-            return Err(format!(
-                "Private key file was not found: {}",
-                private_key_path
-            ));
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuthMethod {
+    PublicKey,
+    Password,
+    KeyboardInteractive,
+    Agent,
+}
+
+/// The next sign-in method to try, given what the server currently offers
+/// (`offered`, comma separated) and what was already tried.
+///
+/// The configured credential decides the first method, as it always has: a
+/// key file, else a password, else the SSH agent. A password goes through
+/// `password` when the server offers it, and through keyboard-interactive
+/// otherwise (a stock Ubuntu sshd offers only the latter). Keyboard-
+/// interactive is also the follow-up when the server wants a second factor
+/// after a key or password succeeded partially.
+pub(crate) fn next_auth_method(
+    offered: &str,
+    has_key: bool,
+    has_password: bool,
+    tried: &[AuthMethod],
+) -> Option<AuthMethod> {
+    let offers = |name: &str| offered.split(',').any(|method| method.trim() == name);
+    let first = if has_key {
+        AuthMethod::PublicKey
+    } else if has_password {
+        // An unknown list (empty) keeps the old behaviour: try the password.
+        if offers("password") || !offers("keyboard-interactive") {
+            AuthMethod::Password
+        } else {
+            AuthMethod::KeyboardInteractive
         }
+    } else {
+        AuthMethod::Agent
+    };
+    [first, AuthMethod::KeyboardInteractive]
+        .into_iter()
+        .filter(|method| !tried.contains(method))
+        .find(|method| *method == first || offers("keyboard-interactive"))
+}
 
-        session
-            .userauth_pubkey_file(
-                &target.username,
-                None,
-                private_key,
-                target.password.as_deref(),
-            )
-            .map_err(|_| {
-                "SSH key authentication failed. Check username, private key, and passphrase."
-                    .to_string()
-            })?;
-        return Ok(());
+fn interactive_auth_sentinel(hop: &HopInfo) -> String {
+    format!("{}{}", INTERACTIVE_AUTH_PREFIX, hop.key())
+}
+
+fn authenticate(
+    session: &Session,
+    target: &SshTarget,
+    auth: &mut dyn AuthResponder,
+) -> Result<(), String> {
+    let private_key_path = normalize_optional_string(target.private_key_path.clone());
+    if let Some(path) = &private_key_path {
+        if !Path::new(path).exists() {
+            return Err(format!("Private key file was not found: {}", path));
+        }
     }
+    let password = normalize_optional_string(target.password.clone());
+    let mut hop = HopInfo {
+        session_id: target.session_id.clone(),
+        host: target.host.clone(),
+        port: target.port,
+        username: target.username.clone(),
+        // With a key file the stored secret is its passphrase, not the
+        // account password, so it must not answer a password question.
+        saved_password: if private_key_path.is_some() {
+            None
+        } else {
+            password.clone()
+        },
+    };
 
-    if let Some(password) = normalize_optional_string(target.password.clone()) {
-        session
-            .userauth_password(&target.username, &password)
-            .map_err(|_| {
-                "SSH password authentication failed. Check username and password.".to_string()
-            })?;
-        return Ok(());
+    // Asking for the list is itself a "none" sign-in, which a server may
+    // simply accept.
+    let mut offered = match session.auth_methods(&target.username) {
+        Ok(list) => list.to_string(),
+        Err(_) if session.authenticated() => return Ok(()),
+        Err(_) => String::new(),
+    };
+    let mut tried = Vec::new();
+    let mut last_error = None;
+    while let Some(method) = next_auth_method(
+        &offered,
+        private_key_path.is_some(),
+        password.is_some(),
+        &tried,
+    ) {
+        tried.push(method);
+        match method {
+            AuthMethod::PublicKey => {
+                let key = Path::new(private_key_path.as_deref().unwrap_or_default());
+                if session
+                    .userauth_pubkey_file(&target.username, None, key, password.as_deref())
+                    .is_err()
+                {
+                    last_error = Some(
+                        "SSH key authentication failed. Check username, private key, and passphrase.",
+                    );
+                }
+            }
+            AuthMethod::Password => {
+                let secret = password.as_deref().unwrap_or_default();
+                if session.userauth_password(&target.username, secret).is_err() {
+                    last_error =
+                        Some("SSH password authentication failed. Check username and password.");
+                    // Already rejected: offering it again to a password
+                    // question would only spend another failed sign-in.
+                    hop.saved_password = None;
+                }
+            }
+            AuthMethod::Agent => {
+                if session.userauth_agent(&target.username).is_err() {
+                    last_error = Some(
+                        "SSH agent authentication failed. Enter a password or private key path.",
+                    );
+                }
+            }
+            AuthMethod::KeyboardInteractive => {
+                if !auth.interactive() && asks_for_codes(&hop.key()) {
+                    // Known to want a code: do not spend a failed sign-in.
+                    return Err(interactive_auth_sentinel(&hop));
+                }
+                let mut adapter = PromptAdapter {
+                    responder: &mut *auth,
+                    hop: &hop,
+                    aborted: None,
+                };
+                let result = session.userauth_keyboard_interactive(&target.username, &mut adapter);
+                match adapter.aborted {
+                    Some(AuthAbort::NeedsUser) => return Err(interactive_auth_sentinel(&hop)),
+                    Some(AuthAbort::Canceled) => {
+                        return Err("Sign-in was canceled.".to_string());
+                    }
+                    None => {}
+                }
+                if result.is_err() && !session.authenticated() {
+                    last_error = Some(
+                        "SSH sign-in failed: the server did not accept the answers. Check the password or code.",
+                    );
+                }
+            }
+        }
+        if session.authenticated() {
+            return Ok(());
+        }
+        // A partial success (say, a key accepted but a code still needed)
+        // changes what the server offers next.
+        if let Ok(list) = session.auth_methods(&target.username) {
+            offered = list.to_string();
+        }
     }
-
-    session.userauth_agent(&target.username).map_err(|_| {
-        "SSH agent authentication failed. Enter a password or private key path.".to_string()
-    })
+    Err(last_error
+        .unwrap_or("SSH authentication failed. Check username, password, private key, or SSH agent.")
+        .to_string())
 }
 
 /// Prefix of the sentinel error raised when connecting to a host whose key has
@@ -1602,6 +1754,13 @@ pub fn is_host_key_sentinel(error: &str) -> bool {
 /// Rewords a host-key sentinel for places that cannot show the prompt
 /// (background telemetry, quota probes); other errors pass through unchanged.
 pub fn readable_connect_error(error: &str) -> String {
+    if let Some(host) = error.strip_prefix(INTERACTIVE_AUTH_PREFIX) {
+        return format!(
+            "{} asks for a password or one-time code at sign-in, which GpuTerm cannot enter \
+             on its own. Reconnect the session to sign in.",
+            host
+        );
+    }
     if let Some(rest) = error.strip_prefix(HOST_KEY_CHANGED_PREFIX) {
         let host = rest.splitn(4, '|').nth(3).unwrap_or("this host");
         return format!(
@@ -2075,6 +2234,44 @@ mod tests {
             proxy_jump_id: proxy.map(str::to_string),
             forwards: Vec::new(),
         }
+    }
+
+    #[test]
+    fn sign_in_methods_follow_the_credential_and_what_the_server_offers() {
+        use AuthMethod::*;
+        let order = |offered: &str, key: bool, password: bool| {
+            let mut tried = Vec::new();
+            while let Some(method) = next_auth_method(offered, key, password, &tried) {
+                tried.push(method);
+            }
+            tried
+        };
+        // A key, then a code when the server also asks for one.
+        assert_eq!(order("publickey,keyboard-interactive", true, true), [PublicKey, KeyboardInteractive]);
+        assert_eq!(order("publickey", true, false), [PublicKey]);
+        // A password goes through keyboard-interactive when that is all there is.
+        assert_eq!(order("publickey,keyboard-interactive", false, true), [KeyboardInteractive]);
+        assert_eq!(order("publickey,password", false, true), [Password]);
+        assert_eq!(order("password,keyboard-interactive", false, true), [Password, KeyboardInteractive]);
+        // Nothing configured: the agent, then questions.
+        assert_eq!(order("publickey,keyboard-interactive", false, false), [Agent, KeyboardInteractive]);
+        // An unknown list keeps the old single attempt.
+        assert_eq!(order("", false, true), [Password]);
+        assert_eq!(order("", false, false), [Agent]);
+    }
+
+    #[test]
+    fn the_interactive_sign_in_sentinel_is_reworded_for_background_errors() {
+        let hop = HopInfo {
+            session_id: "s".into(),
+            host: "lab".into(),
+            port: 22,
+            username: "alice".into(),
+            saved_password: None,
+        };
+        let sentinel = interactive_auth_sentinel(&hop);
+        assert_eq!(sentinel, "INTERACTIVE_AUTH_REQUIRED:alice@lab:22");
+        assert!(readable_connect_error(&sentinel).starts_with("alice@lab:22 asks for a password or one-time code"));
     }
 
     #[test]

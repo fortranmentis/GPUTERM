@@ -5013,3 +5013,31 @@ button.agent-summary-section {
   font-variant-numeric: tabular-nums;
 }
 
+.auth-prompt-dialog {
+  display: grid;
+  gap: 10px;
+  width: min(440px, calc(100vw - 32px));
+}
+
+.auth-prompt-badge {
+  margin-left: auto;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--subtle);
+  font-size: 10px;
+}
+
+.auth-prompt-instructions {
+  white-space: pre-wrap;
+}
+
+.auth-prompt-field {
+  display: grid;
+  gap: 4px;
+}
+
+.auth-prompt-field span {
+  color: #cbd5e1;
+  font-size: 12px;
+}

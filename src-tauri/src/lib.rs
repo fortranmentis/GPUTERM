@@ -76,6 +76,7 @@ pub fn run() {
             alerts::update_alert_settings,
             ssh::process_control::inspect_process,
             ssh::process_control::signal_process,
+            ssh::kbdint::answer_auth_prompt,
             refresh_agent_quota,
             configure_claude_quota_monitor,
             get_resource_details,

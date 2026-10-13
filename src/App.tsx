@@ -5,6 +5,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getAllWebviewWindows } from "@tauri-apps/api/webviewWindow";
 import { PanelBottomOpen, PanelLeftOpen, PanelRightOpen } from "lucide-react";
 import { AppMessageOverlay } from "./components/AppMessage";
+import { AuthPromptDialog } from "./components/AuthPromptDialog";
 import { CredentialVaultGate } from "./components/CredentialVaultGate";
 import { RemoteTelemetryBar } from "./components/RemoteTelemetryBar";
 import { SessionSidebar } from "./components/SessionSidebar";
@@ -340,6 +341,7 @@ function App() {
           </button>
         )}
         <AppMessageOverlay />
+        <AuthPromptDialog />
         <div
           className="workspace-grid"
           ref={workspaceGridRef}

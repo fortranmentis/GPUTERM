@@ -17,6 +17,7 @@ export function isPermanentReconnectError(error: string): boolean {
   return (
     text.includes("unknown_host_key:") ||
     text.includes("host_key_changed:") ||
+    text.includes("interactive_auth_required:") ||
     text.includes("authentication") ||
     text.includes("no longer exists") ||
     text.includes("vault is locked")
@@ -109,7 +110,9 @@ export function useAutoReconnect() {
           finish();
           useSessionStore.getState().setMessage({
             kind: "info",
-            text: `${profile.name}: automatic reconnect stopped. Connect again from the session list.`,
+            text: text.toLowerCase().includes("interactive_auth_required:")
+              ? `${profile.name} needs a password or one-time code to sign in. Connect again from the session list.`
+              : `${profile.name}: automatic reconnect stopped. Connect again from the session list.`,
           });
           return;
         }
