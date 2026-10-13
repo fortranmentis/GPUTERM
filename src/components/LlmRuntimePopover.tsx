@@ -142,6 +142,10 @@ export function LlmRuntimeDetailContent({
   );
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  // Pinned when the edit form opens: `selected` falls back to the first row,
+  // so if another window deletes the instance being edited the form must
+  // close rather than silently switch to editing a different one.
+  const [editingId, setEditingId] = useState<string | null>(null);
 
   const rows = useMemo(() => {
     const byId = new Map(
@@ -157,6 +161,15 @@ export function LlmRuntimeDetailContent({
 
   const selected =
     rows.find((row) => row.instance.id === selectedId) ?? rows[0] ?? null;
+  const editingRow =
+    formState === "edit"
+      ? (rows.find((row) => row.instance.id === editingId) ?? null)
+      : null;
+  if (formState === "edit" && !editingRow) {
+    // Adjusting state during render (not in an effect) avoids one frame with
+    // a form bound to nothing.
+    setFormState("closed");
+  }
 
   const runAction = async (action: () => Promise<LlmInstance[]>) => {
     setBusy(true);
@@ -240,7 +253,10 @@ export function LlmRuntimeDetailContent({
           instance={selected.instance}
           telemetry={selected.telemetry}
           busy={busy}
-          onEdit={() => setFormState("edit")}
+          onEdit={() => {
+            setEditingId(selected.instance.id);
+            setFormState("edit");
+          }}
           onToggleEnabled={() =>
             void runAction(() =>
               invoke<LlmInstance[]>("set_llm_instance_enabled", {
@@ -259,12 +275,10 @@ export function LlmRuntimeDetailContent({
         />
       )}
 
-      {formState !== "closed" && (
+      {(formState === "new" || editingRow) && (
         <LlmInstanceForm
-          editing={formState === "edit" ? (selected?.instance ?? null) : null}
-          hasApiKey={
-            formState === "edit" ? (selected?.telemetry?.hasApiKey ?? false) : false
-          }
+          editing={editingRow?.instance ?? null}
+          hasApiKey={editingRow?.telemetry?.hasApiKey ?? false}
           onSaved={(saved) => {
             onInstancesChange(saved);
             setFormState("closed");

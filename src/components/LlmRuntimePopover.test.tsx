@@ -600,3 +600,28 @@ describe("LlmRuntimePopover", () => {
   });
 });
 
+describe("LLM instance edited elsewhere", () => {
+  it("closes the edit form when another window deletes that instance", async () => {
+    const first = ollamaInstance();
+    const second = vllmInstance();
+    const { rerender } = render(
+      <LlmRuntimeDetailContent
+        telemetry={null}
+        instances={[first, second]}
+        onInstancesChange={() => undefined}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(await screen.findByText("Edit instance")).toBeInTheDocument();
+
+    rerender(
+      <LlmRuntimeDetailContent
+        telemetry={null}
+        instances={[second]}
+        onInstancesChange={() => undefined}
+      />,
+    );
+
+    expect(screen.queryByText("Edit instance")).not.toBeInTheDocument();
+  });
+});

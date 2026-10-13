@@ -15,6 +15,7 @@ import { useSessionStore } from "./stores/sessionStore";
 import { useSettingsStore } from "./stores/settingsStore";
 import { progressToMessage } from "./stores/transferStore";
 import { useAutoReconnect } from "./hooks/useAutoReconnect";
+import { useLlmInstancesSync } from "./hooks/useLlmInstancesSync";
 import type { RemoteTelemetry, TelemetrySettings } from "./types/gpu";
 import type { LlmInstance, LlmTelemetry } from "./types/llm";
 import type {
@@ -51,6 +52,7 @@ function App() {
   const setSessionTelemetry = useSessionStore((state) => state.setSessionTelemetry);
   const setTelemetrySettings = useSessionStore((state) => state.setTelemetrySettings);
   const setLlmInstances = useLlmStore((state) => state.setInstances);
+  useLlmInstancesSync(setLlmInstances);
   const setLlmTelemetry = useLlmStore((state) => state.setTelemetry);
   const [sftpWidth, setSftpWidth] = useState(initialSftpWidth);
   const [sidebarOpen, setSidebarOpen] = useState(

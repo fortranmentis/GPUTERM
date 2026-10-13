@@ -10,6 +10,7 @@ import { DiskDetailContent } from "./DiskUsagePopover";
 import { GpuDetailContent } from "./GpuUsagePopover";
 import { MemoryDetailContent } from "./MemoryUsagePopover";
 import { UsersDetailContent } from "./UsersPopover";
+import { useLlmInstancesSync } from "../hooks/useLlmInstancesSync";
 import type { RemoteTelemetry, TelemetrySettings } from "../types/gpu";
 import type { LlmInstance, LlmTelemetry } from "../types/llm";
 import type { ResourceDetails } from "../types/resourceDetails";
@@ -81,6 +82,8 @@ export function DetailWindow() {
   const [telemetry, setTelemetry] = useState<RemoteTelemetry | null>(null);
   const [selectedGpuUuid, setSelectedGpuUuid] = useState<string | null>(null);
   const [llmInstances, setLlmInstances] = useState<LlmInstance[]>([]);
+  // Instances added, edited or removed in the main window show up here too.
+  useLlmInstancesSync(setLlmInstances, resource === "llm");
   const [llmTelemetry, setLlmTelemetry] = useState<LlmTelemetry | null>(null);
 
   useEffect(() => {

@@ -24,7 +24,7 @@ pub mod vllm;
 
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::ssh::credentials::CredentialStore;
 use crate::ssh::session::{list_profiles, AppState};
@@ -51,14 +51,24 @@ pub fn load_into_state(state: &AppState) {
     }
 }
 
-/// Writes the list to disk and swaps it into shared state, so the poller picks
-/// the change up on its next tick.
-fn persist(state: &AppState, instances: Vec<LlmInstance>) -> Result<Vec<LlmInstance>, String> {
+/// Sent with the saved list whenever it changes, so every window (the main one
+/// and any detached LLM window) shows the same instances. `LlmInstance` carries
+/// no API key, so the payload is safe to broadcast.
+pub const INSTANCES_CHANGED_EVENT: &str = "llm-instances-changed";
+
+/// Writes the list to disk, swaps it into shared state so the poller picks the
+/// change up on its next tick, and tells every window about it.
+fn persist(
+    app: &AppHandle,
+    state: &AppState,
+    instances: Vec<LlmInstance>,
+) -> Result<Vec<LlmInstance>, String> {
     write_instances(&instances)?;
     if let Ok(mut slot) = state.llm_instances.lock() {
         *slot = instances.clone();
     }
     state.llm_monitor.request_refresh();
+    let _ = app.emit(INSTANCES_CHANGED_EVENT, &instances);
     Ok(instances)
 }
 
@@ -83,6 +93,7 @@ pub async fn list_llm_instances(state: State<'_, AppState>) -> Result<Vec<LlmIns
 /// existing one untouched, so an edit does not have to re-send the secret.
 #[tauri::command]
 pub async fn save_llm_instance(
+    app: AppHandle,
     state: State<'_, AppState>,
     instance: LlmInstance,
     api_key: Option<String>,
@@ -111,7 +122,7 @@ pub async fn save_llm_instance(
     .await
     .map_err(|error| format!("Saving the LLM instance failed: {}", error))??;
 
-    let saved = persist(&state, instances)?;
+    let saved = persist(&app, &state, instances)?;
     // The instance itself is saved either way; a locked vault only means the key
     // could not be stored, and the user needs to be told which happened.
     if let Some(error) = key_error {
@@ -122,6 +133,7 @@ pub async fn save_llm_instance(
 
 #[tauri::command]
 pub async fn delete_llm_instance(
+    app: AppHandle,
     state: State<'_, AppState>,
     id: String,
 ) -> Result<Vec<LlmInstance>, String> {
@@ -134,11 +146,12 @@ pub async fn delete_llm_instance(
     if let Err(error) = credentials.clear_password(&vault_key(&id)) {
         eprintln!("GpuTerm: could not clear the stored API key for a deleted LLM instance: {error}");
     }
-    persist(&state, instances)
+    persist(&app, &state, instances)
 }
 
 #[tauri::command]
 pub async fn set_llm_instance_enabled(
+    app: AppHandle,
     state: State<'_, AppState>,
     id: String,
     enabled: bool,
@@ -149,7 +162,7 @@ pub async fn set_llm_instance_enabled(
     };
     instance.enabled = enabled;
     instance.updated_at = now_epoch_seconds();
-    persist(&state, instances)
+    persist(&app, &state, instances)
 }
 
 /// Rejects a tunnel profile that cannot serve as one, with the specific reason.
