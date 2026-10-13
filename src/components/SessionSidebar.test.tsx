@@ -409,4 +409,119 @@ describe("SessionSidebar profile form", () => {
     render(<SessionSidebar />);
     expect(screen.getByText(/via bastion/i)).toBeInTheDocument();
   });
+
+  it("saves a typed password along with a new profile", async () => {
+    render(<SessionSidebar />);
+    fireEvent.click(screen.getByRole("button", { name: /^new$/i }));
+    fireEvent.change(screen.getByPlaceholderText("10.0.0.21"), {
+      target: { value: "10.0.0.99" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("ubuntu"), {
+      target: { value: "sang" },
+    });
+    fireEvent.change(screen.getByLabelText(/^password \/ passphrase$/i), {
+      target: { value: "pw" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith(
+        "save_session",
+        expect.objectContaining({ password: "pw", proxyJumpPassword: null }),
+      ),
+    );
+  });
+});
+
+describe("SessionSidebar editing a saved profile", () => {
+  beforeEach(() => {
+    mockInvoke.mockReset();
+    mockInvoke.mockImplementation((command, args) => {
+      if (command === "save_session") {
+        return Promise.resolve([(args as { profile: SessionProfile }).profile]);
+      }
+      if (command === "has_saved_credential") {
+        return Promise.resolve(true);
+      }
+      return Promise.resolve([]);
+    });
+    useSessionStore.setState({
+      sessions: [savedProfile, bastionProfile],
+      activeSessionId: null,
+      connectedSessionIds: [],
+      terminalIdsBySession: {},
+      message: null,
+    });
+  });
+
+  function openEditor() {
+    render(<SessionSidebar />);
+    fireEvent.click(screen.getByTitle(/(connect|show) lab-a100$/i));
+    fireEvent.click(screen.getByRole("button", { name: "Edit lab-a100" }));
+  }
+
+  it("fills the form from the profile and keeps a stored password when left blank", async () => {
+    openEditor();
+
+    expect(screen.getByText("Edit profile")).toBeInTheDocument();
+    expect(screen.getByLabelText("Host")).toHaveValue("10.0.0.21");
+    expect(screen.getByRole("checkbox", { name: /local host/i })).toBeDisabled();
+    await waitFor(() =>
+      expect(screen.getByLabelText(/^password \/ passphrase$/i)).toHaveAttribute(
+        "placeholder",
+        expect.stringContaining("leave blank to keep"),
+      ),
+    );
+
+    fireEvent.change(screen.getByLabelText("Host"), {
+      target: { value: "10.0.0.22" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /save/i }));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("save_session", {
+        profile: expect.objectContaining({ id: "profile-1", host: "10.0.0.22" }),
+        password: null,
+        proxyJumpPassword: null,
+      }),
+    );
+    expect(useSessionStore.getState().message).toEqual({
+      kind: "success",
+      text: "Session updated",
+    });
+    expect(screen.queryByText("Edit profile")).not.toBeInTheDocument();
+  });
+
+  it("explains that a connected profile changes only on the next connect", () => {
+    useSessionStore.setState({ connectedSessionIds: ["profile-1"] });
+    openEditor();
+
+    expect(screen.getByText(/changes apply on the next connect/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^connect$/i })).toBeDisabled();
+  });
+
+  it("does not offer a jump host whose chain leads back to the profile", () => {
+    useSessionStore.setState({
+      sessions: [savedProfile, { ...bastionProfile, proxyJumpId: "profile-1" }],
+    });
+    openEditor();
+
+    const jumpSelect = screen.getByRole("combobox", { name: /jump host/i });
+    expect(within(jumpSelect).queryByRole("option", { name: /bastion/i })).toBeNull();
+    expect(within(jumpSelect).queryByRole("option", { name: /lab-a100/i })).toBeNull();
+  });
+
+  it("returns to the profile on Cancel", () => {
+    openEditor();
+    fireEvent.change(screen.getByLabelText("Host"), {
+      target: { value: "typo" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+
+    expect(screen.queryByText("Edit profile")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("lab-a100", { selector: ".selected-session-actions > span" }),
+    ).toBeInTheDocument();
+    expect(mockInvoke).not.toHaveBeenCalledWith("save_session", expect.anything());
+  });
 });

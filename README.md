@@ -47,7 +47,7 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 - Full PTY terminal powered by [xterm.js](https://xtermjs.org) and Rust [`ssh2`](https://crates.io/crates/ssh2)
 - **Multiple concurrent sessions** — each keeps its own terminal, scrollback, and SFTP path; click a connected profile in the sidebar to switch
 - **Up to four flexible terminal cells** — place a new shell or another saved session to the left, right, top, or bottom of the focused pane; choose its initial ratio and drag dividers to resize nested layouts
-- **Collapsible host selector** — hide the sidebar for more workspace and reopen it from the top-left button; full profile fields appear only for **New**, while saved profiles show a connect-time credential prompt
+- **Collapsible host selector** — hide the sidebar for more workspace and reopen it from the top-left button; full profile fields appear for **New** and for editing a saved profile (pencil button), while saved profiles otherwise show a connect-time credential prompt
 - **ProxyJump** — tunnel through a saved profile as a bastion (per-key-type host verification along the way)
 - **OpenSSH config import** — preview `~/.ssh/config`, resolve `Host`, `Hostname`, `User`, `Port`, `IdentityFile`, `ProxyJump`, and forwarding rules, then select the profiles to import without overwriting collisions silently
 - **Built-in port forwarding** — save or start local (`-L`), remote (`-R`), and SOCKS5 dynamic (`-D`) rules, with live state and byte counts in the profile panel
@@ -215,7 +215,7 @@ npm run tauri:build
 ## Usage
 
 1. **Unlock the local vault** — choose a GpuTerm master password on first launch; on later launches enter it once to unlock saved credentials for that app run.
-2. **Create a profile** — enter host, port, username, and a password or private key path in the sidebar. Press **New** to start a fresh profile, **Save** to keep it. To route through a bastion, pick any saved profile as the **Jump host**.
+2. **Create a profile** — enter host, port, username, and a password or private key path in the sidebar. Press **New** to start a fresh profile, **Save** to keep it (a typed password is stored in the vault), and the pencil beside a selected profile to edit it. To route through a bastion, pick any saved profile as the **Jump host**.
 3. **Connect** — on first contact GpuTerm shows the server's SHA-256 host key fingerprint and asks for confirmation before trusting it. Connect as many servers as you like; connected profiles show a green dot, and clicking one switches the whole view to that session.
 4. **Split terminals** — use the columns button to open another shell for the focused session, or the **+** button to add a different saved session. Choose left/right/top/bottom placement and the new pane's initial size before adding it.
 5. **Work** — type in the terminal, drag or paste files into the remote SFTP panel, and watch live metrics in the bottom bar. Click CPU / RAM / Disk / GPU / Users for detail popovers you can drag around, resize, or pop out into separate windows with the ↗ button.

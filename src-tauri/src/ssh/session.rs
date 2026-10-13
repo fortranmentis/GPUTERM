@@ -157,9 +157,53 @@ pub fn load_sessions() -> Result<Vec<SessionProfile>, String> {
     read_profiles()
 }
 
-#[tauri::command(async)]
-pub fn save_session(profile: SessionProfile) -> Result<Vec<SessionProfile>, String> {
-    upsert_profile(normalize_profile(profile))
+/// Saves a new or edited profile. A non-empty `password` (and
+/// `proxy_jump_password`, for the jump host) goes to the vault; `None` or an
+/// empty string leaves any stored password untouched, so an edit does not
+/// have to re-enter it.
+#[tauri::command]
+pub async fn save_session(
+    state: State<'_, AppState>,
+    profile: SessionProfile,
+    password: Option<String>,
+    proxy_jump_password: Option<String>,
+) -> Result<Vec<SessionProfile>, String> {
+    let credentials = state.credentials.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        save_profile_and_credentials(
+            normalize_profile(profile),
+            password,
+            proxy_jump_password,
+            &credentials,
+            upsert_profile,
+        )
+    })
+    .await
+    .map_err(|error| format!("Saving the session failed: {}", error))?
+}
+
+/// Stores the passwords first, so a locked vault fails the save before the
+/// profile is written rather than leaving a profile whose typed password was
+/// silently dropped.
+fn save_profile_and_credentials(
+    profile: SessionProfile,
+    password: Option<String>,
+    proxy_jump_password: Option<String>,
+    credentials: &impl CredentialStore,
+    upsert: impl FnOnce(SessionProfile) -> Result<Vec<SessionProfile>, String>,
+) -> Result<Vec<SessionProfile>, String> {
+    let non_empty = |value: Option<String>| value.filter(|value| !value.is_empty());
+    if !profile.is_local {
+        if let Some(password) = non_empty(password) {
+            credentials.set_password(&profile.id, password)?;
+        }
+        if let (Some(jump_id), Some(password)) =
+            (profile.proxy_jump_id.as_deref(), non_empty(proxy_jump_password))
+        {
+            credentials.set_password(jump_id, password)?;
+        }
+    }
+    upsert(profile)
 }
 
 /// Replaces a profile's saved port forward rules. Running forwards are not
@@ -534,19 +578,50 @@ fn build_proxy_target(
     })))
 }
 
-pub fn upsert_profile(mut profile: SessionProfile) -> Result<Vec<SessionProfile>, String> {
+pub fn upsert_profile(profile: SessionProfile) -> Result<Vec<SessionProfile>, String> {
     let _write_guard = lock_profiles()?;
     let mut profiles = read_profiles()?;
+    let id = profile.id.clone();
+    merge_profile(&mut profiles, profile);
+    // Editing a profile can close a loop the UI's candidate filter missed
+    // (say, another window changed a jump host meanwhile); refuse it here.
+    ensure_no_jump_loop(&id, &profiles)?;
+    profiles.sort_by_key(|profile| profile.name.to_lowercase());
+    write_profiles(&profiles)?;
+    Ok(profiles)
+}
+
+/// Replaces the profile with the same id, or adds it. Forward rules are kept:
+/// they are edited only through `save_profile_forwards`.
+fn merge_profile(profiles: &mut Vec<SessionProfile>, mut profile: SessionProfile) {
     if let Some(existing) = profiles.iter_mut().find(|item| item.id == profile.id) {
-        // Forward rules are edited only through `save_profile_forwards`.
         profile.forwards = std::mem::take(&mut existing.forwards);
         *existing = profile;
     } else {
         profiles.push(profile);
     }
-    profiles.sort_by_key(|profile| profile.name.to_lowercase());
-    write_profiles(&profiles)?;
-    Ok(profiles)
+}
+
+/// Fails if following jump hosts from `id` comes back to `id`.
+fn ensure_no_jump_loop(id: &str, profiles: &[SessionProfile]) -> Result<(), String> {
+    let mut current = profiles
+        .iter()
+        .find(|profile| profile.id == id)
+        .and_then(|profile| profile.proxy_jump_id.clone());
+    let mut steps = 0;
+    while let Some(next) = current {
+        if next == id || steps > profiles.len() {
+            return Err(
+                "That jump host leads back to this profile, which would make a loop.".to_string(),
+            );
+        }
+        steps += 1;
+        current = profiles
+            .iter()
+            .find(|profile| profile.id == next)
+            .and_then(|profile| profile.proxy_jump_id.clone());
+    }
+    Ok(())
 }
 
 /// Saves several profiles in one locked write (used by the ssh_config import).
@@ -555,13 +630,8 @@ pub(crate) fn upsert_profiles(
 ) -> Result<Vec<SessionProfile>, String> {
     let _write_guard = lock_profiles()?;
     let mut profiles = read_profiles()?;
-    for mut profile in incoming.into_iter().map(normalize_profile) {
-        if let Some(existing) = profiles.iter_mut().find(|item| item.id == profile.id) {
-            profile.forwards = std::mem::take(&mut existing.forwards);
-            *existing = profile;
-        } else {
-            profiles.push(profile);
-        }
+    for profile in incoming.into_iter().map(normalize_profile) {
+        merge_profile(&mut profiles, profile);
     }
     profiles.sort_by_key(|profile| profile.name.to_lowercase());
     write_profiles(&profiles)?;
@@ -1792,6 +1862,104 @@ mod tests {
             proxy_jump_id: proxy.map(str::to_string),
             forwards: Vec::new(),
         }
+    }
+
+    struct LockedVault;
+    impl CredentialStore for LockedVault {
+        fn set_password(&self, _: &str, _: String) -> Result<(), String> {
+            Err("vault locked".to_string())
+        }
+        fn get_password(&self, _: &str) -> Result<Option<String>, String> {
+            Ok(None)
+        }
+        fn clear_password(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn save_with(
+        credentials: &impl CredentialStore,
+        profile: SessionProfile,
+        password: Option<&str>,
+        jump_password: Option<&str>,
+    ) -> Result<Vec<SessionProfile>, String> {
+        save_profile_and_credentials(
+            profile,
+            password.map(str::to_string),
+            jump_password.map(str::to_string),
+            credentials,
+            |profile| Ok(vec![profile]),
+        )
+    }
+
+    #[test]
+    fn saving_a_profile_keeps_a_stored_password_unless_a_new_one_is_typed() {
+        let credentials = MemoryCredentialStore::default();
+        credentials.set_password("gpu", "old".to_string()).unwrap();
+
+        save_with(&credentials, profile("gpu", None), None, None).unwrap();
+        assert_eq!(credentials.get_password("gpu").unwrap().as_deref(), Some("old"));
+        save_with(&credentials, profile("gpu", None), Some(""), None).unwrap();
+        assert_eq!(credentials.get_password("gpu").unwrap().as_deref(), Some("old"));
+
+        save_with(&credentials, profile("gpu", Some("jump")), Some("new"), Some("hop")).unwrap();
+        assert_eq!(credentials.get_password("gpu").unwrap().as_deref(), Some("new"));
+        assert_eq!(credentials.get_password("jump").unwrap().as_deref(), Some("hop"));
+    }
+
+    #[test]
+    fn a_local_profile_never_stores_a_password() {
+        let credentials = MemoryCredentialStore::default();
+        let mut local = profile("laptop", None);
+        local.is_local = true;
+        save_with(&credentials, local, Some("ignored"), None).unwrap();
+        assert_eq!(credentials.get_password("laptop").unwrap(), None);
+    }
+
+    #[test]
+    fn a_locked_vault_fails_the_save_before_the_profile_is_written() {
+        let mut written = false;
+        let result = save_profile_and_credentials(
+            profile("gpu", None),
+            Some("pw".to_string()),
+            None,
+            &LockedVault,
+            |profile| {
+                written = true;
+                Ok(vec![profile])
+            },
+        );
+        assert_eq!(result.unwrap_err(), "vault locked");
+        assert!(!written);
+    }
+
+    #[test]
+    fn merging_an_edited_profile_keeps_its_forward_rules() {
+        let mut original = profile("gpu", None);
+        original.forwards = vec![crate::ssh::forwarding::ForwardSpec {
+            id: "jupyter".to_string(),
+            kind: crate::ssh::forwarding::ForwardKind::Local,
+            bind_host: "127.0.0.1".to_string(),
+            bind_port: 8888,
+            dest_host: Some("localhost".to_string()),
+            dest_port: Some(8888),
+            enabled: true,
+        }];
+        let mut profiles = vec![original];
+        let mut edited = profile("gpu", None);
+        edited.host = "new.example".to_string();
+        merge_profile(&mut profiles, edited);
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].host, "new.example");
+        assert_eq!(profiles[0].forwards.len(), 1);
+    }
+
+    #[test]
+    fn refuses_an_edit_that_makes_a_jump_host_loop() {
+        let mut profiles = vec![profile("a", None), profile("b", Some("a"))];
+        assert!(ensure_no_jump_loop("b", &profiles).is_ok());
+        merge_profile(&mut profiles, profile("a", Some("b")));
+        assert!(ensure_no_jump_loop("a", &profiles).unwrap_err().contains("loop"));
     }
 
     #[test]

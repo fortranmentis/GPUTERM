@@ -171,6 +171,8 @@ p {
 }
 
 .form-binding-hint {
+  /* In a scrolling flex column, overflow: hidden would let it shrink to 0. */
+  flex-shrink: 0;
   color: var(--text-soft, #8b98a9);
   font-size: 11px;
   letter-spacing: 0.02em;
@@ -3120,6 +3122,13 @@ button.agent-summary-section {
 
 .gpu-process-table .process-row {
   grid-template-columns: 46px 62px 100px 100px minmax(120px, 0.8fr) minmax(180px, 1.4fr);
+}
+
+.session-edit-note {
+  flex-shrink: 0;
+  color: #fde68a;
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .process-row.head {

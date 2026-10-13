@@ -4,6 +4,7 @@ import {
   FileInput,
   KeyRound,
   Laptop,
+  Pencil,
   PlugZap,
   Plus,
   Save,
@@ -37,6 +38,9 @@ type SessionForm = {
   proxyJumpPassword: string;
 };
 
+/** Closed, or showing the profile form for a new or an existing profile. */
+type FormMode = "closed" | "new" | "edit";
+
 const blankForm: SessionForm = {
   id: "",
   name: "",
@@ -61,7 +65,8 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
   const setMessage = useSessionStore((state) => state.setMessage);
   const disconnectSession = useDisconnectSession();
   const [form, setForm] = useState<SessionForm>(blankForm);
-  const [showNewForm, setShowNewForm] = useState(false);
+  const [formMode, setFormMode] = useState<FormMode>("closed");
+  const formOpen = formMode !== "closed";
   const [showImport, setShowImport] = useState(false);
   const selectedProfile = form.id
     ? sessions.find((session) => session.id === form.id) ?? null
@@ -77,9 +82,7 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
   );
   // A profile cannot tunnel through itself, nor through a profile whose own
   // jump chain leads back to it; either one is unresolvable at connect time.
-  // Not reachable today because the form only ever opens blank (see
-  // `startNewProfile`), so this holds the invariant for whenever editing an
-  // existing profile becomes possible.
+  // The backend refuses such a save too.
   const jumpHostCandidates = useMemo(() => {
     const byId = new Map(sessions.map((session) => [session.id, session]));
     const reachesForm = (startId: string) => {
@@ -242,7 +245,7 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
         info.profile.isLocal ? null : info.profile.id,
         info.profile.proxyJumpId,
       ]);
-      setShowNewForm(false);
+      setFormMode("closed");
       setMessage({
         kind: info.credentialWarning ? "info" : "success",
         text: info.credentialWarning
@@ -286,8 +289,12 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
     try {
       validate();
       const profile = toProfile();
+      const editing = formMode === "edit";
+      // Blank password fields keep whatever the vault already holds.
       const nextSessions = await invoke<SessionProfile[]>("save_session", {
         profile,
+        password: form.isLocal ? null : form.password || null,
+        proxyJumpPassword: form.isLocal ? null : form.proxyJumpPassword || null,
       });
       updateForm({
         id: profile.id,
@@ -298,10 +305,19 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
         isLocal: profile.isLocal ?? false,
         privateKeyPath: profile.privateKeyPath ?? "",
         proxyJumpId: profile.proxyJumpId ?? "",
+        password: "",
+        proxyJumpPassword: "",
       });
       setSessions(nextSessions);
-      setShowNewForm(false);
-      setMessage({ kind: "success", text: "Session saved" });
+      await refreshStoredCredentialIds([
+        profile.isLocal ? null : profile.id,
+        profile.proxyJumpId,
+      ]);
+      setFormMode("closed");
+      setMessage({
+        kind: "success",
+        text: editing ? "Session updated" : "Session saved",
+      });
     } catch (error) {
       setMessage({ kind: "error", text: String(error) });
     } finally {
@@ -345,7 +361,7 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
       });
       setSessions(nextSessions);
       setForm(blankForm);
-      setShowNewForm(false);
+      setFormMode("closed");
       setMessage({ kind: "success", text: "Session deleted" });
     } catch (error) {
       setMessage({ kind: "error", text: String(error) });
@@ -367,19 +383,8 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
   };
 
   const selectSession = (session: SessionProfile) => {
-    setShowNewForm(false);
-    setForm({
-      id: session.id,
-      name: session.name,
-      host: session.host,
-      port: String(session.port),
-      username: session.username,
-      isLocal: session.isLocal ?? false,
-      password: "",
-      privateKeyPath: session.privateKeyPath ?? "",
-      proxyJumpId: session.proxyJumpId ?? "",
-      proxyJumpPassword: "",
-    });
+    setFormMode("closed");
+    setForm(formFromProfile(session));
     // Clicking a live session switches the terminal/SFTP/telemetry view to it.
     if (connectedSessionIds.includes(session.id)) {
       showSession(session.id);
@@ -388,8 +393,24 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
 
   const startNewProfile = () => {
     setForm(blankForm);
-    setShowNewForm(true);
+    setFormMode("new");
   };
+
+  const startEditProfile = (session: SessionProfile) => {
+    setShowImport(false);
+    setForm(formFromProfile(session));
+    setFormMode("edit");
+  };
+
+  const cancelForm = () => {
+    // Cancelling an edit returns to the profile it started from.
+    const edited =
+      formMode === "edit" ? sessions.find((session) => session.id === form.id) : null;
+    setFormMode("closed");
+    setForm(edited ? formFromProfile(edited) : blankForm);
+  };
+
+  const editingConnected = formMode === "edit" && connectedSessionIds.includes(form.id);
 
   const connectSavedSession = async (session: SessionProfile) => {
     selectSession(session);
@@ -486,7 +507,7 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
             type="button"
             title="Import hosts from ~/.ssh/config"
             onClick={() => {
-              setShowNewForm(false);
+              setFormMode("closed");
               setShowImport(true);
             }}
           >
@@ -522,9 +543,11 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
         />
       )}
 
-      {showNewForm && (
+      {formOpen && (
         <form className="session-form new-session-form" onSubmit={connect}>
-          <small className="form-binding-hint">New profile</small>
+          <small className="form-binding-hint">
+            {formMode === "edit" ? "Edit profile" : "New profile"}
+          </small>
           <label>
             <span>Name</span>
             <input
@@ -540,6 +563,9 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
                 <input
                   type="checkbox"
                   checked={form.isLocal}
+                  // Switching an existing profile between SSH and local would
+                  // orphan its forward rules and saved password.
+                  disabled={formMode === "edit"}
                   onChange={(event) =>
                     updateForm({
                       isLocal: event.target.checked,
@@ -597,7 +623,11 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
                 type="password"
                 autoComplete="current-password"
                 placeholder={
-                  targetCredentialStored ? "•••••••• (saved securely)" : undefined
+                  targetCredentialStored
+                    ? formMode === "edit"
+                      ? "Saved; leave blank to keep"
+                      : "•••••••• (saved securely)"
+                    : undefined
                 }
                 onChange={(event) => updateForm({ password: event.target.value })}
               />
@@ -657,8 +687,18 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
               never written to the saved session file.
             </small>
           )}
+          {editingConnected && (
+            <small className="session-edit-note">
+              Connected — changes apply on the next connect; the open terminal
+              keeps its current settings.
+            </small>
+          )}
           <div className="button-row">
-            <button className="primary-button" disabled={busy} type="submit">
+            <button
+              className="primary-button"
+              disabled={busy || editingConnected}
+              type="submit"
+            >
               <PlugZap size={16} />
               Connect
             </button>
@@ -688,10 +728,7 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
               className="secondary-button"
               disabled={busy}
               type="button"
-              onClick={() => {
-                setShowNewForm(false);
-                setForm(blankForm);
-              }}
+              onClick={cancelForm}
             >
               Cancel
             </button>
@@ -699,7 +736,7 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
         </form>
       )}
 
-      {!showNewForm && !showImport && (
+      {!formOpen && !showImport && (
         <div className="session-list">
           {sessions.map((session) => (
             <button
@@ -746,7 +783,7 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
         </div>
       )}
 
-      {!showNewForm && !showImport && form.id && (
+      {!formOpen && !showImport && form.id && (
         <form className="selected-session-actions" onSubmit={connect}>
           <span title={form.name}>{form.name}</span>
           {!form.isLocal && !connectedSessionIds.includes(form.id) && (
@@ -811,6 +848,18 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
                 Test
               </button>
             )}
+            {selectedProfile && (
+              <button
+                className="secondary-button"
+                disabled={busy}
+                type="button"
+                aria-label={`Edit ${form.name}`}
+                title="Edit profile"
+                onClick={() => startEditProfile(selectedProfile)}
+              >
+                <Pencil size={16} />
+              </button>
+            )}
             <button
               className="secondary-button danger"
               disabled={busy}
@@ -824,7 +873,7 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
         </form>
       )}
 
-      {!showNewForm && !showImport && selectedProfile && !selectedProfile.isLocal && (
+      {!formOpen && !showImport && selectedProfile && !selectedProfile.isLocal && (
         <PortForwards
           profile={selectedProfile}
           connected={connectedSessionIds.includes(selectedProfile.id)}
@@ -842,4 +891,19 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
       </button>
     </aside>
   );
+}
+
+function formFromProfile(session: SessionProfile): SessionForm {
+  return {
+    id: session.id,
+    name: session.name,
+    host: session.host,
+    port: String(session.port),
+    username: session.username,
+    isLocal: session.isLocal ?? false,
+    password: "",
+    privateKeyPath: session.privateKeyPath ?? "",
+    proxyJumpId: session.proxyJumpId ?? "",
+    proxyJumpPassword: "",
+  };
 }
