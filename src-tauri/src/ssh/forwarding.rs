@@ -20,8 +20,8 @@ use uuid::Uuid;
 
 use super::session::{
     is_would_block, list_profiles, open_direct_channel, open_forwarding_session,
-    pump_channel_socket, session_alive, target_for_active_session, AppState, CountGuard,
-    SshConnection, SshTarget,
+    pump_channel_socket, session_alive, target_for_active_session, try_reserve_slot, AppState,
+    CountGuard, IdleBackoff, SshConnection, SshTarget,
 };
 
 /// Simultaneous connections per forward. A browser opens several per page; a
@@ -493,22 +493,25 @@ impl RuleContext {
         }
     }
 
-    /// Pumps one connection on its own thread, counting it and its bytes.
-    fn pump(&self, channel: ssh2::Channel, socket: TcpStream) {
-        self.active.fetch_add(1, Ordering::SeqCst);
-        let guard = CountGuard(Arc::clone(&self.active));
+    /// Pumps one connection on its own thread, counting its bytes. `slot`
+    /// is the connection's place under the limit, held until the pump ends.
+    fn pump(&self, slot: CountGuard, channel: ssh2::Channel, socket: TcpStream) {
         let stop = Arc::clone(&self.stop);
         let bytes = Arc::clone(&self.bytes);
         thread::spawn(move || {
-            let _guard = guard;
+            let _slot = slot;
             pump_channel_socket(socket, channel, &stop, Some(&bytes));
         });
     }
 
-    fn at_capacity(&self) -> bool {
-        self.active.load(Ordering::SeqCst) >= MAX_CONNECTIONS_PER_FORWARD
+    /// A place under the per-forward connection limit, or None when full.
+    fn try_reserve(&self) -> Option<CountGuard> {
+        try_reserve_slot(&self.active, MAX_CONNECTIONS_PER_FORWARD)
     }
 }
+
+/// How often an idle forward checks that its SSH transport is still there.
+const IDLE_LIVENESS_INTERVAL: Duration = Duration::from_secs(5);
 
 /// A local (`-L`) or dynamic (`-D`) forward: listen on this computer.
 fn run_listener(context: &RuleContext) -> Result<(), String> {
@@ -532,19 +535,30 @@ fn run_listener(context: &RuleContext) -> Result<(), String> {
         .map_err(|error| format!("Could not configure the listener: {}", error))?;
     context.set("listening", None, Some(spec.bind_port));
 
+    let mut idle = IdleBackoff::for_accept_loop();
+    let mut last_liveness_check = Instant::now();
     while !context.stopped() {
         let socket = match listener.accept() {
             Ok((socket, _)) => socket,
             Err(ref error) if error.kind() == ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(5));
+                idle.sleep();
+                // A dead hop would otherwise go unnoticed until a client
+                // connects, leaving the rule looking "listening".
+                if last_liveness_check.elapsed() >= IDLE_LIVENESS_INTERVAL {
+                    last_liveness_check = Instant::now();
+                    if !session_alive(&context.connection.session) {
+                        return Err("The SSH connection was lost".to_string());
+                    }
+                }
                 continue;
             }
             Err(error) => return Err(format!("The listener stopped: {}", error)),
         };
-        if context.at_capacity() {
+        idle.reset();
+        let Some(slot) = context.try_reserve() else {
             drop(socket);
             continue;
-        }
+        };
         if spec.kind == ForwardKind::Dynamic {
             // The handshake can wait on the client, so it runs off the accept loop.
             let connection = Arc::clone(&context.connection);
@@ -556,19 +570,21 @@ fn run_listener(context: &RuleContext) -> Result<(), String> {
                 active: Arc::clone(&context.active),
                 bytes: Arc::clone(&context.bytes),
             };
-            thread::spawn(move || serve_socks(&worker, socket));
+            // The slot moves with the handshake, so handshakes in progress
+            // count against the limit too.
+            thread::spawn(move || serve_socks(&worker, slot, socket));
             continue;
         }
 
         let host = spec.dest_host.as_deref().unwrap_or("127.0.0.1");
         let port = spec.dest_port.unwrap_or(0);
         match open_direct_channel(
-            &context.connection.session,
+            &context.connection,
             host,
             port,
             Instant::now() + CHANNEL_OPEN_TIMEOUT,
         ) {
-            Ok(channel) => context.pump(channel, socket),
+            Ok(channel) => context.pump(slot, channel, socket),
             Err(error) => {
                 drop(socket);
                 if !session_alive(&context.connection.session) {
@@ -582,7 +598,7 @@ fn run_listener(context: &RuleContext) -> Result<(), String> {
     Ok(())
 }
 
-fn serve_socks(context: &RuleContext, mut socket: TcpStream) {
+fn serve_socks(context: &RuleContext, slot: CountGuard, mut socket: TcpStream) {
     if socket.set_nonblocking(false).is_err()
         || socket
             .set_read_timeout(Some(SOCKS_HANDSHAKE_TIMEOUT))
@@ -596,7 +612,7 @@ fn serve_socks(context: &RuleContext, mut socket: TcpStream) {
         Err(_) => return,
     };
     match open_direct_channel(
-        &context.connection.session,
+        &context.connection,
         &host,
         port,
         Instant::now() + CHANNEL_OPEN_TIMEOUT,
@@ -606,7 +622,7 @@ fn serve_socks(context: &RuleContext, mut socket: TcpStream) {
                 return;
             }
             let _ = socket.set_read_timeout(None);
-            context.pump(channel, socket);
+            context.pump(slot, channel, socket);
         }
         Err(_) => {
             let _ = socket.write_all(&socks5_reply(SOCKS_HOST_UNREACHABLE));
@@ -644,17 +660,16 @@ fn run_remote(context: &RuleContext) -> Result<(), String> {
         spec.dest_host.as_deref().unwrap_or("127.0.0.1"),
         spec.dest_port.unwrap_or(0)
     );
-    let mut idle_checks = 0_u32;
+    let mut idle = IdleBackoff::for_accept_loop();
+    let mut last_liveness_check = Instant::now();
     while !context.stopped() {
         let channel = match listener.accept() {
             Ok(channel) => channel,
             Err(error) if is_would_block(&error) => {
-                thread::sleep(Duration::from_millis(5));
-                // About every 5s, make sure the transport is still there.
-                idle_checks += 1;
-                if idle_checks >= 1000 {
-                    idle_checks = 0;
-                    if !session_alive(session) {
+                idle.sleep();
+                if last_liveness_check.elapsed() >= IDLE_LIVENESS_INTERVAL {
+                    last_liveness_check = Instant::now();
+                    if !session_alive(&context.connection.session) {
                         return Err("The SSH connection was lost".to_string());
                     }
                 }
@@ -662,11 +677,12 @@ fn run_remote(context: &RuleContext) -> Result<(), String> {
             }
             Err(error) => return Err(format!("The server stopped forwarding: {}", error)),
         };
-        if context.at_capacity() {
+        idle.reset();
+        let Some(slot) = context.try_reserve() else {
             continue;
-        }
+        };
         match connect_local(&destination) {
-            Ok(socket) => context.pump(channel, socket),
+            Ok(socket) => context.pump(slot, channel, socket),
             Err(error) => context.set("listening", Some(error), None),
         }
     }

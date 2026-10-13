@@ -652,6 +652,11 @@ pub struct SshConnection {
     // changes libssh2's API mode; it does not update the socket flags.
     _transport: TcpStream,
     _tunnel: Option<SshTunnel>,
+    /// Held while a channel is being opened. libssh2 keeps one in-progress
+    /// channel-open per session and resumes it on the next call whatever that
+    /// call asked for, so two threads opening channels at once on a
+    /// nonblocking session could each get the other's destination.
+    pub(crate) open_lock: Mutex<()>,
 }
 
 impl SshConnection {
@@ -758,6 +763,7 @@ pub fn open_ssh_session(target: &SshTarget) -> Result<SshConnection, String> {
         session,
         _transport: transport,
         _tunnel: tunnel,
+        open_lock: Mutex::new(()),
     })
 }
 
@@ -1019,11 +1025,17 @@ pub(crate) fn session_alive(session: &Session) -> bool {
 /// Treating that as a failure would leave a bound port that never serves
 /// anything — a silent dead tunnel rather than a visible error.
 pub(crate) fn open_direct_channel(
-    session: &Session,
+    connection: &SshConnection,
     host: &str,
     port: u16,
     deadline: Instant,
 ) -> Result<Channel, String> {
+    let session = &connection.session;
+    // For the whole retry loop: each EAGAIN retry continues the same open.
+    let _open = connection
+        .open_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut wait = Duration::from_millis(2);
     loop {
         match session.channel_direct_tcpip(host, port, None) {
@@ -1059,6 +1071,62 @@ impl Drop for FlagGuard {
 
 /// Decrements a counter on every exit path, including a panic.
 pub(crate) struct CountGuard(pub(crate) Arc<std::sync::atomic::AtomicUsize>);
+
+/// Takes one of `limit` slots, counted before any work starts so that work
+/// still in progress (a SOCKS handshake, a channel open) counts against the
+/// limit. The slot is released when the guard drops.
+pub(crate) fn try_reserve_slot(
+    counter: &Arc<std::sync::atomic::AtomicUsize>,
+    limit: usize,
+) -> Option<CountGuard> {
+    use std::sync::atomic::Ordering;
+    counter
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+            (count < limit).then_some(count + 1)
+        })
+        .ok()
+        .map(|_| CountGuard(Arc::clone(counter)))
+}
+
+/// Sleep for a polling loop that has nothing to do: short right after
+/// activity, so a burst of connections is served promptly, and doubling up to
+/// `max` while idle, so an unused forward does not wake hundreds of times a
+/// second.
+pub(crate) struct IdleBackoff {
+    current: Duration,
+    min: Duration,
+    max: Duration,
+}
+
+impl IdleBackoff {
+    pub(crate) fn new(min: Duration, max: Duration) -> Self {
+        Self {
+            current: min,
+            min,
+            max,
+        }
+    }
+
+    /// For forward accept loops: 2 ms after activity, at most 100 ms idle.
+    pub(crate) fn for_accept_loop() -> Self {
+        Self::new(Duration::from_millis(2), Duration::from_millis(100))
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.current = self.min;
+    }
+
+    /// The delay the next `sleep` would use.
+    #[cfg(test)]
+    pub(crate) fn next_delay(&self) -> Duration {
+        self.current
+    }
+
+    pub(crate) fn sleep(&mut self) {
+        thread::sleep(self.current);
+        self.current = (self.current * 2).min(self.max);
+    }
+}
 
 impl Drop for CountGuard {
     fn drop(&mut self) {
@@ -1179,28 +1247,30 @@ fn run_persistent_forward(
     let _alive = FlagGuard(alive);
     let live = Arc::new(AtomicUsize::new(0));
     let mut open_failures: u32 = 0;
+    let mut idle = IdleBackoff::for_accept_loop();
 
     while !stop.load(Ordering::SeqCst) {
         let socket = match listener.accept() {
             Ok((socket, _)) => socket,
             Err(ref error) if error.kind() == ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(3));
+                idle.sleep();
                 continue;
             }
             // The listener itself failed; nothing can be served any more.
             Err(_) => break,
         };
+        idle.reset();
 
-        if live.load(Ordering::SeqCst) >= MAX_FORWARD_CONNECTIONS {
-            // Refuse rather than queue: the client retries, and an unbounded
-            // channel count would eventually hit sshd's MaxSessions.
+        // Refuse rather than queue: the client retries, and an unbounded
+        // channel count would eventually hit sshd's MaxSessions.
+        let Some(slot) = try_reserve_slot(&live, MAX_FORWARD_CONNECTIONS) else {
             drop(socket);
             continue;
-        }
+        };
 
         let deadline = Instant::now() + Duration::from_secs(10);
         let channel =
-            match open_direct_channel(&connection.session, &remote_host, remote_port, deadline) {
+            match open_direct_channel(&connection, &remote_host, remote_port, deadline) {
                 Ok(channel) => {
                     open_failures = 0;
                     channel
@@ -1228,11 +1298,9 @@ fn run_persistent_forward(
                 }
             };
 
-        live.fetch_add(1, Ordering::SeqCst);
         let pump_stop = Arc::clone(&stop);
-        let pump_live = Arc::clone(&live);
         thread::spawn(move || {
-            let _count = CountGuard(pump_live);
+            let _slot = slot;
             pump_channel_socket(socket, channel, &pump_stop, None);
         });
     }
@@ -1862,6 +1930,33 @@ mod tests {
             proxy_jump_id: proxy.map(str::to_string),
             forwards: Vec::new(),
         }
+    }
+
+    #[test]
+    fn idle_backoff_doubles_to_its_cap_and_resets_after_activity() {
+        let mut idle = IdleBackoff::new(Duration::from_millis(1), Duration::from_millis(4));
+        assert_eq!(idle.next_delay(), Duration::from_millis(1));
+        idle.sleep();
+        assert_eq!(idle.next_delay(), Duration::from_millis(2));
+        idle.sleep();
+        idle.sleep();
+        idle.sleep();
+        assert_eq!(idle.next_delay(), Duration::from_millis(4));
+        idle.reset();
+        assert_eq!(idle.next_delay(), Duration::from_millis(1));
+    }
+
+    #[test]
+    fn connection_slots_stop_at_the_limit_and_free_on_drop() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let counter = Arc::new(AtomicUsize::new(0));
+        let first = try_reserve_slot(&counter, 2).expect("first slot");
+        let _second = try_reserve_slot(&counter, 2).expect("second slot");
+        assert!(try_reserve_slot(&counter, 2).is_none());
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+        drop(first);
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert!(try_reserve_slot(&counter, 2).is_some());
     }
 
     struct LockedVault;
