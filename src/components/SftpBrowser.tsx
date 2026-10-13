@@ -122,6 +122,9 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
   const pointerDragRef = useRef<PointerDragState | null>(null);
   const dragOutCacheRef = useRef<Map<string, Promise<string[]>>>(new Map());
   const suppressPointerClickRef = useRef(false);
+  // The local folder last listed. `localPath` doubles as the path input's
+  // draft, so it cannot tell which folder the panel actually shows.
+  const loadedLocalDirRef = useRef<string | null>(null);
   const enqueueUploadsRef = useRef<
     ((files: LocalDragFile[], targetDirectory: string) => Promise<void>) | null
   >(null);
@@ -237,6 +240,7 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
     const response = await invoke<LocalListResponse>("list_local_dir", {
       path: nextPath,
     });
+    loadedLocalDirRef.current = response.path;
     setLocalPath(response.path);
     setLocalEntries(response.entries);
     setSelectedLocalPaths([]);
@@ -546,8 +550,17 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
     void mapWithConcurrencyLimit(approved, MAX_CONCURRENT_TRANSFERS, ({ task, request }) =>
       runTransfer("sftp_upload_file", task, request),
     ).then(() => {
-      if (useSessionStore.getState().activeSessionId === sessionId) {
-        loadDirectory(path).catch(() => undefined);
+      // Read what the session shows now, not what it showed at enqueue time:
+      // the user may have browsed elsewhere during a long upload. Reload only
+      // when the upload landed in that folder (or in a folder row inside it),
+      // since a reload also clears the selection.
+      const viewed = pathBySessionRef.current.get(sessionId);
+      if (
+        useSessionStore.getState().activeSessionId === sessionId &&
+        viewed &&
+        (viewed === targetDirectory || parentRemotePath(targetDirectory) === viewed)
+      ) {
+        loadDirectory(viewed).catch(() => undefined);
       }
     });
   };
@@ -568,9 +581,10 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
     }
 
     const sessionId = activeSessionId;
+    const targetDirectory = localPath.trim();
     const approved: Array<{ task: TransferTask; request: SftpTransferRequest }> = [];
     for (const file of downloadable) {
-      const targetLocalPath = joinLocalPath(localPath.trim(), file.name);
+      const targetLocalPath = joinLocalPath(targetDirectory, file.name);
       const task = createTransferTask(
         "download",
         file.name,
@@ -619,7 +633,14 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
     }
     void mapWithConcurrencyLimit(approved, MAX_CONCURRENT_TRANSFERS, ({ task, request }) =>
       runTransfer("sftp_download_file", task, request),
-    ).then(() => loadLocalDirectory(localPath.trim()).catch(() => undefined));
+    ).then(() => {
+      // As with uploads, refresh only if the local panel still shows the
+      // folder the downloads went to.
+      const viewed = loadedLocalDirRef.current;
+      if (viewed && viewed === targetDirectory) {
+        loadLocalDirectory(viewed).catch(() => undefined);
+      }
+    });
   };
 
   enqueueUploadsRef.current = enqueueUploads;
@@ -949,6 +970,13 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
       });
       return true;
     } catch (error) {
+      // A cancel also rejects the command. The `canceled` progress event is
+      // emitted before the command returns, so let any queued event land
+      // before deciding whether this was a failure.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      if (transferWasCanceled(task.id)) {
+        return false;
+      }
       updateTask(task.id, {
         status: "failed",
         error: String(error),
@@ -1595,6 +1623,13 @@ function baseName(path: string) {
 }
 
 /** Remote parent folder, POSIX-style. */
+function transferWasCanceled(taskId: string) {
+  return (
+    useTransferStore.getState().tasks.find((task) => task.id === taskId)?.status ===
+    "canceled"
+  );
+}
+
 function parentRemotePath(remotePath: string) {
   const trimmed = remotePath.replace(/\/+$/, "");
   const index = trimmed.lastIndexOf("/");

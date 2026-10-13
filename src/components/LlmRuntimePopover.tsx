@@ -15,6 +15,7 @@ import type {
   LlmTelemetry,
   LlmRuntimeType,
 } from "../types/llm";
+import { useSessionStore } from "../stores/sessionStore";
 import { formatBytes } from "../utils/formatBytes";
 import { isServingEngine, runtimeLabel } from "../utils/llmRuntimes";
 import { formatNumber, formatPercent } from "../utils/format";
@@ -930,6 +931,15 @@ export function LlmRuntimePopover({
   onClose: () => void;
   onPopOut?: () => void;
 }) {
+  const setMessage = useSessionStore((state) => state.setMessage);
+  const refreshNow = () => {
+    invoke("refresh_llm_telemetry").catch((error) =>
+      setMessage({
+        kind: "error",
+        text: `Could not refresh LLM runtimes: ${String(error)}`,
+      }),
+    );
+  };
   return (
     <ResourceDetailPopover
       anchorRef={anchorRef}
@@ -943,7 +953,7 @@ export function LlmRuntimePopover({
           className="icon-button ghost"
           title="Poll every enabled instance now"
           aria-label="Refresh LLM runtimes"
-          onClick={() => void invoke("refresh_llm_telemetry")}
+          onClick={refreshNow}
         >
           <RefreshCw size={14} />
         </button>

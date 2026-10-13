@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   AlertTriangle,
@@ -94,17 +94,32 @@ export function PortForwards({ profile, connected }: PortForwardsProps) {
   const [error, setError] = useState<string | null>(null);
   const saved = profile.forwards ?? [];
 
+  // Bumped by every status request and by a profile switch. A reply applies
+  // only if no newer request was made since, so a slow poll for the previous
+  // profile (or one overtaken by a start/stop) cannot overwrite fresher state.
+  const generationRef = useRef(0);
+
+  const requestStatuses = useCallback(
+    async (command: string, args: Record<string, unknown>) => {
+      const generation = ++generationRef.current;
+      const next = await invoke<ForwardStatus[]>(command, args);
+      if (generation === generationRef.current) {
+        setStatuses(next);
+      }
+    },
+    [],
+  );
+
   const refresh = useCallback(async () => {
     try {
-      setStatuses(
-        await invoke<ForwardStatus[]>("list_forwards", { profileId: profile.id }),
-      );
+      await requestStatuses("list_forwards", { profileId: profile.id });
     } catch {
       // Status is best effort; the next poll retries.
     }
-  }, [profile.id]);
+  }, [profile.id, requestStatuses]);
 
   useEffect(() => {
+    generationRef.current += 1;
     setDraft(null);
     setError(null);
     setStatuses([]);
@@ -135,7 +150,8 @@ export function PortForwards({ profile, connected }: PortForwardsProps) {
     const profiles = await invoke<SessionProfile[]>("save_profile_forwards", {
       profileId: profile.id,
       forwards,
-    });
+
+      });
     setSessions(profiles);
   };
 
@@ -149,12 +165,10 @@ export function PortForwards({ profile, connected }: PortForwardsProps) {
         spec: draftToSpec(draft),
       });
       if (draft.temporary) {
-        setStatuses(
-          await invoke<ForwardStatus[]>("start_forward", {
-            profileId: profile.id,
-            spec,
-          }),
-        );
+        await requestStatuses("start_forward", {
+          profileId: profile.id,
+          spec,
+        });
       } else {
         const exists = saved.some((rule) => rule.id === spec.id);
         await saveRules(
@@ -163,12 +177,10 @@ export function PortForwards({ profile, connected }: PortForwardsProps) {
             : [...saved, spec],
         );
         if (connected && spec.enabled) {
-          setStatuses(
-            await invoke<ForwardStatus[]>("start_forward", {
-              profileId: profile.id,
-              spec,
-            }),
-          );
+          await requestStatuses("start_forward", {
+            profileId: profile.id,
+            spec,
+          });
         }
       }
       setDraft(null);
@@ -179,33 +191,27 @@ export function PortForwards({ profile, connected }: PortForwardsProps) {
     void run(async () => {
       await saveRules(saved.filter((item) => item.id !== rule.id));
       if (connected) {
-        setStatuses(
-          await invoke<ForwardStatus[]>("stop_forward", {
-            profileId: profile.id,
-            forwardId: rule.id,
-          }),
-        );
+        await requestStatuses("stop_forward", {
+          profileId: profile.id,
+          forwardId: rule.id,
+        });
       }
     });
 
   const startRule = (spec: ForwardSpec) =>
     void run(async () => {
-      setStatuses(
-        await invoke<ForwardStatus[]>("start_forward", {
-          profileId: profile.id,
-          spec,
-        }),
-      );
+      await requestStatuses("start_forward", {
+        profileId: profile.id,
+        spec,
+      });
     });
 
   const stopRule = (forwardId: string) =>
     void run(async () => {
-      setStatuses(
-        await invoke<ForwardStatus[]>("stop_forward", {
-          profileId: profile.id,
-          forwardId,
-        }),
-      );
+      await requestStatuses("stop_forward", {
+        profileId: profile.id,
+        forwardId,
+      });
     });
 
   const statusFor = (id: string) =>

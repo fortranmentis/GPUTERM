@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { describeForward, PortForwards } from "./PortForwards";
@@ -93,5 +93,65 @@ describe("PortForwards", () => {
       }),
     );
     expect(mockInvoke).not.toHaveBeenCalledWith("start_forward", expect.anything());
+  });
+
+  it("ignores a slow status reply for a profile it no longer shows", async () => {
+    let resolveOld!: (value: unknown) => void;
+    const other: SessionProfile = {
+      ...profile,
+      id: "cpu",
+      name: "cpu",
+      forwards: [{ ...profile.forwards![0], id: "tensorboard", bindPort: 6006 }],
+    };
+    mockInvoke.mockImplementation(async (command, args) => {
+      if (command !== "list_forwards") {
+        return [];
+      }
+      const { profileId } = args as { profileId: string };
+      if (profileId === "gpu") {
+        return new Promise((resolve) => {
+          resolveOld = resolve;
+        });
+      }
+      return [
+        {
+          profileId: "cpu",
+          spec: other.forwards![0],
+          state: "listening",
+          boundPort: 6006,
+          activeConnections: 0,
+          bytesTransferred: 0,
+          temporary: false,
+          exposed: false,
+        },
+      ];
+    });
+
+    const { rerender } = render(<PortForwards profile={profile} connected />);
+    fireEvent.click(screen.getByRole("button", { name: /port forwards/i }));
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("list_forwards", { profileId: "gpu" }),
+    );
+    rerender(<PortForwards profile={other} connected />);
+    expect(await screen.findByText("listening")).toBeInTheDocument();
+
+    await act(async () =>
+      resolveOld([
+        {
+          profileId: "gpu",
+          spec: profile.forwards![0],
+          state: "failed",
+          boundPort: null,
+          activeConnections: 0,
+          bytesTransferred: 0,
+          temporary: false,
+          exposed: false,
+          error: "old profile",
+        },
+      ]),
+    );
+
+    expect(screen.getByText("listening")).toBeInTheDocument();
+    expect(screen.queryByText("failed")).not.toBeInTheDocument();
   });
 });

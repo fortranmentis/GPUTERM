@@ -881,6 +881,148 @@ describe("SftpBrowser local path browse", () => {
   });
 });
 
+describe("SftpBrowser reload after transfers", () => {
+  function deferred() {
+    let resolve!: () => void;
+    let reject!: (reason: unknown) => void;
+    const promise = new Promise<void>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  let transfer: ReturnType<typeof deferred>;
+
+  beforeEach(() => {
+    mockInvoke.mockReset();
+    mockConfirm.mockReset();
+    mockConfirm.mockResolvedValue(true);
+    transfer = deferred();
+    useTransferStore.setState({ tasks: [], activeDrag: null });
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      connectedSessionIds: ["session-1"],
+      terminalIdsBySession: { "session-1": ["terminal-1"] },
+      message: null,
+    });
+    mockInvoke.mockImplementation((command, args) => {
+      const path = (args as { path?: string } | undefined)?.path;
+      if (command === "load_app_settings") {
+        return Promise.resolve({ recentLocalPath: "C:\\Users\\me" });
+      }
+      if (command === "list_local_dir" || command === "update_recent_local_path") {
+        return Promise.resolve(
+          command === "list_local_dir"
+            ? { path, entries: [] }
+            : { recentLocalPath: path },
+        );
+      }
+      if (command === "sftp_list_dir") {
+        return Promise.resolve({ path: path === "." ? "/srv" : path, entries: [] });
+      }
+      if (command === "sftp_path_exists" || command === "local_path_exists") {
+        return Promise.resolve(false);
+      }
+      if (command === "sftp_upload_file" || command === "sftp_download_file") {
+        return transfer.promise;
+      }
+      return Promise.resolve(undefined);
+    });
+  });
+
+  function listCalls(command: string, path: string) {
+    return mockInvoke.mock.calls.filter(
+      ([name, args]) => name === command && (args as { path: string }).path === path,
+    ).length;
+  }
+
+  async function startUpload() {
+    render(<SftpBrowser />);
+    await waitFor(() => expect(screen.getByDisplayValue("/srv")).toBeInTheDocument());
+    fireEvent.drop(screen.getByTestId("remote-drop-zone"), {
+      dataTransfer: dragData(LOCAL_DRAG_TYPE, [localFile("alpha.txt")]),
+    });
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("sftp_upload_file", expect.anything()),
+    );
+  }
+
+  it("does not jump back to the upload folder after browsing elsewhere", async () => {
+    await startUpload();
+    const input = screen.getByDisplayValue("/srv");
+    fireEvent.change(input, { target: { value: "/home" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(screen.getByDisplayValue("/home")).toBeInTheDocument());
+    const srvListings = listCalls("sftp_list_dir", "/srv");
+    const homeListings = listCalls("sftp_list_dir", "/home");
+
+    await act(async () => transfer.resolve());
+
+    await waitFor(() =>
+      expect(useTransferStore.getState().tasks[0]?.status).toBe("done"),
+    );
+    expect(listCalls("sftp_list_dir", "/srv")).toBe(srvListings);
+    expect(listCalls("sftp_list_dir", "/home")).toBe(homeListings);
+    expect(screen.getByDisplayValue("/home")).toBeInTheDocument();
+  });
+
+  it("reloads the folder the upload landed in when it is still shown", async () => {
+    await startUpload();
+    const srvListings = listCalls("sftp_list_dir", "/srv");
+
+    await act(async () => transfer.resolve());
+
+    await waitFor(() =>
+      expect(listCalls("sftp_list_dir", "/srv")).toBe(srvListings + 1),
+    );
+  });
+
+  it("does not reload the old local folder after a download", async () => {
+    render(<SftpBrowser />);
+    await waitFor(() => expect(screen.getByDisplayValue("/srv")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(screen.getByDisplayValue("C:\\Users\\me")).toBeInTheDocument(),
+    );
+    fireEvent.drop(screen.getByTestId("local-drop-zone"), {
+      dataTransfer: dragData(REMOTE_DRAG_TYPE, [remoteFile("beta.log")]),
+    });
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("sftp_download_file", expect.anything()),
+    );
+    const localInput = screen.getByDisplayValue("C:\\Users\\me");
+    fireEvent.change(localInput, { target: { value: "D:\\data" } });
+    fireEvent.keyDown(localInput, { key: "Enter" });
+    await waitFor(() => expect(listCalls("list_local_dir", "D:\\data")).toBe(1));
+    const oldListings = listCalls("list_local_dir", "C:\\Users\\me");
+
+    await act(async () => transfer.resolve());
+
+    await waitFor(() =>
+      expect(useTransferStore.getState().tasks[0]?.status).toBe("done"),
+    );
+    expect(listCalls("list_local_dir", "C:\\Users\\me")).toBe(oldListings);
+  });
+
+  it("keeps a canceled upload canceled without an error message", async () => {
+    await startUpload();
+    const taskId = useTransferStore.getState().tasks[0].id;
+
+    await act(async () => {
+      // The backend reports the cancel as progress before rejecting.
+      useTransferStore.getState().updateTask(taskId, { status: "canceled" });
+      transfer.reject("Transfer canceled");
+    });
+
+    await waitFor(() =>
+      expect(useTransferStore.getState().tasks[0]?.status).toBe("canceled"),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(useTransferStore.getState().tasks[0]?.status).toBe("canceled");
+    expect(useSessionStore.getState().message).toBeNull();
+  });
+});
+
 describe("Nautilus clipboard parsing", () => {
   it("decodes GNOME copied-file URIs and ignores the copy marker", () => {
     const clipboard = {

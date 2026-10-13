@@ -1,7 +1,9 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import { LlmRuntimeDetailContent } from "./LlmRuntimePopover";
+import { useRef } from "react";
+import { LlmRuntimeDetailContent, LlmRuntimePopover } from "./LlmRuntimePopover";
+import { useSessionStore } from "../stores/sessionStore";
 import type {
   LlmInstance,
   LlmInstanceTelemetry,
@@ -558,3 +560,43 @@ describe("LlmRuntimeDetailContent", () => {
     ).toBeInTheDocument();
   });
 });
+
+describe("LlmRuntimePopover", () => {
+  function Harness() {
+    const anchorRef = useRef<HTMLButtonElement | null>(null);
+    return (
+      <>
+        <button ref={anchorRef} type="button">
+          LLM anchor
+        </button>
+        <LlmRuntimePopover
+          telemetry={null}
+          instances={[]}
+          onInstancesChange={() => undefined}
+          anchorRef={anchorRef}
+          onClose={() => undefined}
+        />
+      </>
+    );
+  }
+
+  beforeEach(() => {
+    mockInvoke.mockReset();
+    useSessionStore.setState({ message: null });
+  });
+
+  it("reports a failed manual refresh", async () => {
+    mockInvoke.mockRejectedValue("poller stopped");
+    render(<Harness />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh LLM runtimes" }));
+
+    await waitFor(() =>
+      expect(useSessionStore.getState().message).toEqual({
+        kind: "error",
+        text: "Could not refresh LLM runtimes: poller stopped",
+      }),
+    );
+  });
+});
+

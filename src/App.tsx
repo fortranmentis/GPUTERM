@@ -13,6 +13,7 @@ import { TerminalPane } from "./components/TerminalPane";
 import { useLlmStore } from "./stores/llmStore";
 import { useSessionStore } from "./stores/sessionStore";
 import { useSettingsStore } from "./stores/settingsStore";
+import { progressToMessage } from "./stores/transferStore";
 import { useAutoReconnect } from "./hooks/useAutoReconnect";
 import type { RemoteTelemetry, TelemetrySettings } from "./types/gpu";
 import type { LlmInstance, LlmTelemetry } from "./types/llm";
@@ -217,17 +218,9 @@ function App() {
     });
 
     listen<SftpProgressPayload>("sftp-progress", (event) => {
-      const progress = event.payload;
-      if (!progress.done) {
-        return;
-      }
-      if (progress.error) {
-        setMessage({ kind: "error", text: progress.error });
-      } else {
-        setMessage({
-          kind: "success",
-          text: `${progress.operation} complete: ${progress.remotePath}`,
-        });
+      const message = progressToMessage(event.payload);
+      if (message) {
+        setMessage(message);
       }
     }).then((unlisten) => {
       if (disposed) {

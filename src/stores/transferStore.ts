@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { SftpProgressPayload } from "../types/session";
+import type { AppMessage, SftpProgressPayload } from "../types/session";
 import type {
   ActiveTransferDrag,
   TransferTask,
@@ -88,4 +88,27 @@ function progressStatus(
     return "done";
   }
   return fallback === "pending" ? "running" : fallback;
+}
+
+/**
+ * The toast for a finished transfer, or null when none should be shown. A
+ * user cancel is reported by the backend as an error too, but it is not a
+ * failure the user needs to acknowledge.
+ */
+export function progressToMessage(
+  payload: SftpProgressPayload,
+): AppMessage | null {
+  if (!payload.done) {
+    return null;
+  }
+  if (payload.canceled) {
+    return { kind: "info", text: `${payload.operation} canceled: ${payload.remotePath}` };
+  }
+  if (payload.error) {
+    return { kind: "error", text: payload.error };
+  }
+  return {
+    kind: "success",
+    text: `${payload.operation} complete: ${payload.remotePath}`,
+  };
 }
