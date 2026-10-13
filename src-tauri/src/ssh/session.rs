@@ -1259,12 +1259,18 @@ pub(crate) fn try_reserve_slot(
     limit: usize,
 ) -> Option<CountGuard> {
     use std::sync::atomic::Ordering;
-    counter
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-            (count < limit).then_some(count + 1)
-        })
-        .ok()
-        .map(|_| CountGuard(Arc::clone(counter)))
+    // compare_exchange keeps this usable on the declared MSRV as well as
+    // newer toolchains that deprecated fetch_update in favour of try_update.
+    let mut count = counter.load(Ordering::SeqCst);
+    loop {
+        if count >= limit {
+            return None;
+        }
+        match counter.compare_exchange(count, count + 1, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return Some(CountGuard(Arc::clone(counter))),
+            Err(current) => count = current,
+        }
+    }
 }
 
 /// Sleep for a polling loop that has nothing to do: short right after
