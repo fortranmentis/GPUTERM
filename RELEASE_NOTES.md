@@ -17,6 +17,7 @@
 - Probe idle SSH links for a server reply and probe after wake; retain a keepalive fallback for servers that never answer the initial probe.
 - Save the password entered on New → Save into the encrypted vault before writing the profile; keep the long profile form's title visible.
 - Keep 15m/1h chart controls from collapsing the chart grid and keep alert checkboxes at their intended size.
+- Keep the desktop notification dependency compatible with the declared Rust 1.88 minimum, and wait for the actual asynchronous detail error in its frontend test.
 
 ## Validation
 

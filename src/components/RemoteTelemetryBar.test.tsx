@@ -460,7 +460,7 @@ describe("RemoteTelemetryBar disk summary", () => {
     fireEvent.click(screen.getByRole("button", { name: /cpu/i }));
 
     expect(await screen.findByText("Metrics unavailable")).toBeInTheDocument();
-    expect(screen.getByText(/ps permission denied/i)).toBeInTheDocument();
+    expect(await screen.findByText(/ps permission denied/i)).toBeInTheDocument();
   });
 
   it("shows logged-in users and opens the users popover without a details request", async () => {

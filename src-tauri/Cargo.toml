@@ -40,6 +40,8 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 # Pinned to the 2.4 line, matching @tauri-apps/plugin-notification.
 tauri-plugin-notification = "~2.4"
+# Keep the notification plugin's desktop dependency compatible with Rust 1.88.
+notify-rust = "=4.17.0"
 uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = "1.8"
 ureq = { version = "3.3", features = ["json", "platform-verifier"] }
