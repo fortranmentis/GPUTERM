@@ -1,6 +1,9 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { listen } from "@tauri-apps/api/event";
 import App from "./App";
+import { useSessionStore } from "./stores/sessionStore";
+import type { AlertEvent } from "./types/alerts";
 
 const storedPanelState = new Map<string, string>();
 const localStorageMock: Storage = {
@@ -26,7 +29,7 @@ vi.mock("@tauri-apps/api/core", () => ({
       telemetryIntervalSecs: 2,
       displayMode: "gpu-system",
       diskIgnoreFsTypes: [],
-    } : []),
+    } : command === "get_alert_settings" ? null : []),
   ),
 }));
 
@@ -112,5 +115,61 @@ describe("workspace panel visibility", () => {
 
     expect(screen.getByRole("contentinfo", { name: "Monitoring panel" })).toBeInTheDocument();
     expect(localStorage.getItem("gputerm.monitoringOpen")).toBe("true");
+  });
+});
+
+describe("alerts", () => {
+  const handlers = new Map<string, (event: { payload: unknown }) => void>();
+  const alert: AlertEvent = {
+    id: "1",
+    scope: "s",
+    hostLabel: "lab-a100",
+    kind: "gpu-temp",
+    subject: "GPU-a",
+    state: "fired",
+    value: 88,
+    threshold: 85,
+    at: 1_900_000_000,
+    title: "GPU 0 (A100) is hot",
+    body: "88°C (alert at 85°C)",
+    notify: true,
+    osDelivered: false,
+  };
+
+  beforeEach(() => {
+    handlers.clear();
+    vi.mocked(listen).mockImplementation(async (event, handler) => {
+      handlers.set(event, handler as (event: { payload: unknown }) => void);
+      return () => undefined;
+    });
+    useSessionStore.setState({ message: null });
+  });
+
+  async function fire(payload: AlertEvent) {
+    await waitFor(() => expect(handlers.has("telemetry-alert")).toBe(true));
+    act(() => handlers.get("telemetry-alert")!({ payload }));
+  }
+
+  it("shows an alert the OS did not display as a warning toast", async () => {
+    render(<App />);
+    await fire(alert);
+    expect(useSessionStore.getState().message).toEqual({
+      kind: "warning",
+      text: "lab-a100 — GPU 0 (A100) is hot — 88°C (alert at 85°C)",
+    });
+  });
+
+  it("stays quiet when the OS showed it or it is a repeat", async () => {
+    render(<App />);
+    await fire({ ...alert, osDelivered: true });
+    await fire({ ...alert, id: "2", notify: false });
+    expect(useSessionStore.getState().message).toBeNull();
+  });
+
+  it("never replaces an error the user has not acknowledged", async () => {
+    render(<App />);
+    act(() => useSessionStore.setState({ message: { kind: "error", text: "boom" } }));
+    await fire(alert);
+    expect(useSessionStore.getState().message).toEqual({ kind: "error", text: "boom" });
   });
 });

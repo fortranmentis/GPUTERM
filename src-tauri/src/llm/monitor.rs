@@ -798,6 +798,30 @@ pub struct MonitorContext {
     pub active_connections: Arc<Mutex<HashMap<String, ActiveConnection>>>,
 }
 
+/// Hands a severity change to the alert rules (which decide whether it is
+/// worth a notification). `apply_outcome` itself stays free of side effects.
+fn notify_severity_change(
+    app: &AppHandle,
+    instance: &LlmInstance,
+    before: Option<SeverityLevel>,
+    after: &Severity,
+    now: u64,
+) {
+    use tauri::Manager;
+    let Some(state) = app.try_state::<crate::ssh::session::AppState>() else {
+        return;
+    };
+    let event = state.alerts.llm_transition(
+        &instance.id,
+        &instance.name,
+        before,
+        after.level,
+        &after.reasons,
+        now,
+    );
+    crate::alerts::deliver(app, event.into_iter().collect());
+}
+
 fn run_coordinator(app: AppHandle, context: MonitorContext) {
     let probes = Arc::new(Probes::default());
     let mut states: HashMap<String, InstanceState> = HashMap::new();
@@ -833,7 +857,13 @@ fn run_coordinator(app: AppHandle, context: MonitorContext) {
                 continue;
             };
             let state = states.entry(instance.id.clone()).or_default();
+            let before = state.severity.as_ref().map(|severity| severity.level);
             apply_outcome(state, instance, outcome);
+            if let Some(after) = state.severity.as_ref() {
+                if before != Some(after.level) {
+                    notify_severity_change(&app, instance, before, after, now);
+                }
+            }
             changed = true;
         }
 

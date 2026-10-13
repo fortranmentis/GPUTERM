@@ -1,3 +1,4 @@
+mod alerts;
 mod llm;
 mod native_drag;
 mod ssh;
@@ -41,6 +42,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             start_native_file_drag,
             load_sessions,
@@ -70,6 +72,8 @@ pub fn run() {
             get_telemetry_settings,
             update_telemetry_settings,
             ssh::telemetry_history::get_telemetry_history,
+            alerts::get_alert_settings,
+            alerts::update_alert_settings,
             refresh_agent_quota,
             configure_claude_quota_monitor,
             get_resource_details,
@@ -110,6 +114,7 @@ pub fn run() {
             if let Ok(mut slot) = state.telemetry_settings.lock() {
                 *slot = ssh::system_monitor::load_persisted_settings();
             }
+            state.alerts.set_settings(alerts::load_persisted_settings());
             llm::load_into_state(&state);
             llm::monitor::start(app.handle().clone(), llm::monitor_context(&state));
             Ok(())

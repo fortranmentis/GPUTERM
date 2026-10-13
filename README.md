@@ -94,6 +94,7 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 - Click any section for a **draggable, resizable detail popover** whose tables expand with the window: per-core CPU usage, top processes, VRAM/power/temperature per GPU, a gauge per CPU/DIMM/drive temperature sensor, full mount list
 - **Pop any detail view out into its own OS window** — it refreshes independently and closes with its session
 - **Usage history** — CPU, memory, the fullest disk, and each GPU's utilization, VRAM, temperature, and power are kept for the last hour in 5-second buckets; popovers show a 15-minute trend and detached windows switch between 15 minutes and 1 hour
+- **Alerts and notifications** — the bell in the monitoring bar sets thresholds for GPU temperature, VRAM, memory, each disk, an idle GPU still holding memory, and an LLM runtime turning critical. A reading must stay over its threshold for a chosen time, clears only below a lower level, and is notified once (system notification, or an in-app message while GpuTerm is in front)
 - Remote telemetry runs on a dedicated SSH connection with automatic reconnect; local telemetry executes collectors directly without SSH
 - **Quiet Windows local monitoring** — PowerShell collectors run without allocating console windows and emit UTF-8 text, so localized device and volume names remain parseable
 - Hosts without any GPU gracefully fall back to system-only metrics
@@ -409,7 +410,7 @@ Long-running work is isolated: blocking SSH I/O runs on `spawn_blocking` threads
 | --- | --- |
 | `sessions.json` | Session profiles — host, port, username, key *path*, ProxyJump, and optional forwarding rules |
 | `known_hosts.json` | Approved SHA-256 host key fingerprints |
-| `app_settings.json` | UI preferences: the last local SFTP directory, terminal appearance, and monitoring interval, display mode and ignored filesystems |
+| `app_settings.json` | UI preferences: the last local SFTP directory, terminal appearance, monitoring interval, display mode and ignored filesystems, and alert rules |
 | `credentials.enc` | Versioned Argon2id parameters plus an AES-256-GCM encrypted and authenticated credential payload |
 | `credential_index.json` | Non-secret session ids used only to show which profiles have a saved vault entry |
 | `snippets.json` | Saved command names, text, return behavior, and optional profile ids. Never credentials |
@@ -536,6 +537,7 @@ GpuTerm is free for personal and noncommercial use under [PolyForm Noncommercial
 ## Roadmap / Known limitations
 
 - Keyboard-interactive SSH authentication is not implemented
+- Usage history and alert state are kept in memory per session and reset when a session reconnects or the app restarts; alert thresholds are the same for every host
 - Interrupted transfer resume is not implemented
 - `known_hosts.json` uses SHA-256 fingerprints, not the OpenSSH known_hosts format
 - Telemetry supports local and remote Linux, macOS (Apple Silicon included), and Windows hosts; Apple GPU power/temperature and per-core CPU usage need root `powermetrics` and are not shown

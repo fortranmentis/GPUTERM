@@ -38,6 +38,8 @@ socket2 = { version = "0.6", features = ["all"] }
 ssh2 = { version = "0.9", features = ["vendored-openssl", "openssl-on-win32"] }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+# Pinned to the 2.4 line, matching @tauri-apps/plugin-notification.
+tauri-plugin-notification = "~2.4"
 uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = "1.8"
 ureq = { version = "3.3", features = ["json", "platform-verifier"] }

@@ -14,6 +14,8 @@ import { useLlmStore } from "./stores/llmStore";
 import { useSessionStore } from "./stores/sessionStore";
 import { useSettingsStore } from "./stores/settingsStore";
 import { progressToMessage } from "./stores/transferStore";
+import { useAlertStore } from "./stores/alertStore";
+import type { AlertEvent, AlertSettings } from "./types/alerts";
 import { useAutoReconnect } from "./hooks/useAutoReconnect";
 import { useLlmInstancesSync } from "./hooks/useLlmInstancesSync";
 import type { RemoteTelemetry, TelemetrySettings } from "./types/gpu";
@@ -106,6 +108,9 @@ function App() {
     invoke<TelemetrySettings>("get_telemetry_settings")
       .then(setTelemetrySettings)
       .catch(() => undefined);
+    invoke<AlertSettings>("get_alert_settings")
+      .then((settings) => settings && useAlertStore.getState().setSettings(settings))
+      .catch(() => undefined);
     invoke<LlmInstance[]>("list_llm_instances")
       .then(setLlmInstances)
       // A config file that cannot be read must not look like "no instances".
@@ -164,6 +169,30 @@ function App() {
 
     listen<LlmTelemetry>("llm-runtime-telemetry", (event) => {
       setLlmTelemetry(event.payload);
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+      } else {
+        unlisteners.push(unlisten);
+      }
+    });
+
+    listen<AlertEvent>("telemetry-alert", (event) => {
+      const alert = event.payload;
+      useAlertStore.getState().push(alert);
+      // The OS already showed it, or it is a resolution or a repeat within
+      // the cooldown: nothing more to say.
+      if (!alert.notify || alert.osDelivered || alert.state !== "fired") {
+        return;
+      }
+      // Never replace an error the user has not acknowledged yet.
+      if (useSessionStore.getState().message?.kind === "error") {
+        return;
+      }
+      setMessage({
+        kind: "warning",
+        text: [alert.hostLabel, alert.title, alert.body].filter(Boolean).join(" — "),
+      });
     }).then((unlisten) => {
       if (disposed) {
         unlisten();

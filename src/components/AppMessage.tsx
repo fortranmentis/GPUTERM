@@ -1,12 +1,15 @@
 import { useEffect } from "react";
-import { AlertCircle, CheckCircle2, Info, X } from "lucide-react";
+import { AlertCircle, AlertTriangle, CheckCircle2, Info, X } from "lucide-react";
 import { useSessionStore } from "../stores/sessionStore";
 
 const TOAST_DISMISS_MS = 3_000;
+/** Alerts stay up longer: they may arrive while the user looks elsewhere. */
+const WARNING_DISMISS_MS = 8_000;
 
 /**
  * Renders the app-wide message: errors as a centered modal that must be
- * acknowledged, info/success as a top-center toast that dismisses itself.
+ * acknowledged, info/success/warning as a top-center toast that dismisses
+ * itself.
  */
 export function AppMessageOverlay() {
   const message = useSessionStore((state) => state.message);
@@ -16,7 +19,10 @@ export function AppMessageOverlay() {
     if (!message || message.kind === "error") {
       return;
     }
-    const timer = window.setTimeout(() => setMessage(null), TOAST_DISMISS_MS);
+    const timer = window.setTimeout(
+      () => setMessage(null),
+      message.kind === "warning" ? WARNING_DISMISS_MS : TOAST_DISMISS_MS,
+    );
     return () => window.clearTimeout(timer);
   }, [message, setMessage]);
 
@@ -72,7 +78,13 @@ export function AppMessageOverlay() {
 
   return (
     <div className={`app-message app-toast ${message.kind}`} role="status">
-      {message.kind === "success" ? <CheckCircle2 size={16} /> : <Info size={16} />}
+      {message.kind === "success" ? (
+        <CheckCircle2 size={16} />
+      ) : message.kind === "warning" ? (
+        <AlertTriangle size={16} />
+      ) : (
+        <Info size={16} />
+      )}
       <span>{message.text}</span>
       <button
         className="icon-button ghost"

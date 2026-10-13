@@ -69,7 +69,8 @@ export type TerminalPaneInfo = {
 };
 
 export type AppMessage = {
-  kind: "info" | "success" | "error";
+  /** `warning` is a toast that stays longer, used for alerts. */
+  kind: "info" | "success" | "warning" | "error";
   text: string;
 };
 

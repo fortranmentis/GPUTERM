@@ -91,6 +91,7 @@
 - 각 섹션을 클릭하면 표가 창 크기에 맞춰 확장되는 **드래그·크기 조절 가능 상세 팝오버**: 코어별 CPU 사용률, 상위 프로세스, GPU별 VRAM/전력/온도, CPU·DIMM·드라이브 센서별 온도 게이지, 전체 마운트 목록
 - **상세창을 별도 OS 창으로 분리** 가능 — 독립적으로 갱신되고 세션이 끊기면 함께 닫힘
 - **사용률 기록** — CPU, 메모리, 가장 많이 찬 디스크, GPU별 사용률·VRAM·온도·전력을 최근 1시간 동안 5초 단위로 보관합니다. 팝오버는 최근 15분 추이를, 분리한 창은 15분/1시간 전환을 보여 줍니다
+- **경고와 알림** — 모니터링 바의 종 버튼에서 GPU 온도, VRAM, 메모리, 디스크(마운트별), 메모리를 잡은 채 쉬는 GPU, LLM 런타임의 critical 전환에 대한 기준을 정합니다. 기준을 넘은 상태가 정한 시간 동안 이어져야 경고하고, 더 낮은 값 아래로 내려가야 해제되며, 한 번만 알립니다(시스템 알림, 또는 GpuTerm이 앞에 있을 때는 앱 안 메시지)
 - 원격 텔레메트리는 전용 SSH 연결에서 자동 재연결하고, 로컬 텔레메트리는 SSH 없이 호스트에서 수집기를 직접 실행
 - **조용한 Windows 로컬 모니터링** — PowerShell 수집기를 콘솔 창 없이 실행하고 UTF-8 텍스트로 출력해 한글 장치명·볼륨명도 안정적으로 파싱
 - GPU가 전혀 없는 서버에서는 시스템 지표만 표시하며 정상 동작
@@ -402,7 +403,7 @@ cp scripts/gputerm-claude-statusline.sh ~/.claude/gputerm-claude-statusline.sh &
 | --- | --- |
 | `sessions.json` | 세션 프로필 — host, port, username, 키 *경로*, ProxyJump, 선택적 포워딩 규칙 |
 | `known_hosts.json` | 승인된 SHA-256 호스트 키 지문 |
-| `app_settings.json` | 마지막 로컬 SFTP 디렉토리, 터미널 모양, 모니터링 수집 주기·표시 모드·숨길 파일시스템 등 UI 설정 |
+| `app_settings.json` | 마지막 로컬 SFTP 디렉토리, 터미널 모양, 모니터링 수집 주기·표시 모드·숨길 파일시스템, 경고 규칙 등 UI 설정 |
 | `credentials.enc` | 버전이 포함된 Argon2id 매개변수와 AES-256-GCM으로 암호화·인증된 자격증명 전체 페이로드 |
 | `credential_index.json` | 저장된 보안 항목을 화면에 표시할 때만 사용하는 비밀값 없는 세션 ID 목록 |
 | `snippets.json` | 저장 명령 이름·본문·Return 동작·선택적 프로필 id. 자격증명은 저장하지 않음 |
@@ -529,6 +530,7 @@ GpuTerm은 [PolyForm Noncommercial 1.0.0](./LICENSE)에 따라 개인·비상업
 ## 로드맵 / 알려진 제한
 
 - keyboard-interactive SSH 인증 미지원
+- 사용률 기록과 경고 상태는 세션별로 메모리에만 있어 세션이 다시 연결되거나 앱을 다시 켜면 초기화됩니다. 경고 기준은 모든 호스트에 같게 적용됩니다
 - 중단된 전송 이어받기 미지원
 - `known_hosts.json`은 OpenSSH known_hosts 형식이 아닌 SHA-256 지문 JSON 사용
 - 텔레메트리는 로컬 및 원격 Linux·macOS(Apple Silicon 포함)·Windows를 지원; Apple GPU 전력·온도와 코어별 CPU 사용률은 root `powermetrics`가 필요해 미표시

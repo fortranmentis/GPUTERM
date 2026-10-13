@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
   Activity,
+  Bell,
   Bot,
   Boxes,
   Cpu,
@@ -23,6 +24,8 @@ import {
   type RefObject,
 } from "react";
 import { AgentUsagePopover } from "./AgentUsagePopover";
+import { AlertSettingsPopover } from "./AlertSettingsPopover";
+import { activeAlertCount, useAlertStore } from "../stores/alertStore";
 import { LlmRuntimePopover } from "./LlmRuntimePopover";
 import { CpuUsagePopover } from "./CpuUsagePopover";
 import { DiskUsagePopover } from "./DiskUsagePopover";
@@ -98,6 +101,12 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
   const llmInstances = useLlmStore((state) => state.instances);
   const setLlmInstances = useLlmStore((state) => state.setInstances);
   const [openResource, setOpenResource] = useState<OpenResource>(null);
+  const [alertsOpen, setAlertsOpen] = useState(false);
+  const alertsButtonRef = useRef<HTMLButtonElement | null>(null);
+  const firingAlerts = useAlertStore(
+    (state) =>
+      activeAlertCount(state.active, activeSessionId) + activeAlertCount(state.active, "llm"),
+  );
   const history = useTelemetryHistory(
     activeSessionId,
     openResource === "cpu" ||
@@ -356,6 +365,20 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
             }}
           />
         </label>
+        <button
+          ref={alertsButtonRef}
+          className={`icon-button ghost alert-button${firingAlerts > 0 ? " firing" : ""}`}
+          type="button"
+          aria-label={
+            firingAlerts > 0 ? `Alert settings, ${firingAlerts} firing` : "Alert settings"
+          }
+          aria-expanded={alertsOpen}
+          title="Alerts and notifications"
+          onClick={() => setAlertsOpen((open) => !open)}
+        >
+          <Bell size={15} />
+          {firingAlerts > 0 && <span className="alert-badge">{firingAlerts}</span>}
+        </button>
       </div>
 
       {!connected && <div className="telemetry-unavailable">Telemetry unavailable</div>}
@@ -553,6 +576,12 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
         )}
       </TelemetryButton>
 
+      {alertsOpen && (
+        <AlertSettingsPopover
+          anchorRef={alertsButtonRef}
+          onClose={() => setAlertsOpen(false)}
+        />
+      )}
       {openResource === "llm" && (
         <LlmRuntimePopover
           telemetry={llmTelemetry}

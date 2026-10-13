@@ -559,6 +559,38 @@ impl RemoteTelemetry {
         &self.session_id
     }
 
+    /// What the alert rules read from this reading, or None when the poll
+    /// failed entirely.
+    pub(crate) fn alert_input(&self, ignored_fs: &[String]) -> Option<crate::alerts::AlertInput> {
+        let sample = self.history_sample(ignored_fs)?;
+        Some(crate::alerts::AlertInput {
+            memory_percent: sample.memory_percent,
+            disks: self
+                .disks
+                .iter()
+                .filter(|disk| !is_ignored_fs(disk, ignored_fs))
+                .map(|disk| (disk.mount_point.clone(), disk.usage_percent))
+                .collect(),
+            gpus: sample
+                .gpus
+                .into_iter()
+                .map(|gpu| crate::alerts::GpuAlertInput {
+                    vram_percent: match (gpu.vram_used_mi_b, gpu.vram_total_mi_b) {
+                        (Some(used), Some(total)) if total > 0 => {
+                            Some(used as f64 / total as f64 * 100.0)
+                        }
+                        _ => None,
+                    },
+                    key: gpu.key,
+                    index: gpu.index,
+                    name: gpu.name,
+                    temperature_c: gpu.temperature_c,
+                    util_percent: gpu.util_percent,
+                })
+                .collect(),
+        })
+    }
+
     /// What the usage history keeps from this reading, or None when the
     /// poll failed entirely (a connection error is a gap, not a zero).
     pub(crate) fn history_sample(&self, ignored_fs: &[String]) -> Option<HistorySample> {

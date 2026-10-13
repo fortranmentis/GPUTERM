@@ -3388,6 +3388,10 @@ button.agent-summary-section {
   color: #fecaca;
 }
 
+.app-message.warning {
+  color: #fde68a;
+}
+
 .app-toast {
   left: 50%;
   right: auto;
@@ -4779,3 +4783,160 @@ button.agent-summary-section {
   width: auto;
   height: auto;
 }
+
+.alert-button {
+  position: relative;
+  align-self: end;
+  width: 30px;
+  height: 28px;
+}
+
+.alert-button.firing {
+  color: var(--amber);
+}
+
+.alert-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--amber);
+  color: #111827;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 15px;
+  text-align: center;
+}
+
+.alert-settings {
+  display: grid;
+  gap: 10px;
+  padding: 10px 12px 12px;
+  font-size: 12px;
+}
+
+.alert-settings fieldset {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.alert-settings fieldset:disabled {
+  opacity: 0.5;
+}
+
+/* Global label/input rules stack labels and size inputs for forms; the
+   alert controls are inline rows instead. */
+.alert-settings label {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+
+.alert-settings label span {
+  color: #cbd5e1;
+}
+
+.alert-settings input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+}
+
+.alert-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #cbd5e1;
+}
+
+.alert-toggle > span {
+  line-height: 1.8;
+}
+
+.alert-settings input[type="number"] {
+  width: 52px;
+  height: 22px;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #0a1119;
+  color: #e2e8f0;
+  font-size: 12px;
+}
+
+.alert-rule-table {
+  display: grid;
+  gap: 4px;
+}
+
+.alert-rule-row {
+  display: grid;
+  grid-template-columns: minmax(130px, 1.4fr) 1fr 1fr 64px;
+  align-items: center;
+  gap: 6px;
+}
+
+.alert-rule-row.head {
+  color: var(--subtle);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.alert-rule-row label,
+.alert-number {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.alert-notifications {
+  display: grid;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.alert-permission {
+  color: var(--amber);
+}
+
+.alert-recent h4 {
+  margin: 0 0 4px;
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.alert-recent ul {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.alert-recent li {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px;
+  color: #fde68a;
+}
+
+.alert-recent li.resolved {
+  color: var(--subtle);
+}
+
+.alert-recent time {
+  color: var(--subtle);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+

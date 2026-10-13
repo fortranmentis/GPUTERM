@@ -27,6 +27,9 @@ pub struct AppSettings {
     /// files written before 1.3.4, which then start from the defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry: Option<SystemMonitorSettings>,
+    /// Alert rules and notification preferences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alerts: Option<crate::alerts::AlertSettings>,
 }
 
 const MIN_TERMINAL_FONT_SIZE: u8 = 8;
