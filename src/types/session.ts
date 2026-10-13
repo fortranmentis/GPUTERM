@@ -115,6 +115,8 @@ export type SshConfigHost = {
 export type SshConfigPreview = {
   hosts: SshConfigHost[];
   warnings: string[];
+  /** Files read through `Include`, relative to ~/.ssh where possible. */
+  includedFiles?: string[];
   sourcePath?: string;
 };
 

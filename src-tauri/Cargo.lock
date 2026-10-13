@@ -1307,6 +1307,7 @@ dependencies = [
  "chrono",
  "drag",
  "gdkx11",
+ "glob",
  "gtk",
  "portable-pty",
  "rand_core",

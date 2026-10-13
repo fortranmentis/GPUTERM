@@ -239,7 +239,7 @@ The tmux picker is optional and does not install anything: `tmux` must already b
 <details>
 <summary>SSH config import and port forwarding</summary>
 
-- Press **Import** beside **New** to preview `~/.ssh/config`. GpuTerm expands `~/` and `%d` identity paths, resolves `ProxyJump`, and identifies profile-name collisions before importing only the selected entries.
+- Press **Import** beside **New** to preview `~/.ssh/config`. GpuTerm follows `Include` (relative to `~/.ssh`, with globs such as `conf.d/*`), expands `~/` and `%d` identity paths, resolves `ProxyJump`, and identifies profile-name collisions before importing only the selected entries.
 - Expand **Port forwards** on a saved profile to add local (`-L`), remote (`-R`), or SOCKS5 dynamic (`-D`) rules. Saved rules start with the profile; **Start once** creates a connection-only rule.
 - Bind addresses and ports are validated before saving. The live list reports starting/running/error state and byte counts; stopping a rule leaves the SSH terminal connected.
 - Ports below 1024 are accepted by the editor, but the operating system may still require elevated privileges to bind them.

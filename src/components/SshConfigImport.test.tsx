@@ -63,4 +63,22 @@ describe("SshConfigImport", () => {
     });
     expect(importButton).toBeEnabled();
   });
+
+  it("lists the files read through Include", async () => {
+    mockInvoke.mockImplementation(async (command) =>
+      command === "preview_ssh_config"
+        ? {
+            sourcePath: "/home/me/.ssh/config",
+            warnings: [],
+            includedFiles: ["conf.d/lab", "conf.d/work"],
+            hosts: [],
+          }
+        : undefined,
+    );
+    render(<SshConfigImport onClose={vi.fn()} onImported={vi.fn()} />);
+
+    expect(
+      await screen.findByText("Also read: conf.d/lab, conf.d/work"),
+    ).toBeInTheDocument();
+  });
 });

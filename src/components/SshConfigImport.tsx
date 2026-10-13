@@ -104,6 +104,11 @@ export function SshConfigImport({ onClose, onImported }: SshConfigImportProps) {
               {error}
             </div>
           )}
+          {preview?.includedFiles && preview.includedFiles.length > 0 && (
+            <div className="ssh-config-status">
+              Also read: {preview.includedFiles.join(", ")}
+            </div>
+          )}
           {preview?.warnings.map((warning) => (
             <div className="ssh-config-status warning" key={warning}>
               <AlertTriangle size={13} />

@@ -4,6 +4,10 @@
 //! `IdentityFile` and `ProxyJump`. Values follow OpenSSH's rule that the first
 //! one obtained wins, so `Host *` defaults apply wherever a host left a value
 //! unset. Wildcard `Host` patterns are not imported themselves.
+//!
+//! `Include` is followed the way OpenSSH follows it: relative paths resolve
+//! against `~/.ssh`, globs expand in sorted order, and an `Include` inside a
+//! `Host` block applies the included file only to hosts that block matches.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -15,6 +19,10 @@ use super::session::{list_profiles, upsert_profiles, SessionProfile};
 
 /// Same limit as connecting: a chain deeper than this would not connect.
 const MAX_JUMP_HOPS: usize = 3;
+/// OpenSSH's own nesting limit for `Include`.
+const MAX_INCLUDE_DEPTH: usize = 16;
+/// Stops a `conf.d/*` over a huge directory from reading without end.
+const MAX_INCLUDED_FILES: usize = 256;
 
 /// One concrete `Host` alias with its resolved values.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -36,8 +44,11 @@ pub struct ConfigHost {
 #[serde(rename_all = "camelCase")]
 pub struct ConfigPreview {
     pub hosts: Vec<ConfigHost>,
-    /// Problems with the file as a whole (unsupported `Include`, `Match`, …).
+    /// Problems with the file as a whole (unsupported `Match`, …).
     pub warnings: Vec<String>,
+    /// Files read through `Include`, in the order they were read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub included_files: Vec<String>,
     /// The file read when no text was supplied.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_path: Option<String>,
@@ -74,10 +85,34 @@ pub struct ConfigImportResult {
 
 #[derive(Debug, Default, Clone)]
 struct Block {
-    /// Empty for the lines before the first `Host`, which apply to every host.
-    patterns: Vec<String>,
+    /// `Host` pattern lists that must all match for the block to apply: the
+    /// block's own `Host` line, preceded by those of the blocks that included
+    /// its file. Empty for lines before the first `Host`, which apply to
+    /// every host.
+    conditions: Vec<Vec<String>>,
+    /// Whether this block starts at a `Host` line, which names aliases.
+    /// Blocks that only resume a context after an `Include` do not.
+    declares_hosts: bool,
     /// Keyword (lower case) and its arguments, unquoted.
     settings: Vec<(String, Vec<String>)>,
+}
+
+impl Block {
+    fn applies_to(&self, alias: &str) -> bool {
+        self.conditions
+            .iter()
+            .all(|patterns| block_matches(patterns, alias))
+    }
+}
+
+/// Where `Include` finds files, and what has been read so far.
+struct IncludeContext<'a> {
+    /// Relative `Include` paths resolve here (`~/.ssh` for a user config).
+    base: &'a Path,
+    home: &'a Path,
+    /// Files currently being read, outermost first, to catch cycles.
+    stack: Vec<PathBuf>,
+    read: Vec<String>,
 }
 
 fn tokenize(line: &str) -> Option<(String, Vec<String>)> {
@@ -122,8 +157,38 @@ fn tokenize(line: &str) -> Option<(String, Vec<String>)> {
     Some((keyword, args))
 }
 
-fn parse_blocks(text: &str, warnings: &mut Vec<String>) -> Vec<Block> {
+fn parse_blocks(
+    text: &str,
+    warnings: &mut Vec<String>,
+    includes: Option<&mut IncludeContext>,
+) -> Vec<Block> {
     let mut blocks = vec![Block::default()];
+    parse_into(text, None, &[], includes, &mut blocks, warnings);
+    blocks
+}
+
+/// Appends the blocks of one file. `inherited` holds the conditions of the
+/// block whose `Include` led here (empty for the top-level file).
+fn parse_into(
+    text: &str,
+    file: Option<&str>,
+    inherited: &[Vec<String>],
+    mut includes: Option<&mut IncludeContext>,
+    blocks: &mut Vec<Block>,
+    warnings: &mut Vec<String>,
+) {
+    let at = |number: usize| match file {
+        Some(file) => format!("{} line {}", file, number + 1),
+        None => format!("Line {}", number + 1),
+    };
+    // An included file's leading lines apply wherever its Include did.
+    if file.is_some() {
+        blocks.push(Block {
+            conditions: inherited.to_vec(),
+            ..Block::default()
+        });
+    }
+    let mut current = inherited.to_vec();
     let mut in_match = false;
     for (number, line) in text.lines().enumerate() {
         let Some((keyword, args)) = tokenize(line) else {
@@ -132,22 +197,45 @@ fn parse_blocks(text: &str, warnings: &mut Vec<String>) -> Vec<Block> {
         match keyword.as_str() {
             "host" => {
                 in_match = false;
+                current = inherited.to_vec();
+                current.push(args);
                 blocks.push(Block {
-                    patterns: args,
+                    conditions: current.clone(),
+                    declares_hosts: true,
                     settings: Vec::new(),
                 });
             }
             "match" => {
                 in_match = true;
                 warnings.push(format!(
-                    "Line {}: Match blocks are not supported and were ignored",
-                    number + 1
+                    "{}: Match blocks are not supported and were ignored",
+                    at(number)
                 ));
             }
-            "include" => warnings.push(format!(
-                "Line {}: Include is not supported; import the included file separately",
-                number + 1
+            "include" if in_match => warnings.push(format!(
+                "{}: Include inside a Match block was skipped",
+                at(number)
             )),
+            "include" => {
+                let Some(context) = includes.as_deref_mut() else {
+                    warnings.push(format!(
+                        "{}: Include is not supported; import the included file separately",
+                        at(number)
+                    ));
+                    continue;
+                };
+                for pattern in &args {
+                    for path in expand_include(pattern, context.base, context.home) {
+                        include_file(&path, &at(number), &current, context, blocks, warnings);
+                    }
+                }
+                // The rest of this file belongs to the enclosing block again,
+                // whatever Host lines the included file had.
+                blocks.push(Block {
+                    conditions: current.clone(),
+                    ..Block::default()
+                });
+            }
             _ if in_match => {}
             _ => {
                 if let Some(block) = blocks.last_mut() {
@@ -156,7 +244,93 @@ fn parse_blocks(text: &str, warnings: &mut Vec<String>) -> Vec<Block> {
             }
         }
     }
-    blocks
+}
+
+fn include_file(
+    path: &Path,
+    at: &str,
+    conditions: &[Vec<String>],
+    context: &mut IncludeContext,
+    blocks: &mut Vec<Block>,
+    warnings: &mut Vec<String>,
+) {
+    if context.read.len() >= MAX_INCLUDED_FILES {
+        if context.read.len() == MAX_INCLUDED_FILES {
+            warnings.push(format!(
+                "{}: stopped after {} included files",
+                at, MAX_INCLUDED_FILES
+            ));
+            // Recorded once; the marker keeps the warning from repeating.
+            context.read.push(String::new());
+        }
+        return;
+    }
+    let Ok(canonical) = fs::canonicalize(path) else {
+        // OpenSSH ignores an Include that matches nothing.
+        return;
+    };
+    if !canonical.is_file() {
+        return;
+    }
+    let label = context.label(&canonical);
+    if context.stack.contains(&canonical) {
+        warnings.push(format!("{}: Include of {} would loop; skipped", at, label));
+        return;
+    }
+    if context.stack.len() >= MAX_INCLUDE_DEPTH {
+        warnings.push(format!(
+            "{}: Include of {} is nested too deeply (limit {}); skipped",
+            at, label, MAX_INCLUDE_DEPTH
+        ));
+        return;
+    }
+    let text = match fs::read_to_string(&canonical) {
+        Ok(text) => text,
+        Err(error) => {
+            warnings.push(format!("{}: could not read {}: {}", at, label, error));
+            return;
+        }
+    };
+    context.read.push(label.clone());
+    context.stack.push(canonical);
+    parse_into(&text, Some(&label), conditions, Some(context), blocks, warnings);
+    context.stack.pop();
+}
+
+impl IncludeContext<'_> {
+    /// The path relative to `~/.ssh` where possible, which is how users write it.
+    fn label(&self, path: &Path) -> String {
+        let base = fs::canonicalize(self.base).unwrap_or_else(|_| self.base.to_path_buf());
+        path.strip_prefix(&base)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+/// The files an `Include` argument names, sorted as OpenSSH reads them.
+fn expand_include(pattern: &str, base: &Path, home: &Path) -> Vec<PathBuf> {
+    let path = if pattern == "~" {
+        home.to_path_buf()
+    } else if let Some(rest) = pattern
+        .strip_prefix("~/")
+        .or_else(|| pattern.strip_prefix("~\\"))
+    {
+        home.join(rest)
+    } else {
+        let path = PathBuf::from(pattern);
+        if path.is_absolute() {
+            path
+        } else {
+            base.join(path)
+        }
+    };
+    let Ok(entries) = ::glob::glob(&path.to_string_lossy()) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = entries.filter_map(Result::ok).collect();
+    paths.sort();
+    paths
 }
 
 fn is_pattern(name: &str) -> bool {
@@ -198,16 +372,61 @@ fn block_matches(patterns: &[String], alias: &str) -> bool {
     matched
 }
 
-/// Parses `text` into one entry per concrete alias, in file order.
+/// Parses `text` into one entry per concrete alias, in file order. `Include`
+/// is reported rather than followed; see `parse_with_includes`.
 pub fn parse(text: &str) -> ConfigPreview {
     let mut warnings = Vec::new();
-    let blocks = parse_blocks(text, &mut warnings);
+    let blocks = parse_blocks(text, &mut warnings, None);
+    preview_from_blocks(&blocks, warnings, Vec::new())
+}
 
+/// Like `parse`, also reading the files `Include` names. Relative paths
+/// resolve against `base` (`~/.ssh`); `source` is the file `text` came from,
+/// if any, so including it again is caught as a loop.
+pub fn parse_with_includes(
+    text: &str,
+    base: &Path,
+    home: &Path,
+    source: Option<&Path>,
+) -> ConfigPreview {
+    let mut warnings = Vec::new();
+    let mut context = IncludeContext {
+        base,
+        home,
+        stack: source
+            .and_then(|path| fs::canonicalize(path).ok())
+            .into_iter()
+            .collect(),
+        read: Vec::new(),
+    };
+    let blocks = parse_blocks(text, &mut warnings, Some(&mut context));
+    let included = context
+        .read
+        .into_iter()
+        .filter(|label| !label.is_empty())
+        .collect();
+    preview_from_blocks(&blocks, warnings, included)
+}
+
+fn preview_from_blocks(
+    blocks: &[Block],
+    warnings: Vec<String>,
+    included_files: Vec<String>,
+) -> ConfigPreview {
     let mut aliases = Vec::new();
     let mut seen = HashSet::new();
-    for block in &blocks {
-        for name in &block.patterns {
-            if !is_pattern(name) && seen.insert(name.to_lowercase()) {
+    for block in blocks.iter().filter(|block| block.declares_hosts) {
+        let Some((own, outer)) = block.conditions.split_last() else {
+            continue;
+        };
+        for name in own {
+            // A Host inside an included file only takes effect for names the
+            // including blocks also match; listing others would import a
+            // host whose settings never apply.
+            if !is_pattern(name)
+                && outer.iter().all(|patterns| block_matches(patterns, name))
+                && seen.insert(name.to_lowercase())
+            {
                 aliases.push(name.clone());
             }
         }
@@ -215,11 +434,12 @@ pub fn parse(text: &str) -> ConfigPreview {
 
     let hosts = aliases
         .into_iter()
-        .map(|alias| resolve_host(&blocks, alias))
+        .map(|alias| resolve_host(blocks, alias))
         .collect();
     ConfigPreview {
         hosts,
         warnings,
+        included_files,
         source_path: None,
     }
 }
@@ -227,10 +447,7 @@ pub fn parse(text: &str) -> ConfigPreview {
 fn resolve_host(blocks: &[Block], alias: String) -> ConfigHost {
     // First value obtained wins.
     let mut settings: BTreeMap<&str, &[String]> = BTreeMap::new();
-    for block in blocks
-        .iter()
-        .filter(|block| block_matches(&block.patterns, &alias))
-    {
+    for block in blocks.iter().filter(|block| block.applies_to(&alias)) {
         for (keyword, args) in &block.settings {
             settings.entry(keyword.as_str()).or_insert(args.as_slice());
         }
@@ -551,23 +768,33 @@ fn resolve_identity_file(value: &str) -> Option<String> {
     path.is_file().then(|| path.to_string_lossy().into_owned())
 }
 
-fn read_config(text: Option<String>) -> Result<(String, Option<String>), String> {
+fn read_config(text: Option<String>) -> Result<(String, Option<PathBuf>), String> {
     match text {
         Some(text) => Ok((text, None)),
         None => {
             let path = default_config_path()?;
             let text = fs::read_to_string(&path)
                 .map_err(|error| format!("Failed to read {}: {}", path.display(), error))?;
-            Ok((text, Some(path.to_string_lossy().into_owned())))
+            Ok((text, Some(path)))
         }
+    }
+}
+
+/// Parses a config, following `Include` relative to `~/.ssh`. Pasted text is
+/// resolved there too, since that is where its relative includes point.
+/// Preview and import both use this, so they always agree.
+fn parse_config(text: &str, source: Option<&Path>) -> ConfigPreview {
+    match home_dir() {
+        Some(home) => parse_with_includes(text, &home.join(".ssh"), &home, source),
+        None => parse(text),
     }
 }
 
 #[tauri::command(async)]
 pub fn preview_ssh_config(text: Option<String>) -> Result<ConfigPreview, String> {
     let (text, source_path) = read_config(text)?;
-    let mut preview = parse(&text);
-    preview.source_path = source_path;
+    let mut preview = parse_config(&text, source_path.as_deref());
+    preview.source_path = source_path.map(|path| path.to_string_lossy().into_owned());
     mark_conflicts(&mut preview, &list_profiles()?);
     for host in &mut preview.hosts {
         if let Some(identity) = &host.identity_file {
@@ -584,8 +811,8 @@ pub fn preview_ssh_config(text: Option<String>) -> Result<ConfigPreview, String>
 
 #[tauri::command(async)]
 pub fn import_ssh_config(mut request: ConfigImportRequest) -> Result<ConfigImportResult, String> {
-    let (text, _) = read_config(request.text.take())?;
-    let preview = parse(&text);
+    let (text, source_path) = read_config(request.text.take())?;
+    let preview = parse_config(&text, source_path.as_deref());
     for host in &preview.hosts {
         if let Some(identity) = &host.identity_file {
             if !request.key_paths.contains_key(identity) {
@@ -826,5 +1053,100 @@ Host *
             Some(PathBuf::from("/etc/keys/k"))
         );
         assert_eq!(expand_identity_path("~/.ssh/%h", home), None);
+    }
+
+    /// A throwaway home directory with `.ssh` and the given files in it.
+    fn ssh_dir(files: &[(&str, &str)]) -> (PathBuf, PathBuf) {
+        let home = std::env::temp_dir().join(format!("gputerm-include-{}", Uuid::new_v4()));
+        let ssh = home.join(".ssh");
+        for (name, text) in files {
+            let path = ssh.join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+        fs::create_dir_all(&ssh).unwrap();
+        (home, ssh)
+    }
+
+    fn parse_in(home: &Path, ssh: &Path, text: &str) -> ConfigPreview {
+        parse_with_includes(text, ssh, home, None)
+    }
+
+    #[test]
+    fn include_globs_resolve_against_dot_ssh_in_sorted_order() {
+        let (home, ssh) = ssh_dir(&[
+            ("conf.d/b", "Host shared\n User from-b\nHost bee\n HostName b.example\n"),
+            ("conf.d/a", "Host shared\n User from-a\nHost ay\n HostName a.example\n"),
+        ]);
+        let preview = parse_in(&home, &ssh, "Include conf.d/*\nHost *\n User fallback\n");
+        let aliases: Vec<&str> = preview.hosts.iter().map(|h| h.alias.as_str()).collect();
+        assert_eq!(aliases, ["shared", "ay", "bee"]);
+        // `conf.d/a` is read first, so its value wins.
+        assert_eq!(host(&preview, "shared").user.as_deref(), Some("from-a"));
+        assert_eq!(host(&preview, "bee").host, "b.example");
+        assert_eq!(host(&preview, "bee").user.as_deref(), Some("fallback"));
+        assert_eq!(preview.included_files.len(), 2);
+        assert!(preview.warnings.is_empty(), "{:?}", preview.warnings);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn an_include_inside_a_host_block_applies_only_to_that_block() {
+        let (home, ssh) = ssh_dir(&[(
+            "corp",
+            "User bob\nHost build.corp\n Port 2200\nHost elsewhere\n Port 2300\n",
+        )]);
+        let text = "Host *.corp\n Include corp\n IdentityFile ~/.ssh/corp_key\n\
+                    Host build.corp other\n HostName 10.1.1.1\n";
+        let preview = parse_in(&home, &ssh, text);
+
+        let build = host(&preview, "build.corp");
+        assert_eq!(build.user.as_deref(), Some("bob"));
+        assert_eq!(build.port, 2200);
+        // A line after the Include is back in the `Host *.corp` block.
+        assert_eq!(build.identity_file.as_deref(), Some("~/.ssh/corp_key"));
+
+        let other = host(&preview, "other");
+        assert_eq!(other.user, None);
+        assert_eq!(other.identity_file, None);
+        // `Host elsewhere` sits under `Host *.corp`, so it can never apply.
+        assert!(preview.hosts.iter().all(|h| h.alias != "elsewhere"));
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn include_loops_and_missing_files_do_not_fail_the_parse() {
+        let (home, ssh) = ssh_dir(&[
+            ("a", "Include b\nHost from-a\n User a\n"),
+            ("b", "Include a\nHost from-b\n User b\n"),
+        ]);
+        let preview = parse_in(&home, &ssh, "Include a\nInclude does-not-exist\n");
+        let aliases: Vec<&str> = preview.hosts.iter().map(|h| h.alias.as_str()).collect();
+        assert_eq!(aliases, ["from-b", "from-a"]);
+        assert!(preview.warnings.iter().any(|w| w.contains("loop")));
+        // A missing file is silently ignored, as OpenSSH does.
+        assert_eq!(preview.warnings.len(), 1, "{:?}", preview.warnings);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn include_paths_may_use_the_home_directory_or_be_absolute() {
+        let (home, ssh) = ssh_dir(&[("extra", "Host tilde\n User t\n")]);
+        let absolute = ssh.join("extra");
+        let text = format!("Include ~/.ssh/extra\nInclude {}\n", absolute.display());
+        let preview = parse_in(&home, &ssh, &text);
+        assert_eq!(host(&preview, "tilde").user.as_deref(), Some("t"));
+        // The second Include reads the same file again; that is not a loop.
+        assert!(preview.warnings.is_empty(), "{:?}", preview.warnings);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn an_include_inside_match_is_skipped() {
+        let (home, ssh) = ssh_dir(&[("m", "Host matched\n User m\n")]);
+        let preview = parse_in(&home, &ssh, "Match host x\n Include m\n");
+        assert!(preview.hosts.is_empty());
+        assert!(preview.warnings.iter().any(|w| w.contains("inside a Match")));
+        fs::remove_dir_all(home).unwrap();
     }
 }
