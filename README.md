@@ -129,7 +129,7 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 | Disks / mounts | ✅ | ✅ | ✅ (fixed drives) |
 | Logged-in users | ✅ `who` | ✅ `who` | ✅ `quser` (absent on Home editions) |
 | NVIDIA GPU (util · VRAM · power · temp · processes) | ✅ `nvidia-smi` | — | ✅ `nvidia-smi` |
-| AMD GPU | ✅ `rocm-smi` (full) | — | ◐ WDDM counters (util + VRAM) |
+| AMD GPU | ✅ `rocm-smi` or `amd-smi` (full) | — | ◐ WDDM counters (util + VRAM) |
 | Intel GPU | ◐ `xpu-smi` / `intel_gpu_top` | — | ◐ WDDM counters (util + VRAM) |
 | Apple GPU | — | ◐ util + memory (power/temp need root) | — |
 | CPU temperature | ✅ hwmon (`coretemp`/`k10temp`/`zenpower`) or `/sys/class/thermal` | — (needs root `powermetrics`) | ◐ ACPI thermal zone, firmware-dependent, **not the die** |
@@ -334,7 +334,7 @@ All metrics come from standard tools over SSH — nothing is installed on the se
 | Memory | `/proc/meminfo` | `sysctl hw.memsize`, `vm_stat`, `vm.swapusage` | `Win32_OperatingSystem`, `Win32_PageFileUsage` (CIM) |
 | Disk | `df -P -T -B1` | `df -P -k` + `mount` | `Win32_LogicalDisk` (fixed drives) |
 | Users | `who` | `who` | `quser` |
-| GPU | `nvidia-smi` (NVIDIA), `rocm-smi --json` (AMD/ROCm), `xpu-smi` / `intel_gpu_top` (Intel), plus `/sys/class/drm/card*/device` for uncovered adapters | `ioreg -c IOAccelerator` (Apple GPU utilization, no root needed) | `nvidia-smi` (NVIDIA, full metrics); WDDM GPU performance counters for AMD/Intel (utilization + VRAM) |
+| GPU | `nvidia-smi` (NVIDIA), `rocm-smi --json`, or `amd-smi --json` where rocm-smi is missing or fails (AMD/ROCm), `xpu-smi` / `intel_gpu_top` (Intel), plus `/sys/class/drm/card*/device` for uncovered adapters | `ioreg -c IOAccelerator` (Apple GPU utilization, no root needed) | `nvidia-smi` (NVIDIA, full metrics); WDDM GPU performance counters for AMD/Intel (utilization + VRAM) |
 | Temperature | `/sys/class/hwmon/hwmon*/{name,temp*_label,temp*_input,temp*_max,temp*_crit}` and `/sys/class/thermal/thermal_zone*/{type,temp}` | — (no unprivileged source) | `MSAcpi_ThermalZoneTemperature` in `root\WMI` (CPU zone), `MSFT_PhysicalDisk` + `GetReliabilityCounter` (drives) |
 | Top processes | `ps -eo … --sort=-%cpu` / `--sort=-rss` | `ps -Ao … -r` / `-m` | `Get-Process` (two-sample CPU delta) |
 | AI DASH | `ps -axo …`; provider metadata; Codex app-server quota lookup; optional AGY `/usage` PTY probe | same | `Win32_Process` + `Get-Process`; provider metadata, Codex account lookup, and optional AGY `/usage` ConPTY probe |
@@ -517,7 +517,7 @@ GpuTerm is free for personal and noncommercial use under [PolyForm Noncommercial
 | Pressing multiple keys shows `Terminal stream failed: transport read` | Re-download v1.1.3-beta: the refreshed installers remove the destructive SSH channel flush and serialize nonblocking input, PTY resize, and keepalive operations |
 | Master password is rejected or forgotten | Check the password, or choose **Reset vault**. Profiles are kept, but all saved SSH passwords are deleted and must be entered again |
 | Host key mismatch | Verify the server fingerprint out-of-band, then remove the stale entry from `known_hosts.json` |
-| GPU shows unavailable | Confirm a GPU tool is installed (`nvidia-smi`, `rocm-smi`, `xpu-smi`, or `intel_gpu_top`) or Linux `/sys/class/drm` is readable; other metrics still work regardless |
+| GPU shows unavailable | Confirm a GPU tool is installed (`nvidia-smi`, `rocm-smi`, `amd-smi`, `xpu-smi`, or `intel_gpu_top`) or Linux `/sys/class/drm` is readable; other metrics still work regardless |
 | Hybrid Windows PC only shows the dGPU | Update to the latest build. Idle Intel/AMD adapters are now retained from `Win32_VideoController` even when WDDM has not created a GPU Engine counter instance yet |
 | AI DASH card is empty | Confirm `agy`, `codex`, or `claude` is running under a user visible to the telemetry account. CPU/RAM appears from the process tree; AGY token/context metadata additionally needs `python3` or `python` on the monitored host |
 | Windows Claude setup succeeds but limits stay `n/a` | Run **Set up** again to replace the older `%USERPROFILE%` Python command, restart Claude Code, accept workspace trust, and send one message. Claude publishes subscription limits only after its first response |
@@ -538,7 +538,7 @@ GpuTerm is free for personal and noncommercial use under [PolyForm Noncommercial
 - Interrupted transfer resume is not implemented
 - `known_hosts.json` uses SHA-256 fingerprints, not the OpenSSH known_hosts format
 - Telemetry supports local and remote Linux, macOS (Apple Silicon included), and Windows hosts; Apple GPU power/temperature and per-core CPU usage need root `powermetrics` and are not shown
-- GPU monitoring uses `nvidia-smi`, `rocm-smi`, `xpu-smi`, `intel_gpu_top`, Linux DRM/sysfs, macOS `ioreg`, or Windows WDDM performance counters; DRM shared-memory GPUs may expose utilization without dedicated VRAM, power, or temperature
+- GPU monitoring uses `nvidia-smi`, `rocm-smi`, `amd-smi`, `xpu-smi`, `intel_gpu_top`, Linux DRM/sysfs, macOS `ioreg`, or Windows WDDM performance counters; DRM shared-memory GPUs may expose utilization without dedicated VRAM, power, or temperature
 - Agent CPU/RAM/process-tree totals are always available when the CLI process is visible to the monitoring user. AGY 1.0 token/context metadata needs Python 3 on the monitored host; AGY live quota/work state, Claude cost/subscriber limits, and provider-specific fields remain best effort because CLI log/status schemas vary. Unavailable fields show as n/a
 - Windows remotes: requires Windows PowerShell 5.1+ (preinstalled); load averages don't exist and show as n/a; AMD/Intel GPUs report utilization and dedicated VRAM only (no power/temperature, needs Windows 10 1709+ with a WDDM 2.x driver); process owners and GPU process command lines need elevation and fall back to n/a / process names; `quser` is missing on Home editions, so the Users section stays empty there; hybrid iGPU+dGPU hosts show both cards (counters are attributed by adapter LUID from the DirectX registry, idle adapters remain visible without an activity counter, and a positional heuristic is used if the key is unavailable)
 - Temperature availability differs sharply by platform. macOS shows none: `powermetrics` requires root and its `smc` sampler does not exist on Apple Silicon, and IOKit SMC sensors are not readable from a shell. Windows CPU temperature is an ACPI thermal zone — frequently a chassis sensor, unimplemented on many OEM firmwares, and never the die — so it is labelled as such and never colour-coded; Windows has no DIMM temperature interface at all. Linux DIMM labels are the SPD i2c address (`DIMM 0x18`), which does not identify the physical slot. `drivetemp` polls SMART and can keep spinning disks awake (`rmmod drivetemp` undoes it). Readings outside 1–150 °C are dropped as uninitialized-sensor artifacts, which also discards a genuine 0 °C

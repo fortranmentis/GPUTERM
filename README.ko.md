@@ -126,7 +126,7 @@
 | 디스크 / 마운트 | ✅ | ✅ | ✅ (고정 드라이브) |
 | 로그인 사용자 | ✅ `who` | ✅ `who` | ✅ `quser` (Home 에디션 제외) |
 | NVIDIA GPU (사용률·VRAM·전력·온도·프로세스) | ✅ `nvidia-smi` | — | ✅ `nvidia-smi` |
-| AMD GPU | ✅ `rocm-smi` (전체) | — | ◐ WDDM 카운터 (사용률 + VRAM) |
+| AMD GPU | ✅ `rocm-smi` 또는 `amd-smi` (전체) | — | ◐ WDDM 카운터 (사용률 + VRAM) |
 | Intel GPU | ◐ `xpu-smi` / `intel_gpu_top` | — | ◐ WDDM 카운터 (사용률 + VRAM) |
 | Apple GPU | — | ◐ 사용률 + 메모리 (전력·온도는 root 필요) | — |
 | CPU 온도 | ✅ hwmon(`coretemp`/`k10temp`/`zenpower`) 또는 `/sys/class/thermal` | — (root `powermetrics` 필요) | ◐ ACPI thermal zone, 펌웨어 의존, **다이 온도 아님** |
@@ -328,7 +328,7 @@ tmux 선택기는 선택 기능이며 서버에 아무것도 설치하지 않습
 | 메모리 | `/proc/meminfo` | `sysctl hw.memsize`, `vm_stat`, `vm.swapusage` | `Win32_OperatingSystem`, `Win32_PageFileUsage` (CIM) |
 | 디스크 | `df -P -T -B1` | `df -P -k` + `mount` | `Win32_LogicalDisk` (고정 드라이브) |
 | 사용자 | `who` | `who` | `quser` |
-| GPU | `nvidia-smi`(NVIDIA), `rocm-smi --json`(AMD/ROCm), `xpu-smi` / `intel_gpu_top`(Intel), 미수집 어댑터는 `/sys/class/drm/card*/device` | `ioreg -c IOAccelerator` (Apple GPU 사용률, root 불필요) | `nvidia-smi`(NVIDIA, 전체 지표); AMD/Intel은 WDDM GPU 성능 카운터(사용률 + VRAM) |
+| GPU | `nvidia-smi`(NVIDIA), `rocm-smi --json`, rocm-smi가 없거나 실패하면 `amd-smi --json`(AMD/ROCm), `xpu-smi` / `intel_gpu_top`(Intel), 미수집 어댑터는 `/sys/class/drm/card*/device` | `ioreg -c IOAccelerator` (Apple GPU 사용률, root 불필요) | `nvidia-smi`(NVIDIA, 전체 지표); AMD/Intel은 WDDM GPU 성능 카운터(사용률 + VRAM) |
 | 온도 | `/sys/class/hwmon/hwmon*/{name,temp*_label,temp*_input,temp*_max,temp*_crit}`, `/sys/class/thermal/thermal_zone*/{type,temp}` | — (권한 없이 읽을 수 있는 경로 없음) | `root\WMI`의 `MSAcpi_ThermalZoneTemperature`(CPU zone), `MSFT_PhysicalDisk` + `GetReliabilityCounter`(드라이브) |
 | 상위 프로세스 | `ps -eo … --sort=-%cpu` / `--sort=-rss` | `ps -Ao … -r` / `-m` | `Get-Process` (2회 샘플 CPU 델타) |
 | AI DASH | `ps -axo …`; 공급자 메타데이터; Codex 계정 한도 조회; 선택적 AGY `/usage` PTY 판독 | 동일 | `Win32_Process` + `Get-Process`; 공급자 메타데이터, Codex 계정 한도 조회, 선택적 AGY `/usage` ConPTY 판독 |
@@ -510,7 +510,7 @@ GpuTerm은 [PolyForm Noncommercial 1.0.0](./LICENSE)에 따라 개인·비상업
 | 여러 키를 누르면 `Terminal stream failed: transport read` 표시 | 갱신된 v1.1.3-beta를 다시 받으세요. 잘못된 SSH 채널 flush를 제거하고 비차단 입력·PTY 크기 조절·keepalive를 직렬화했습니다 |
 | 마스터 비밀번호가 틀렸거나 기억나지 않음 | 비밀번호를 확인하거나 **Reset vault**를 선택하세요. 프로필은 유지되지만 저장된 SSH 비밀번호는 모두 삭제되어 다시 입력해야 합니다 |
 | 호스트 키 불일치 | 다른 경로로 서버 지문을 검증한 뒤 `known_hosts.json`에서 이전 항목 제거 |
-| GPU가 '사용 불가'로 표시 | GPU 도구(`nvidia-smi`, `rocm-smi`, `xpu-smi`, `intel_gpu_top`) 설치 또는 Linux `/sys/class/drm` 읽기 권한 확인 — 다른 지표는 무관하게 정상 동작 |
+| GPU가 '사용 불가'로 표시 | GPU 도구(`nvidia-smi`, `rocm-smi`, `amd-smi`, `xpu-smi`, `intel_gpu_top`) 설치 또는 Linux `/sys/class/drm` 읽기 권한 확인 — 다른 지표는 무관하게 정상 동작 |
 | Windows 하이브리드 PC에서 외장 GPU만 표시 | 최신 빌드로 업데이트하세요. WDDM GPU Engine 카운터가 아직 없는 유휴 Intel/AMD 어댑터도 `Win32_VideoController` 탐색 결과에서 유지합니다 |
 | AI DASH 카드가 비어 있음 | 텔레메트리 계정에서 볼 수 있는 사용자로 `agy`, `codex`, `claude`가 실행 중인지 확인하세요. CPU/RAM은 프로세스 트리에서 표시되며 AGY 토큰/컨텍스트 메타데이터에는 모니터링 호스트의 `python3` 또는 `python`도 필요합니다 |
 | Windows에서 Claude 연동 설정 후에도 잔여량이 `n/a` | **연동 설정**을 다시 눌러 이전 `%USERPROFILE%` Python 명령을 교체하고 Claude Code를 재시작한 뒤 작업공간 신뢰를 허용하고 메시지를 한 번 보내세요. 구독 한도는 첫 응답 이후 제공됩니다 |
@@ -531,7 +531,7 @@ GpuTerm은 [PolyForm Noncommercial 1.0.0](./LICENSE)에 따라 개인·비상업
 - 중단된 전송 이어받기 미지원
 - `known_hosts.json`은 OpenSSH known_hosts 형식이 아닌 SHA-256 지문 JSON 사용
 - 텔레메트리는 로컬 및 원격 Linux·macOS(Apple Silicon 포함)·Windows를 지원; Apple GPU 전력·온도와 코어별 CPU 사용률은 root `powermetrics`가 필요해 미표시
-- GPU 모니터링은 `nvidia-smi`·`rocm-smi`·`xpu-smi`·`intel_gpu_top`·Linux DRM/sysfs·macOS `ioreg`·Windows WDDM 성능 카운터 사용; 공유 메모리 방식 GPU는 DRM에서 사용률만 제공하고 전용 VRAM·전력·온도는 n/a일 수 있음
+- GPU 모니터링은 `nvidia-smi`·`rocm-smi`·`amd-smi`·`xpu-smi`·`intel_gpu_top`·Linux DRM/sysfs·macOS `ioreg`·Windows WDDM 성능 카운터 사용; 공유 메모리 방식 GPU는 DRM에서 사용률만 제공하고 전용 VRAM·전력·온도는 n/a일 수 있음
 - CLI 프로세스가 모니터링 사용자에게 보이면 에이전트 CPU/RAM/프로세스 트리 합계는 항상 제공됩니다. AGY 1.0 토큰/컨텍스트 메타데이터에는 모니터링 호스트의 Python 3가 필요합니다. AGY 실시간 쿼터/작업 상태, Claude 비용·구독 한도 등 공급자별 필드는 CLI 버전별 로그/status 스키마 차이 때문에 가능한 범위에서 수집하며 없는 값은 n/a로 표시됩니다
 - Windows 원격: Windows PowerShell 5.1 이상 필요(기본 탑재); load average는 존재하지 않아 n/a로 표시; AMD/Intel GPU는 사용률·전용 VRAM만 제공(전력·온도 불가, Windows 10 1709+ 및 WDDM 2.x 드라이버 필요); 프로세스 소유자와 GPU 프로세스 커맨드라인은 관리자 권한이 필요해 n/a 또는 프로세스 이름으로 대체; Home 에디션에는 `quser`가 없어 사용자 섹션이 비어 있음; 내장+외장 하이브리드 호스트는 두 GPU 모두 표시(카운터는 DirectX 레지스트리의 어댑터 LUID로 정확히 매핑하며, 유휴 어댑터는 활동 카운터가 없어도 탐색 결과로 유지하고 해당 키가 없으면 위치 기반 휴리스틱으로 폴백)
 - 온도 가용성은 플랫폼별로 크게 다릅니다. macOS는 전혀 제공하지 않습니다 — `powermetrics`가 root를 요구하고 그 `smc` 샘플러는 Apple Silicon에 존재하지 않으며, IOKit SMC 센서는 셸에서 읽을 수 없습니다. Windows CPU 온도는 ACPI thermal zone으로 흔히 섀시 센서이고 상당수 OEM 펌웨어에는 구현되어 있지 않으며 다이 온도가 아니므로, 그대로 라벨링하고 색은 칠하지 않습니다. Windows에는 DIMM 온도 인터페이스가 아예 없습니다. Linux의 DIMM 라벨은 SPD i2c 주소(`DIMM 0x18`)여서 물리 슬롯을 알려주지 않습니다. `drivetemp`는 SMART를 폴링하므로 회전 디스크를 계속 깨워둘 수 있습니다(`rmmod drivetemp`로 해제). 1~150 °C를 벗어난 판독값은 미초기화 센서의 산출물로 보아 버리며, 그 결과 실제 0 °C 판독도 함께 버려집니다

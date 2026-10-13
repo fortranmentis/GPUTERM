@@ -1,5 +1,6 @@
-use crate::ssh::gpu_monitor::GPU_PROBE_COMMAND;
-use crate::ssh::gpu_monitor::{parse_gpu_probe, GpuMetric};
+use crate::ssh::gpu_monitor::{
+    amd_smi_process_command, parse_amd_smi_processes, GpuMetric, GpuProbe,
+};
 use crate::ssh::macos_monitor::{
     parse_kern_boottime, parse_macos_cpu_output, parse_swapusage, parse_vm_stat,
     MACOS_CPU_DETAIL_COMMAND, MACOS_MEMORY_DETAIL_COMMAND,
@@ -11,9 +12,9 @@ use crate::ssh::parse_util::{
 };
 use crate::ssh::session::{target_for_active_session, with_ops_session, AppState};
 use crate::ssh::system_monitor::{
-    calculate_cpu_usage, collect_gpu_metrics, collect_local_gpu_metrics, detect_remote_os,
-    local_os, run_local_command_for, run_remote_command, run_remote_command_for, RemoteOs,
-    WINDOWS_COMMAND_TIMEOUT_MS,
+    calculate_cpu_usage, collect_gpu_metrics, collect_local_gpu_metrics, detect_gpu_probe,
+    detect_remote_os, local_os, run_local_command_for, run_remote_command, run_remote_command_for,
+    run_remote_command_with_budget, RemoteOs, AMD_SMI_BUDGET_SECS, WINDOWS_COMMAND_TIMEOUT_MS,
 };
 use crate::ssh::windows_monitor::{
     parse_windows_cpu_info, parse_windows_cpu_times, parse_windows_gpu_counters,
@@ -184,6 +185,7 @@ pub async fn get_resource_details(
     let target = target_for_active_session(&state, &session_id)?;
     let ops = Arc::clone(&state.ops_sessions);
     let os_cache = Arc::clone(&state.remote_os_cache);
+    let probe_cache = Arc::clone(&state.gpu_probe_cache);
     tauri::async_runtime::spawn_blocking(move || {
         let mut details = ResourceDetails::default();
         let result = with_ops_session(&ops, &target, DETAIL_TIMEOUT_MS, |session| {
@@ -193,7 +195,19 @@ pub async fn get_resource_details(
                 // the Unix detail timeout.
                 session.set_timeout(WINDOWS_COMMAND_TIMEOUT_MS);
             }
-            collect_details(session, resource_type, os)
+            let mut probe = probe_cache
+                .lock()
+                .ok()
+                .and_then(|cache| cache.get(&target.session_id).cloned());
+            let result = collect_details(session, resource_type, os, &mut probe);
+            // Only a probe that found something is kept: a failed probe
+            // command would otherwise pin "no GPU" for the whole session.
+            if let (Some(probe), Ok(mut cache)) = (probe, probe_cache.lock()) {
+                if probe.any() {
+                    cache.insert(target.session_id.clone(), probe);
+                }
+            }
+            result
         });
         match result {
             Ok(ResourceDetailValue::Cpu(metric)) => details.cpu = Some(metric),
@@ -237,9 +251,22 @@ fn collect_local_details(resource_type: ResourceType) -> Result<ResourceDetailVa
                 .map(ResourceDetailValue::Memory)
         }
         (ResourceType::Gpu, _) => {
-            let mut probe = None;
-            collect_local_gpu_metrics(os, &mut probe)
-                .map(|metrics| metrics.into_iter().map(gpu_metric_to_detail).collect())
+            // The local machine's tools do not change while the app runs.
+            static LOCAL_GPU_PROBE: Mutex<Option<GpuProbe>> = Mutex::new(None);
+            let mut probe = LOCAL_GPU_PROBE.lock().ok().and_then(|cached| cached.clone());
+            let metrics = collect_local_gpu_metrics(os, &mut probe);
+            if let (Some(found), Ok(mut cached)) = (probe.as_ref(), LOCAL_GPU_PROBE.lock()) {
+                if found.any() {
+                    *cached = Some(found.clone());
+                }
+            }
+            let probe = probe.unwrap_or_default();
+            metrics
+                .map(|metrics| {
+                    gpu_details_with_amd_processes(metrics, &probe, |command| {
+                        run_local_command_for(os, command)
+                    })
+                })
                 .map(ResourceDetailValue::Gpu)
         }
     }
@@ -289,6 +316,7 @@ fn collect_details(
     session: &Session,
     resource_type: ResourceType,
     os: RemoteOs,
+    gpu_probe: &mut Option<GpuProbe>,
 ) -> Result<ResourceDetailValue, String> {
     match (resource_type, os) {
         (ResourceType::Cpu, RemoteOs::Linux) => run_remote_command(session, CPU_DETAIL_COMMAND)
@@ -319,24 +347,34 @@ fn collect_details(
                 .and_then(|output| parse_windows_memory_detail_output(&output))
                 .map(ResourceDetailValue::Memory)
         }
-        (ResourceType::Gpu, _) => collect_gpu_details(session, os).map(ResourceDetailValue::Gpu),
+        (ResourceType::Gpu, _) => {
+            collect_gpu_details(session, os, gpu_probe).map(ResourceDetailValue::Gpu)
+        }
     }
 }
 
-fn collect_gpu_details(session: &Session, os: RemoteOs) -> Result<Vec<GpuDetailMetric>, String> {
+fn collect_gpu_details(
+    session: &Session,
+    os: RemoteOs,
+    probe: &mut Option<GpuProbe>,
+) -> Result<Vec<GpuDetailMetric>, String> {
     if os == RemoteOs::Windows {
         return collect_windows_gpu_details(session);
     }
     // NVIDIA keeps its rich per-process detail path; AMD/Intel reuse the
     // telemetry collectors and map into the same shape with nulls for the
     // fields their tools do not expose.
-    let has_nvidia = run_remote_command(session, GPU_PROBE_COMMAND)
-        .map(|output| parse_gpu_probe(&output).nvidia)
-        .unwrap_or(true);
+    let has_nvidia = probe
+        .get_or_insert_with(|| detect_gpu_probe(session, os))
+        .nvidia;
     if !has_nvidia {
-        let mut probe = None;
-        let metrics = collect_gpu_metrics(session, os, &mut probe)?;
-        return Ok(metrics.into_iter().map(gpu_metric_to_detail).collect());
+        let metrics = collect_gpu_metrics(session, os, probe)?;
+        let probe = probe.as_ref().expect("probe is populated above");
+        return Ok(gpu_details_with_amd_processes(
+            metrics,
+            probe,
+            |command| run_remote_command_with_budget(session, command, AMD_SMI_BUDGET_SECS),
+        ));
     }
     let gpu_output = run_remote_command(session, GPU_DETAIL_QUERY)?;
     let process_output = run_remote_command(session, GPU_PROCESS_QUERY).unwrap_or_default();
@@ -361,8 +399,7 @@ fn collect_gpu_details(session: &Session, os: RemoteOs) -> Result<Vec<GpuDetailM
     // or AMD iGPU through another vendor tool/DRM sysfs. Keep NVIDIA's rich
     // process detail, then append every non-NVIDIA adapter so the popover
     // matches the compact telemetry cards.
-    let mut probe = None;
-    if let Ok(extra) = collect_gpu_metrics(session, os, &mut probe) {
+    if let Ok(extra) = collect_gpu_metrics(session, os, probe) {
         details.extend(
             extra
                 .into_iter()
@@ -652,6 +689,67 @@ fn parse_windows_memory_detail_output(output: &str) -> Result<MemoryDetailMetric
         usage_percent: base.usage_percent,
         top_processes,
     })
+}
+
+/// Maps telemetry metrics to details and, where amd-smi is installed, adds
+/// each AMD GPU's processes and PCI address. amd-smi numbers GPUs the way the
+/// AMD collectors index them, so a process's `gpu` matches an AMD metric's
+/// `index`.
+fn gpu_details_with_amd_processes(
+    metrics: Vec<GpuMetric>,
+    probe: &GpuProbe,
+    run: impl Fn(&str) -> Result<String, String>,
+) -> Vec<GpuDetailMetric> {
+    let amd_indexes: Vec<u32> = metrics
+        .iter()
+        .filter(|metric| metric.vendor == "amd")
+        .map(|metric| metric.index)
+        .collect();
+    let mut details: Vec<GpuDetailMetric> =
+        metrics.into_iter().map(gpu_metric_to_detail).collect();
+    if !probe.amd_smi || amd_indexes.is_empty() {
+        return details;
+    }
+
+    let processes = run(&amd_smi_process_command(probe))
+        .map(|output| parse_amd_smi_processes(&output))
+        .unwrap_or_default();
+    let identity = if processes.is_empty() {
+        HashMap::new()
+    } else {
+        let pids: Vec<String> = processes.iter().map(|process| process.pid.to_string()).collect();
+        run(&format!("ps -p {} -o pid=,user=,args= 2>/dev/null || true", pids.join(",")))
+            .map(|output| parse_ps_identity_output(&output))
+            .unwrap_or_default()
+    };
+    for detail in details
+        .iter_mut()
+        .filter(|detail| amd_indexes.contains(&detail.index))
+    {
+        if let Some(fixed) = probe.amd_smi_static.iter().find(|item| item.gpu == detail.index) {
+            detail.pci_bus_id = fixed.pci_bus_id.clone();
+        }
+        detail.processes = processes
+            .iter()
+            .filter(|process| process.gpu == detail.index)
+            .map(|process| {
+                let (user, command) = identity.get(&process.pid).cloned().unwrap_or_default();
+                GpuProcessMetric {
+                    gpu_index: Some(detail.index),
+                    gpu_uuid: Some(detail.uuid.clone()),
+                    pid: process.pid,
+                    user,
+                    process_name: process.name.clone(),
+                    command,
+                    used_memory_mi_b: process.vram_mi_b,
+                }
+            })
+            .collect();
+        detail
+            .processes
+            .sort_by_key(|process| std::cmp::Reverse(process.used_memory_mi_b));
+    }
+    details
 }
 
 fn gpu_metric_to_detail(metric: GpuMetric) -> GpuDetailMetric {

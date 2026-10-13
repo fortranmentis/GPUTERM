@@ -1,4 +1,4 @@
-use crate::ssh::parse_util::{parse_optional_f64, parse_optional_u64};
+use crate::ssh::parse_util::{parse_optional_f64, parse_optional_u64, split_sections};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -72,6 +72,12 @@ pub struct GpuProbe {
     /// path rather than by bare name.
     pub rocm_smi_path: Option<String>,
     pub amd_smi: bool,
+    /// Where amd-smi was found; like rocm-smi it often lives only in
+    /// /opt/rocm/bin.
+    pub amd_smi_path: Option<String>,
+    /// Names, UUIDs and limits from `amd-smi static`/`list`, read once with
+    /// the probe: they do not change while connected and the tool is slow.
+    pub amd_smi_static: Vec<AmdSmiStatic>,
     pub xpu_smi: bool,
     pub intel_gpu_top: bool,
     /// Linux DRM sysfs is the zero-install fallback used to enumerate GPUs
@@ -169,7 +175,10 @@ pub fn parse_gpu_probe(output: &str) -> GpuProbe {
                 // the first line is the one the host's PATH would pick.
                 probe.rocm_smi_path.get_or_insert_with(|| line.to_string());
             }
-            "amd-smi" => probe.amd_smi = true,
+            "amd-smi" => {
+                probe.amd_smi = true;
+                probe.amd_smi_path.get_or_insert_with(|| line.to_string());
+            }
             "xpu-smi" => probe.xpu_smi = true,
             "intel_gpu_top" => probe.intel_gpu_top = true,
             "drm-sysfs" => probe.linux_drm = true,
@@ -313,6 +322,8 @@ pub fn append_uncovered_linux_drm(metrics: &mut Vec<GpuMetric>, drm: Vec<GpuMetr
 fn number_from_value(value: &Value) -> Option<f64> {
     match value {
         Value::Number(number) => number.as_f64(),
+        // amd-smi 6.1+ wraps readings as {"value": 140, "unit": "W"}.
+        Value::Object(fields) => fields.get("value").and_then(number_from_value),
         Value::String(text) => {
             let trimmed = text.trim();
             // Strip a trailing unit token if present (e.g. "45.0 C", "35 W").
@@ -422,6 +433,272 @@ pub fn parse_rocm_smi_json(output: &str) -> Result<Vec<GpuMetric>, String> {
         return Err("AMD GPU metrics unavailable: no cards in rocm-smi output".to_string());
     }
     Ok(metrics)
+}
+
+// ---------------------------------------------------------------------------
+// amd-smi (ROCm 6.0+). Its JSON shape changed between releases: the root is a
+// list (6.0-6.2), a single object for one GPU, or {"gpu_data": [...]} (6.3+);
+// readings are bare numbers, "N/A", unit strings ("196592 MB"), or
+// {"value": .., "unit": ..} objects. Every reader below accepts all of them.
+// ---------------------------------------------------------------------------
+
+/// What `amd-smi static` and `amd-smi list` say about one GPU.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AmdSmiStatic {
+    pub gpu: u32,
+    pub name: Option<String>,
+    pub uuid: Option<String>,
+    pub driver_version: Option<String>,
+    pub pci_bus_id: Option<String>,
+    pub power_limit_w: Option<f64>,
+    pub vram_total_mi_b: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AmdSmiProcess {
+    pub gpu: u32,
+    pub pid: u32,
+    pub name: Option<String>,
+    pub vram_mi_b: Option<u64>,
+}
+
+fn amd_smi_path(probe: &GpuProbe) -> String {
+    crate::ssh::system_monitor::shell_quote(probe.amd_smi_path.as_deref().unwrap_or("amd-smi"))
+}
+
+/// Static facts and the GPU list, as `__AMDSMI_STATIC__`/`__AMDSMI_LIST__`
+/// sections. Each subcommand falls back to its flag-less form, which older
+/// releases accept when they reject a newer short flag.
+pub fn amd_smi_static_command(probe: &GpuProbe) -> String {
+    let tool = amd_smi_path(probe);
+    format!(
+        "printf '__AMDSMI_STATIC__\\n'; {tool} static -a -b -d -l -v --json 2>/dev/null || {tool} static --json 2>/dev/null; \
+         printf '\\n__AMDSMI_LIST__\\n'; {tool} list --json 2>/dev/null; true"
+    )
+}
+
+pub fn amd_smi_metric_command(probe: &GpuProbe) -> String {
+    let tool = amd_smi_path(probe);
+    format!("{tool} metric -u -p -t -m --json 2>/dev/null || {tool} metric --json 2>/dev/null")
+}
+
+pub fn amd_smi_process_command(probe: &GpuProbe) -> String {
+    let tool = amd_smi_path(probe);
+    format!("{tool} process --json 2>/dev/null || true")
+}
+
+/// The first JSON value in `output`, skipping any warning text amd-smi prints
+/// before it.
+fn leading_json(output: &str) -> Option<Value> {
+    let trimmed = output.trim();
+    if let Ok(value) = serde_json::from_str(trimmed) {
+        return Some(value);
+    }
+    let start = trimmed.find(['[', '{'])?;
+    serde_json::Deserializer::from_str(&trimmed[start..])
+        .into_iter::<Value>()
+        .next()?
+        .ok()
+}
+
+fn amd_entries(root: &Value) -> Vec<&Value> {
+    match root {
+        Value::Array(items) => items.iter().collect(),
+        Value::Object(fields) => match fields.get("gpu_data") {
+            Some(Value::Array(items)) => items.iter().collect(),
+            _ if fields.contains_key("gpu") => vec![root],
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
+fn amd_gpu_index(entry: &Value) -> Option<u32> {
+    match entry.get("gpu")? {
+        Value::Number(number) => number.as_u64().map(|index| index as u32),
+        Value::String(text) => text.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+fn path<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a Value> {
+    keys.iter().try_fold(value, |current, key| current.get(key))
+}
+
+/// The first of several key paths that holds a number.
+fn first_number(entry: &Value, paths: &[&[&str]]) -> Option<f64> {
+    paths
+        .iter()
+        .find_map(|keys| path(entry, keys).and_then(number_from_value))
+}
+
+fn amd_text(value: Option<&Value>) -> Option<String> {
+    let text = value?.as_str()?.trim();
+    (!text.is_empty() && !text.eq_ignore_ascii_case("N/A")).then(|| text.to_string())
+}
+
+/// A memory amount in MiB. `default_unit` applies to a bare number, whose
+/// unit amd-smi leaves implicit (MB for VRAM sizes, bytes for processes).
+/// amd-smi's "MB" means MiB, as in the rest of ROCm.
+fn to_mib(value: &Value, default_unit: &str) -> Option<u64> {
+    let (amount, unit) = match value {
+        Value::Object(fields) => (
+            fields.get("value").and_then(number_from_value)?,
+            fields
+                .get("unit")
+                .and_then(Value::as_str)
+                .unwrap_or(default_unit)
+                .to_string(),
+        ),
+        Value::String(text) => {
+            let amount = number_from_value(value)?;
+            let unit = text
+                .trim()
+                .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '-' || c == '+')
+                .trim()
+                .to_string();
+            (amount, if unit.is_empty() { default_unit.to_string() } else { unit })
+        }
+        other => (number_from_value(other)?, default_unit.to_string()),
+    };
+    let factor = match unit.to_ascii_uppercase().as_str() {
+        "B" => 1.0 / BYTES_PER_MIB,
+        "KB" | "KIB" => 1.0 / 1024.0,
+        "MB" | "MIB" => 1.0,
+        "GB" | "GIB" => 1024.0,
+        _ => return None,
+    };
+    Some((amount * factor).round() as u64)
+}
+
+/// Reads the `__AMDSMI_STATIC__`/`__AMDSMI_LIST__` sections.
+pub fn parse_amd_smi_static(output: &str) -> Vec<AmdSmiStatic> {
+    let sections = split_sections(output);
+    let mut by_gpu: std::collections::BTreeMap<u32, AmdSmiStatic> = Default::default();
+    if let Some(root) = sections.get("AMDSMI_STATIC").and_then(|text| leading_json(text)) {
+        for entry in amd_entries(&root) {
+            let Some(gpu) = amd_gpu_index(entry) else { continue };
+            let item = by_gpu.entry(gpu).or_insert_with(|| AmdSmiStatic { gpu, ..Default::default() });
+            item.name = amd_text(path(entry, &["asic", "market_name"]))
+                .or_else(|| amd_text(path(entry, &["board", "product_name"])));
+            item.uuid = amd_text(path(entry, &["asic", "asic_serial"]))
+                .filter(|serial| !matches!(serial.as_str(), "0x0" | "0" | "0x0000000000000000"));
+            item.driver_version = amd_text(path(entry, &["driver", "version"]));
+            item.pci_bus_id = amd_text(path(entry, &["bus", "bdf"]));
+            item.power_limit_w = first_number(
+                entry,
+                &[&["limit", "max_power"], &["limit", "socket_power"], &["limit", "ppt0", "max_power_limit"]],
+            );
+            item.vram_total_mi_b = path(entry, &["vram", "size"]).and_then(|value| to_mib(value, "MB"));
+        }
+    }
+    if let Some(root) = sections.get("AMDSMI_LIST").and_then(|text| leading_json(text)) {
+        for entry in amd_entries(&root) {
+            let Some(gpu) = amd_gpu_index(entry) else { continue };
+            let item = by_gpu.entry(gpu).or_insert_with(|| AmdSmiStatic { gpu, ..Default::default() });
+            // `list` has the real UUID; the ASIC serial is only a stand-in.
+            if let Some(uuid) = amd_text(entry.get("uuid")) {
+                item.uuid = Some(uuid);
+            }
+            if item.pci_bus_id.is_none() {
+                item.pci_bus_id = amd_text(entry.get("bdf"));
+            }
+        }
+    }
+    by_gpu.into_values().collect()
+}
+
+/// Parses `amd-smi metric --json` (usage, power, temperature, memory),
+/// filling names, UUIDs and limits from `statics`.
+pub fn parse_amd_smi_metric(
+    output: &str,
+    statics: &[AmdSmiStatic],
+) -> Result<Vec<GpuMetric>, String> {
+    let root = leading_json(output)
+        .ok_or_else(|| "AMD GPU metrics unavailable: amd-smi printed no JSON".to_string())?;
+    let mut gpus = Vec::new();
+    for entry in amd_entries(&root) {
+        let Some(index) = amd_gpu_index(entry) else { continue };
+        let fixed = statics.iter().find(|item| item.gpu == index);
+        let memory = |key: &str| path(entry, &["mem_usage", key]).and_then(|value| to_mib(value, "MB"));
+        let memory_total_mi_b = memory("total_vram").or(fixed.and_then(|item| item.vram_total_mi_b));
+        let memory_used_mi_b = memory("used_vram");
+        let memory_free_mi_b = memory("free_vram").or(match (memory_total_mi_b, memory_used_mi_b) {
+            (Some(total), Some(used)) => Some(total.saturating_sub(used)),
+            _ => None,
+        });
+        gpus.push(GpuMetric {
+            index,
+            name: fixed
+                .and_then(|item| item.name.clone())
+                .unwrap_or_else(|| "AMD GPU".to_string()),
+            // Same fallback as rocm-smi, so a host switching tools keeps ids.
+            uuid: fixed
+                .and_then(|item| item.uuid.clone())
+                .unwrap_or_else(|| format!("amd-{}", index)),
+            vendor: "amd".to_string(),
+            driver_version: fixed
+                .and_then(|item| item.driver_version.clone())
+                .unwrap_or_default(),
+            power_draw_w: first_number(
+                entry,
+                &[
+                    &["power", "socket_power"],
+                    &["power", "average_socket_power"],
+                    &["power", "current_socket_power"],
+                ],
+            ),
+            power_limit_w: fixed.and_then(|item| item.power_limit_w),
+            temperature_c: first_number(
+                entry,
+                &[&["temperature", "edge"], &["temperature", "hotspot"], &["temperature", "junction"]],
+            ),
+            gpu_util_percent: first_number(entry, &[&["usage", "gfx_activity"], &["usage", "gfx_usage"]]),
+            mem_util_percent: first_number(entry, &[&["usage", "umc_activity"], &["usage", "mem_usage"]]),
+            memory_total_mi_b,
+            memory_used_mi_b,
+            memory_free_mi_b,
+        });
+    }
+    if gpus.is_empty() {
+        return Err("AMD GPU metrics unavailable: no GPUs in amd-smi output".to_string());
+    }
+    Ok(gpus)
+}
+
+/// Parses `amd-smi process --json`. With nothing running, some releases put
+/// a message string where the process object would be; those are skipped.
+pub fn parse_amd_smi_processes(output: &str) -> Vec<AmdSmiProcess> {
+    let Some(root) = leading_json(output) else {
+        return Vec::new();
+    };
+    let mut processes = Vec::new();
+    for entry in amd_entries(&root) {
+        let Some(gpu) = amd_gpu_index(entry) else { continue };
+        let Some(list) = entry.get("process_list").and_then(Value::as_array) else {
+            continue;
+        };
+        for item in list {
+            let info = item.get("process_info").unwrap_or(item);
+            if !info.is_object() {
+                continue;
+            }
+            let Some(pid) = info.get("pid").and_then(number_from_value) else {
+                continue;
+            };
+            let vram_mi_b = path(info, &["memory_usage", "vram_mem"])
+                .or_else(|| path(info, &["mem_usage", "vram_mem"]))
+                .or_else(|| info.get("vram_mem"))
+                .and_then(|value| to_mib(value, "B"));
+            processes.push(AmdSmiProcess {
+                gpu,
+                pid: pid as u32,
+                name: amd_text(info.get("name")),
+                vram_mi_b,
+            });
+        }
+    }
+    processes
 }
 
 pub const XPU_DISCOVERY_COMMAND: &str = "xpu-smi discovery -j 2>/dev/null || true";
@@ -649,6 +926,143 @@ pub fn parse_intel_gpu_top_stream(output: &str, index: u32) -> Result<GpuMetric,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probe_records_where_amd_smi_was_found() {
+        let probe = parse_gpu_probe("Linux\n/opt/rocm/bin/amd-smi\n");
+        assert!(probe.amd_smi);
+        assert_eq!(probe.amd_smi_path.as_deref(), Some("/opt/rocm/bin/amd-smi"));
+        let command = amd_smi_metric_command(&probe);
+        assert!(command.starts_with("'/opt/rocm/bin/amd-smi' metric"), "{command}");
+    }
+
+    /// amd-smi 6.0-6.2: a list, readings as plain numbers, memory in MB.
+    const AMD_SMI_METRIC_ROCM60: &str = r#"[
+      {"gpu": 0,
+       "usage": {"gfx_activity": 37, "umc_activity": 12, "mm_activity": "N/A"},
+       "power": {"socket_power": 212, "gfx_voltage": "N/A"},
+       "temperature": {"edge": 51, "hotspot": 63, "mem": 55},
+       "mem_usage": {"total_vram": 196592, "used_vram": 1024, "free_vram": 195568}}
+    ]"#;
+
+    /// amd-smi 6.3+/7.x: {"gpu_data": [...]} with {"value","unit"} readings.
+    const AMD_SMI_METRIC_ROCM63: &str = r#"WARNING: User is missing the following required groups: render
+{"gpu_data": [
+  {"gpu": 1,
+   "usage": {"gfx_activity": {"value": 88, "unit": "%"}, "umc_activity": {"value": 40, "unit": "%"}},
+   "power": {"socket_power": {"value": 640, "unit": "W"}},
+   "temperature": {"edge": "N/A", "hotspot": {"value": 74, "unit": "C"}},
+   "mem_usage": {"total_vram": {"value": 192, "unit": "GB"}, "used_vram": {"value": 2147483648, "unit": "B"}}}
+]}"#;
+
+    const AMD_SMI_STATIC: &str = r#"__AMDSMI_STATIC__
+[{"gpu": 0,
+  "asic": {"market_name": "AMD Instinct MI300X", "asic_serial": "0xA1B2C3"},
+  "bus": {"bdf": "0000:0c:00.0"},
+  "driver": {"name": "amdgpu", "version": "6.7.0"},
+  "limit": {"max_power": {"value": 750, "unit": "W"}},
+  "vram": {"type": "HBM3", "size": {"value": 196592, "unit": "MB"}}},
+ {"gpu": 1, "asic": {"market_name": "N/A", "asic_serial": "0x0"}, "board": {"product_name": "Radeon PRO W7900"}}]
+
+__AMDSMI_LIST__
+[{"gpu": 0, "bdf": "0000:0c:00.0", "uuid": "a1ff74a1-0000-1000-80c1-7b2c3d4e5f60"}]
+"#;
+
+    #[test]
+    fn amd_smi_static_supplies_names_ids_and_limits() {
+        let statics = parse_amd_smi_static(AMD_SMI_STATIC);
+        assert_eq!(statics.len(), 2);
+        let first = &statics[0];
+        assert_eq!(first.name.as_deref(), Some("AMD Instinct MI300X"));
+        // `list`'s UUID wins over the ASIC serial.
+        assert_eq!(first.uuid.as_deref(), Some("a1ff74a1-0000-1000-80c1-7b2c3d4e5f60"));
+        assert_eq!(first.driver_version.as_deref(), Some("6.7.0"));
+        assert_eq!(first.pci_bus_id.as_deref(), Some("0000:0c:00.0"));
+        assert_eq!(first.power_limit_w, Some(750.0));
+        assert_eq!(first.vram_total_mi_b, Some(196_592));
+        // "N/A" and a zero serial are treated as missing.
+        assert_eq!(statics[1].name.as_deref(), Some("Radeon PRO W7900"));
+        assert_eq!(statics[1].uuid, None);
+    }
+
+    #[test]
+    fn parses_amd_smi_metric_with_plain_numbers() {
+        let statics = parse_amd_smi_static(AMD_SMI_STATIC);
+        let gpus = parse_amd_smi_metric(AMD_SMI_METRIC_ROCM60, &statics).unwrap();
+        assert_eq!(gpus.len(), 1);
+        let gpu = &gpus[0];
+        assert_eq!(gpu.vendor, "amd");
+        assert_eq!(gpu.name, "AMD Instinct MI300X");
+        assert_eq!(gpu.uuid, "a1ff74a1-0000-1000-80c1-7b2c3d4e5f60");
+        assert_eq!(gpu.driver_version, "6.7.0");
+        assert_eq!(gpu.gpu_util_percent, Some(37.0));
+        assert_eq!(gpu.mem_util_percent, Some(12.0));
+        assert_eq!(gpu.power_draw_w, Some(212.0));
+        assert_eq!(gpu.power_limit_w, Some(750.0));
+        assert_eq!(gpu.temperature_c, Some(51.0));
+        assert_eq!(gpu.memory_total_mi_b, Some(196_592));
+        assert_eq!(gpu.memory_used_mi_b, Some(1_024));
+        assert_eq!(gpu.memory_free_mi_b, Some(195_568));
+    }
+
+    #[test]
+    fn parses_amd_smi_metric_value_objects_units_and_warning_text() {
+        let gpus = parse_amd_smi_metric(AMD_SMI_METRIC_ROCM63, &[]).unwrap();
+        let gpu = &gpus[0];
+        assert_eq!(gpu.index, 1);
+        assert_eq!(gpu.name, "AMD GPU");
+        // No static data: same fallback id as rocm-smi.
+        assert_eq!(gpu.uuid, "amd-1");
+        assert_eq!(gpu.gpu_util_percent, Some(88.0));
+        assert_eq!(gpu.power_draw_w, Some(640.0));
+        // Edge is N/A, so the hotspot reading is used.
+        assert_eq!(gpu.temperature_c, Some(74.0));
+        assert_eq!(gpu.memory_total_mi_b, Some(192 * 1024));
+        assert_eq!(gpu.memory_used_mi_b, Some(2_048));
+        assert_eq!(gpu.memory_free_mi_b, Some(192 * 1024 - 2_048));
+    }
+
+    #[test]
+    fn parses_a_single_gpu_object_and_rejects_empty_output() {
+        let single = r#"{"gpu": "0", "usage": {"gfx_activity": "5 %"}, "mem_usage": {"total_vram": "8192 MB"}}"#;
+        let gpus = parse_amd_smi_metric(single, &[]).unwrap();
+        assert_eq!(gpus[0].index, 0);
+        assert_eq!(gpus[0].gpu_util_percent, Some(5.0));
+        assert_eq!(gpus[0].memory_total_mi_b, Some(8_192));
+        assert!(parse_amd_smi_metric("", &[]).is_err());
+        assert!(parse_amd_smi_metric("[]", &[]).is_err());
+    }
+
+    #[test]
+    fn parses_amd_smi_processes_in_both_layouts() {
+        let output = r#"[
+          {"gpu": 0, "process_list": [
+            {"process_info": {"name": "python3", "pid": 4242,
+              "memory_usage": {"vram_mem": {"value": 3221225472, "unit": "B"}}}},
+            {"process_info": "No running processes detected"}
+          ]},
+          {"gpu": 1, "process_list": [{"name": "llama-server", "pid": 77, "vram_mem": 1048576}]}
+        ]"#;
+        let processes = parse_amd_smi_processes(output);
+        assert_eq!(
+            processes,
+            vec![
+                AmdSmiProcess {
+                    gpu: 0,
+                    pid: 4242,
+                    name: Some("python3".into()),
+                    vram_mi_b: Some(3_072),
+                },
+                AmdSmiProcess {
+                    gpu: 1,
+                    pid: 77,
+                    name: Some("llama-server".into()),
+                    vram_mi_b: Some(1),
+                },
+            ]
+        );
+        assert!(parse_amd_smi_processes("not json").is_empty());
+    }
 
     #[test]
     fn probe_matches_tool_basenames() {

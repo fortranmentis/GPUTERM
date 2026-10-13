@@ -2,6 +2,7 @@ use crate::ssh::agent_monitor::{self, AgentMetric, AgentMonitorState, AgentQuota
 use crate::ssh::thermal_monitor::{self, ThermalMetric, ThermalProbe};
 use crate::ssh::gpu_monitor::{
     append_uncovered_linux_drm, parse_gpu_probe, parse_intel_gpu_top_stream, parse_linux_drm_gpus,
+    amd_smi_metric_command, amd_smi_static_command, parse_amd_smi_metric, parse_amd_smi_static,
     parse_nvidia_smi_csv, parse_rocm_smi_json, parse_xpu_discovery, parse_xpu_stats,
     xpu_stats_command, GpuMetric, GpuProbe, GPU_PROBE_COMMAND, INTEL_GPU_TOP_COMMAND,
     LINUX_DRM_GPU_COMMAND, NVIDIA_SMI_QUERY, XPU_DISCOVERY_COMMAND,
@@ -823,8 +824,42 @@ fn collect_local_windows_telemetry(
     }
 }
 
-const AMD_SMI_ONLY_ERROR: &str =
-    "AMD GPU metrics unavailable: only amd-smi is installed, and GpuTerm reads rocm-smi (amd-smi is not supported yet)";
+/// rocm-smi is tried first where it exists; amd-smi covers hosts that only
+/// ship the newer tool, and rocm-smi installs that fail or report no cards.
+/// Both failing reports both reasons.
+fn collect_amd_metrics(
+    probe: &GpuProbe,
+    run: impl Fn(&str) -> Result<String, String>,
+    metrics: &mut Vec<GpuMetric>,
+    errors: &mut Vec<String>,
+) {
+    let rocm_error = if probe.rocm_smi {
+        match run(&rocm_smi_command(probe)).and_then(|output| parse_rocm_smi_json(&output)) {
+            Ok(mut found) => {
+                metrics.append(&mut found);
+                return;
+            }
+            Err(error) => Some(error),
+        }
+    } else {
+        None
+    };
+    if probe.amd_smi {
+        match run(&amd_smi_metric_command(probe))
+            .and_then(|output| parse_amd_smi_metric(&output, &probe.amd_smi_static))
+        {
+            Ok(found) => {
+                metrics.extend(found);
+                return;
+            }
+            Err(error) => errors.push(error),
+        }
+    }
+    errors.extend(rocm_error);
+}
+
+/// Seconds allowed for one amd-smi or rocm-smi call over SSH.
+pub(crate) const AMD_SMI_BUDGET_SECS: u64 = 8;
 
 /// Runs rocm-smi by the path the probe found it at: ROCm installs it under
 /// /opt/rocm/bin, which is often missing from a non-interactive PATH.
@@ -843,25 +878,45 @@ pub(crate) fn collect_gpu_metrics(
     probe: &mut Option<GpuProbe>,
 ) -> Result<Vec<GpuMetric>, String> {
     if probe.is_none() {
-        let detected = if os == RemoteOs::Windows {
-            run_remote_command_for(session, os, windows_monitor::WINDOWS_GPU_PROBE_COMMAND)
-                .map(|output| windows_monitor::parse_windows_gpu_probe(&output))
-                .unwrap_or_default()
-        } else {
-            let mut detected = run_remote_command(session, GPU_PROBE_COMMAND)
-                .map(|output| parse_gpu_probe(&output))
-                .unwrap_or_default();
-            if detected.xpu_smi {
-                detected.xpu_devices = run_remote_command(session, XPU_DISCOVERY_COMMAND)
-                    .map(|output| parse_xpu_discovery(&output))
-                    .unwrap_or_default();
-            }
-            detected
-        };
-        *probe = Some(detected);
+        *probe = Some(detect_gpu_probe(session, os));
     }
     let probe = probe.as_ref().expect("probe is populated above");
+    collect_gpu_metrics_with(session, os, probe)
+}
 
+/// Finds the GPU tools on a host. Callers cache the result per connection.
+pub(crate) fn detect_gpu_probe(session: &Session, os: RemoteOs) -> GpuProbe {
+    if os == RemoteOs::Windows {
+        return run_remote_command_for(session, os, windows_monitor::WINDOWS_GPU_PROBE_COMMAND)
+            .map(|output| windows_monitor::parse_windows_gpu_probe(&output))
+            .unwrap_or_default();
+    }
+    let mut detected = run_remote_command(session, GPU_PROBE_COMMAND)
+        .map(|output| parse_gpu_probe(&output))
+        .unwrap_or_default();
+    if detected.xpu_smi {
+        detected.xpu_devices = run_remote_command(session, XPU_DISCOVERY_COMMAND)
+            .map(|output| parse_xpu_discovery(&output))
+            .unwrap_or_default();
+    }
+    if detected.amd_smi {
+        // amd-smi is a Python tool that can take seconds to start.
+        detected.amd_smi_static = run_remote_command_with_budget(
+            session,
+            &amd_smi_static_command(&detected),
+            AMD_SMI_BUDGET_SECS,
+        )
+        .map(|output| parse_amd_smi_static(&output))
+        .unwrap_or_default();
+    }
+    detected
+}
+
+fn collect_gpu_metrics_with(
+    session: &Session,
+    os: RemoteOs,
+    probe: &GpuProbe,
+) -> Result<Vec<GpuMetric>, String> {
     if !probe.any() {
         return Err(
             "No GPU monitoring source found (nvidia-smi / rocm-smi / amd-smi / xpu-smi / intel_gpu_top / macOS ioreg / Windows GPU counters)"
@@ -893,18 +948,12 @@ pub(crate) fn collect_gpu_metrics(
             Err(error) => errors.push(error),
         }
     }
-    // rocm-smi is the stable AMD target; amd-smi's JSON schema is still in flux.
-    if probe.rocm_smi {
-        let command = rocm_smi_command(probe);
-        match run_remote_command(session, &command).and_then(|output| parse_rocm_smi_json(&output)) {
-            Ok(mut found) => metrics.append(&mut found),
-            Err(error) => errors.push(error),
-        }
-    } else if probe.amd_smi {
-        // Without this, an amd-smi-only host (newer ROCm) would report an
-        // empty GPU list as success.
-        errors.push(AMD_SMI_ONLY_ERROR.to_string());
-    }
+    collect_amd_metrics(
+        probe,
+        |command| run_remote_command_with_budget(session, command, AMD_SMI_BUDGET_SECS),
+        &mut metrics,
+        &mut errors,
+    );
     if probe.xpu_smi && !probe.xpu_devices.is_empty() {
         let command = xpu_stats_command(&probe.xpu_devices);
         match run_remote_command(session, &command) {
@@ -966,6 +1015,11 @@ pub(crate) fn collect_local_gpu_metrics(
                     .map(|output| parse_xpu_discovery(&output))
                     .unwrap_or_default();
             }
+            if detected.amd_smi {
+                detected.amd_smi_static = run_local_command_for(os, &amd_smi_static_command(&detected))
+                    .map(|output| parse_amd_smi_static(&output))
+                    .unwrap_or_default();
+            }
             detected
         };
         *probe = Some(detected);
@@ -996,15 +1050,12 @@ pub(crate) fn collect_local_gpu_metrics(
             Err(error) => errors.push(error),
         }
     }
-    if probe.rocm_smi {
-        let command = rocm_smi_command(probe);
-        match run_local_command_for(os, &command).and_then(|output| parse_rocm_smi_json(&output)) {
-            Ok(mut found) => metrics.append(&mut found),
-            Err(error) => errors.push(error),
-        }
-    } else if probe.amd_smi {
-        errors.push(AMD_SMI_ONLY_ERROR.to_string());
-    }
+    collect_amd_metrics(
+        probe,
+        |command| run_local_command_for(os, command),
+        &mut metrics,
+        &mut errors,
+    );
     if probe.xpu_smi && !probe.xpu_devices.is_empty() {
         match run_local_command_for(os, &xpu_stats_command(&probe.xpu_devices)) {
             Ok(output) => {
@@ -1699,7 +1750,7 @@ fn non_zero_exit_error(stderr: &str, exit_status: i32) -> String {
     }
 }
 
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
@@ -1952,6 +2003,63 @@ fn timestamp() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn amd_metrics_fall_back_from_rocm_smi_to_amd_smi() {
+        let amd_smi_json = r#"[{"gpu": 0, "usage": {"gfx_activity": 9}}]"#;
+        let probe = |rocm_smi: bool, amd_smi: bool| GpuProbe {
+            rocm_smi,
+            amd_smi,
+            ..GpuProbe::default()
+        };
+        let run = |rocm_output: &'static str| {
+            move |command: &str| -> Result<String, String> {
+                if command.contains("rocm-smi") {
+                    Ok(rocm_output.to_string())
+                } else {
+                    Ok(amd_smi_json.to_string())
+                }
+            }
+        };
+
+        // Only amd-smi installed: it is used.
+        let (mut metrics, mut errors) = (Vec::new(), Vec::new());
+        collect_amd_metrics(&probe(false, true), run("{}"), &mut metrics, &mut errors);
+        assert_eq!(metrics.len(), 1);
+        assert_eq!(metrics[0].gpu_util_percent, Some(9.0));
+        assert!(errors.is_empty());
+
+        // rocm-smi reports no cards: amd-smi covers it, and no error remains.
+        let (mut metrics, mut errors) = (Vec::new(), Vec::new());
+        collect_amd_metrics(&probe(true, true), run("{}"), &mut metrics, &mut errors);
+        assert_eq!(metrics.len(), 1);
+        assert!(errors.is_empty(), "{errors:?}");
+
+        // rocm-smi works: amd-smi is not run.
+        let rocm = r#"{"card0": {"GPU use (%)": "50", "Card series": "MI100"}}"#;
+        let (mut metrics, mut errors) = (Vec::new(), Vec::new());
+        collect_amd_metrics(
+            &probe(true, true),
+            |command: &str| {
+                assert!(command.contains("rocm-smi"), "amd-smi ran: {command}");
+                Ok(rocm.to_string())
+            },
+            &mut metrics,
+            &mut errors,
+        );
+        assert_eq!(metrics[0].gpu_util_percent, Some(50.0));
+
+        // Both fail: both reasons are reported.
+        let (mut metrics, mut errors) = (Vec::new(), Vec::new());
+        collect_amd_metrics(
+            &probe(true, true),
+            |_: &str| Ok(String::new()),
+            &mut metrics,
+            &mut errors,
+        );
+        assert!(metrics.is_empty());
+        assert_eq!(errors.len(), 2, "{errors:?}");
+    }
+
     #[test]
     fn saved_telemetry_settings_fill_gaps_and_are_sanitized() {
         // A partial object keeps the defaults for what it leaves out.

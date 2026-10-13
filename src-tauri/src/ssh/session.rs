@@ -64,6 +64,10 @@ pub struct AppState {
     /// Remote OS per session, detected once by the detail path so popover
     /// ticks skip the probe round-trips; cleared alongside the ops session.
     pub remote_os_cache: Arc<Mutex<HashMap<String, RemoteOs>>>,
+    /// GPU tools per session for the detail path, so a refresh does not
+    /// re-probe (and re-run the slow `amd-smi static`); cleared with
+    /// `remote_os_cache`.
+    pub gpu_probe_cache: Arc<Mutex<HashMap<String, crate::ssh::gpu_monitor::GpuProbe>>>,
     /// Provider names queued by the UI for an immediate account-quota refresh.
     pub agent_quota_refreshes: AgentQuotaRefreshes,
     /// In-memory AGY quota history keyed by monitored host/account identity.
