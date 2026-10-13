@@ -59,7 +59,7 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 - **Saved command snippets** — keep global or host-scoped commands in the terminal toolbar; multiline snippets use bracketed paste when the shell advertises it
 - **Terminal appearance and shortcuts** — choose among five themes, desktop monospace fonts, and an 8–28 px saved font size; the settings popover lists platform-safe split, pane, search, clear, and zoom shortcuts
 - **Disconnect is visible and recoverable** — a pane whose shell or channel ends shows the reason the backend reported and a **Reconnect** button instead of silently refusing input
-- **Automatic recovery after sleep or network loss** — unexpected disconnects retry with bounded backoff when the machine comes online, the window regains focus, or a suspended heartbeat resumes; authentication and host-key failures stop for review. An idle connection is asked for a reply every 15 s and right after the computer wakes, so a dead link is noticed in about 20 s rather than when TCP gives up
+- **Automatic recovery after sleep or network loss** — unexpected disconnects retry with bounded backoff when the machine comes online, the window regains focus, or a suspended heartbeat resumes; authentication and host-key failures stop for review. An idle connection is asked for a reply after 15 s and right after the computer wakes; responsive-probe servers allow up to 8 s for a reply, with a keepalive fallback for servers that do not answer probes
 - MOTD and early output are buffered and replayed, never lost to connection races
 - Serialized burst input plus a fully nonblocking SSH/TCP transport keeps simultaneous keys, modifier chords, and key repeat responsive without racing the terminal reader
 - Terminal writes avoid libssh2's incoming-data flush path, while writes, remote PTY resize, and SSH keepalive retry nonblocking operations without packet interleaving
@@ -132,7 +132,7 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 | Disks / mounts | ✅ | ✅ | ✅ (fixed drives) |
 | Logged-in users | ✅ `who` | ✅ `who` | ✅ `quser` (absent on Home editions) |
 | NVIDIA GPU (util · VRAM · power · temp · processes) | ✅ `nvidia-smi` | — | ✅ `nvidia-smi` |
-| AMD GPU | ✅ `rocm-smi` or `amd-smi` (full) | — | ◐ WDDM counters (util + VRAM) |
+| AMD GPU | ✅ `rocm-smi` or `amd-smi` (util · VRAM · power · temp · processes, where exposed) | — | ◐ WDDM counters (util + VRAM) |
 | Intel GPU | ◐ `xpu-smi` / `intel_gpu_top` | — | ◐ WDDM counters (util + VRAM) |
 | Apple GPU | — | ◐ util + memory (power/temp need root) | — |
 | CPU temperature | ✅ hwmon (`coretemp`/`k10temp`/`zenpower`) or `/sys/class/thermal` | — (needs root `powermetrics`) | ◐ ACPI thermal zone, firmware-dependent, **not the die** |
@@ -537,6 +537,9 @@ GpuTerm is free for personal and noncommercial use under [PolyForm Noncommercial
 
 ## Roadmap / Known limitations
 
+- `amd-smi` JSON support is covered by fixtures for several layouts; real AMD hardware validation remains pending. Missing fields stay unavailable, and fan speed/clock are not collected.
+- Reply-based SSH liveness checks run after 15 seconds of inactivity and allow 8 seconds for a reply (roughly 23 seconds total). Servers that do not answer the initial probe fall back to keepalives/TCP detection; the detection time is therefore not a guarantee for every server. Live OTP and disconnect detection tests remain pending.
+- Process termination rechecks the process start marker immediately before signalling and uses the current account's permissions. This reduces PID-reuse risk but does not make the check and signal atomic. OS notifications depend on installation and system notification settings; an in-app alert remains available when delivery fails.
 - A host that asks for a one-time code at every sign-in can only be used by connections you start: background monitoring, SFTP, port forwards, and LLM tunnels open their own connections and cannot ask for a code, so they report that instead of retrying
 - Usage history and alert state are kept in memory per session and reset when a session reconnects or the app restarts; alert thresholds are the same for every host
 - Interrupted transfer resume is not implemented

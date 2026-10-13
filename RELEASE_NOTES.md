@@ -1,39 +1,39 @@
-# GpuTerm 1.3.3-beta
+# GpuTerm 1.3.4-beta
 
 ## Highlights
 
-- **SSH workflows brought into the desktop app.** Preview and selectively import `~/.ssh/config`, including identity files, ProxyJump chains, and forwarding rules. Saved profiles can now own local (`-L`), remote (`-R`), and SOCKS5 dynamic (`-D`) forwards with live state and traffic counters.
-- **A more personal and productive terminal.** Save global or host-scoped command snippets, choose from five terminal themes and desktop fonts, adjust the persistent font size, and use platform-safe shortcuts for splitting, navigating, searching, clearing, and zooming panes.
-- **Complete SFTP directory operations.** Rename or drag remote items between folders, upload and download planned directory trees with aggregate progress, and choose Replace, Keep existing, or Skip when folders collide.
-- **Five additional LLM adapters.** Monitor SGLang, Hugging Face TGI, llama.cpp, generic OpenAI-compatible servers, and NVIDIA Triton alongside Ollama and vLLM, directly or through an SSH tunnel.
-- **Recovery without hiding security decisions.** Unexpected terminal loss after sleep or a network change retries with bounded backoff, while authentication failures and changed host keys stop for explicit review.
+- **Resource history across the desktop.** CPU, memory/swap, fullest-disk usage and per-GPU utilization, VRAM, temperature and power are retained in memory for one hour in 5-second buckets. Detached resource and LLM charts switch between 15 minutes and one hour.
+- **Threshold alerts and desktop notifications.** The monitoring bar's bell opens GPU temperature/VRAM, idle-GPU, memory, disk and LLM-critical rules. Sustain times, hysteresis and cooldowns prevent brief spikes or repeated alerts; notification delivery falls back to in-app messages.
+- **Process controls with identity checks.** CPU, memory and GPU process tables offer graceful termination and optional force termination. GpuTerm rechecks the process start marker immediately before signalling and uses the current account's permissions without sudo.
+- **Keyboard-interactive / OTP sign-in.** User-started SSH connections show questions in a dialog, including separate questions for each ProxyJump hop. One-time codes are not stored as passwords; background connections report when user interaction is required.
+- **Profile editing and persistent monitoring settings.** Edit saved profiles with the pencil button and keep monitoring interval, display mode and ignored filesystem types across restarts.
+- **Broader AMD and SSH config support.** Use the probed `amd-smi` path when `rocm-smi` is unavailable or fails, and follow bounded, loop-safe `Include` files/globs in OpenSSH config import.
 
 ## Fixes
 
-- Run AMD ROCm telemetry through the exact probed `rocm-smi` path and report hosts that expose only `amd-smi` instead of silently issuing an unavailable command.
-- Accept bracketed IPv6 literals and try every resolved address with a timeout rather than failing after the first address.
-- Show the previous and replacement SHA-256 fingerprints when a known host key changes; serialize known-host/profile writes so concurrent updates cannot overwrite one another.
-- Refuse to delete profiles still used by ProxyJump or LLM tunnels, and tear down their terminals, forwards, monitoring connections, and in-memory credentials before removing the UI entry.
-- Upload to a unique remote `.gputerm-part` path and rename only after completion, preserving the old destination on cancellation or failure and retaining a recoverable complete part if finalization cannot succeed.
-- Catch otherwise fatal React render errors in both the main and detached detail windows and offer a window reload action.
-- Keep imported identities, forwarded addresses, SFTP paths, and runtime failures platform-safe across Windows, macOS, Linux, IPv4, and IPv6.
+- Preserve the currently viewed local/remote SFTP folder when queued transfers complete, and keep canceled transfers canceled instead of showing them as errors.
+- Report failed LLM refreshes, synchronize detached LLM windows when instances change, and prevent delayed forwarding status replies from overwriting another profile's state.
+- Serialize the complete retry sequence for SSH channel opens so concurrent SOCKS/tunnel requests cannot receive each other's destination channels; back off idle forwarding loops rather than polling every 5 ms.
+- Probe idle SSH links for a server reply and probe after wake; retain a keepalive fallback for servers that never answer the initial probe.
+- Save the password entered on New → Save into the encrypted vault before writing the profile; keep the long profile form's title visible.
+- Keep 15m/1h chart controls from collapsing the chart grid and keep alert checkboxes at their intended size.
 
 ## Validation
 
-- Frontend: all **213 Vitest tests** pass across 28 files, including new ErrorBoundary, forwarding, SSH config import, auto-reconnect, host-key prompt, terminal appearance/shortcut, snippet, SFTP, and runtime coverage.
-- Backend: **350 Rust tests pass** with 2 environment-dependent tests ignored. New coverage exercises ROCm path discovery, IPv6 formatting, changed-key errors, dependency-safe deletion, remote part paths, directory planning, snippets, SSH config chains, all forwarding modes, the five new runtime adapters, and reconnect credential restoration.
-- Static/build checks: TypeScript type checking and the Vite production build succeed; ESLint reports 0 errors and 14 existing React Hook warnings; Clippy passes with warnings denied across all targets; the newly added Rust modules pass rustfmt; and `git diff --check` passes.
-- GitHub-hosted Windows, Ubuntu, and macOS runners build a native NSIS `.exe`, Debian `.deb`, Apple Silicon `.dmg`, and `SHA256SUMS.txt`.
-- The macOS job signs every nested Mach-O and code container inside-out, applies a final deep ad-hoc signature to `GpuTerm.app`, verifies it with `codesign --deep --strict`, creates the DMG only from that verified bundle, mounts it, and verifies the enclosed app again before upload.
+- **264 frontend tests pass** across 36 files, covering SFTP folder preservation/cancellation, profile editing, forwarding status races, detached LLM changes, history charts, alerts and authentication/process dialogs.
+- **407 Rust tests pass**, with 2 environment-dependent tests ignored. Coverage includes AMD JSON layouts, SSH config Includes, probe outcomes, channel-open/idle behavior, vault-first profile saves, history bucketing/retention, alert transitions, OTP prompt classification and process identity/signalling scripts.
+- TypeScript checking and the Vite production build pass. ESLint reports 0 errors and 14 existing React Hook warnings. Clippy passes across all targets/features with warnings denied; `git diff --check` passes.
+- GitHub Actions builds native Windows NSIS `.exe`, Debian `.deb`, Apple Silicon `.dmg`, and publishes `SHA256SUMS.txt` from the installer assets. Windows-specific local telemetry and Claude status-line tests run on the Windows build host.
+- The macOS job signs nested Mach-O files and code containers inside-out, applies the final deep ad-hoc signature, verifies with `codesign --verify --deep --strict`, then creates and mounts the DMG and verifies its enclosed app before upload.
 
 ## Notes
 
-- Port forwarding follows SSH semantics. Binding a port below 1024 may still require operating-system privileges, and a remote forward can be rejected by the server's SSH policy.
-- Recursive SFTP transfer skips symbolic links, limits a plan to 100,000 entries and depth 64, and leaves a fully uploaded `.gputerm-part` path visible when the server cannot finalize an overwrite safely.
-- Generic OpenAI-compatible monitoring is limited to the shared `/v1/models` surface. Other adapters display only metrics their installed server version actually publishes; unavailable values remain unsupported rather than becoming zero.
-- Automatic reconnect never revives a deliberate disconnect and stops on authentication or host-key errors. Saved credentials still require the local encrypted vault to be unlocked.
-- No credential-vault or known-host migration is required from 1.3.2-beta. Existing session files load with no forwarding rules until rules are added; snippets are stored separately in `snippets.json`.
-- This is a beta prerelease. The Windows installer is not signed by a trusted publisher. The macOS bundle is fully ad-hoc signed for integrity but is not Developer ID signed or notarized, so SmartScreen or Gatekeeper may still require a one-time confirmation.
-- The macOS installer is Apple Silicon (`aarch64`) only. Intel Mac users can build from source.
+- Live SSH OTP and dead-link detection remain unverified against an actual test server. The reply probe starts after 15 seconds of inactivity and waits up to 8 seconds (approximately 23 seconds total); initial probe timeout falls back to keepalives/TCP detection, so detection timing depends on server behavior.
+- `amd-smi metric/static/process --json` support is fixture-tested; real AMD server output is still needed for hardware validation. JSON layouts vary by ROCm version, unavailable fields remain unavailable, and fan speed/clock are not collected.
+- macOS process signalling was exercised by the feature author using a real `sleep` process, including mismatched identity and permission refusal; this release verification ran the automated suite. Windows/Linux process controls remain unit-tested. Rechecking the marker reduces PID-reuse risk but does not make checking and signalling atomic.
+- OTP-required hosts cannot always serve background telemetry, SFTP, forwarding or LLM tunnels because those create separate connections without a dialog. Reconnect stops when user interaction is required instead of guessing codes.
+- OS notification delivery requires a suitable installed build and system permission/settings. In-app messages remain available when system delivery fails. Resource history/alert state is session-scoped and resets on reconnect/restart; thresholds are global and history is never written to disk.
+- Existing profiles and encrypted credentials remain compatible with 1.3.3-beta. Newly persisted monitoring/alert settings use defaults when fields are absent; the existing encrypted vault must be unlocked to save a password.
+- This is a beta prerelease. Windows is not signed by a trusted publisher. macOS is fully ad-hoc signed for integrity, but not Developer ID signed or notarized. The DMG is Apple Silicon (`aarch64`) only; Intel Mac users can build from source.
 
-**Full changelog:** https://github.com/fortranmentis/GPUTERM/compare/v1.3.2-beta...v1.3.3-beta
+**Full changelog:** https://github.com/fortranmentis/GPUTERM/compare/v1.3.3-beta...v1.3.4-beta
