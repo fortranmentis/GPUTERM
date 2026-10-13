@@ -357,13 +357,19 @@ pub fn start(
                     &mut thermal_probe,
                     &mut agent_state,
                 );
-                consecutive_total_failures = if telemetry_all_failed(&telemetry) {
+                let all_failed = telemetry_all_failed(&telemetry);
+                consecutive_total_failures = if all_failed {
                     consecutive_total_failures + 1
                 } else {
                     0
                 };
                 emit_telemetry(&app, telemetry);
-                if consecutive_total_failures >= MAX_TOTAL_FAILURES {
+                // One cycle where everything failed may be a busy host; ask
+                // the server for a reply before waiting out a second cycle of
+                // command timeouts.
+                let transport_dead = all_failed
+                    && !crate::ssh::session::connection_answers(&connection, Duration::from_secs(5));
+                if transport_dead || consecutive_total_failures >= MAX_TOTAL_FAILURES {
                     // Every section failed repeatedly — the transport is
                     // likely dead. Drop the session and reconnect.
                     break;

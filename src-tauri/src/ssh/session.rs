@@ -405,15 +405,10 @@ pub fn with_ops_session<T>(
         if let Ok(connection) = entry.lock() {
             connection.session.set_timeout(timeout_ms);
             // Cheap liveness probe before running a possibly non-idempotent
-            // operation: opening a channel round-trips to the server. A dead
-            // tunnel also fails here, so it is replaced below.
-            let alive = match connection.session.channel_session() {
-                Ok(mut channel) => {
-                    let _ = channel.close();
-                    true
-                }
-                Err(_) => false,
-            };
+            // operation: it needs a reply from the server, so a dead tunnel
+            // fails here and is replaced below.
+            let alive =
+                connection_answers(&connection, Duration::from_millis(timeout_ms.into()));
             if alive {
                 return f(&connection.session);
             }
@@ -730,6 +725,7 @@ pub fn open_ssh_session(target: &SshTarget) -> Result<SshConnection, String> {
                         .unwrap_or_else(|| "all resolved addresses failed".to_string())
                 )
             })?;
+            enable_tcp_keepalive(&tcp);
             (tcp, None)
         }
         Some(proxy) => open_tunneled_stream(target, proxy)?,
@@ -998,6 +994,9 @@ const LIBSSH2_ERROR_EAGAIN: i32 = -37;
 /// forward for that host.
 const MAX_FORWARD_CONNECTIONS: usize = 4;
 
+/// How long a forwarder waits for the server to answer a liveness probe.
+pub(crate) const HOP_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// Consecutive channel-open failures before a forwarder gives up.
 ///
 /// A backstop for the case where the transport still answers a keepalive but
@@ -1009,16 +1008,154 @@ pub(crate) fn is_would_block(error: &ssh2::Error) -> bool {
     matches!(error.code(), ssh2::ErrorCode::Session(code) if code == LIBSSH2_ERROR_EAGAIN)
 }
 
-/// Whether the SSH transport is still usable.
-///
-/// `keepalive_send` is the cheapest thing that actually touches the socket. On a
-/// nonblocking session it can report `EAGAIN`, which means the write is pending
-/// rather than impossible, so that counts as alive.
-pub(crate) fn session_alive(session: &Session) -> bool {
-    match session.keepalive_send() {
-        Ok(_) => true,
-        Err(error) => is_would_block(&error),
+/// Lets the OS notice a vanished peer on its own: an SSH keepalive only
+/// queues bytes, which on a half-open connection can sit unacknowledged until
+/// TCP's default retry limit (many minutes) runs out. Best effort — a
+/// platform that refuses an option keeps its defaults. A jump-host tunnel's
+/// loopback socket is not covered; its bastion connection is.
+fn enable_tcp_keepalive(tcp: &TcpStream) {
+    let socket = socket2::SockRef::from(tcp);
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(30))
+        .with_interval(Duration::from_secs(10));
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    let keepalive = keepalive.with_retries(3);
+    let _ = socket.set_tcp_keepalive(&keepalive);
+    // Also bounds how long sent data may stay unacknowledged.
+    #[cfg(target_os = "linux")]
+    let _ = socket.set_tcp_user_timeout(Some(Duration::from_secs(60)));
+}
+
+/// libssh2's `LIBSSH2_ERROR_CHANNEL_FAILURE`: the server refused to open a
+/// channel — which, for the probe below, is the expected answer.
+const LIBSSH2_ERROR_CHANNEL_FAILURE: i32 = -21;
+/// `LIBSSH2_ERROR_CHANNEL_REQUEST_DENIED`, also an answer from the server.
+const LIBSSH2_ERROR_CHANNEL_REQUEST_DENIED: i32 = -22;
+/// A channel type no server implements. RFC 4254 requires the server to
+/// answer an open of an unknown type with `SSH_MSG_CHANNEL_OPEN_FAILURE`, so
+/// asking for one is a request that always gets a reply, costs the server
+/// nothing, and does not count against `MaxSessions`.
+const PROBE_CHANNEL_TYPE: &str = "ping@gputerm";
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ProbeOutcome {
+    Alive,
+    /// The request is still in flight (nonblocking session).
+    Pending,
+    Dead(String),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ProbeFailure {
+    /// Nothing came back within the time allowed.
+    NoReply,
+    /// The transport itself failed.
+    Transport(String),
+}
+
+impl std::fmt::Display for ProbeFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProbeFailure::NoReply => write!(f, "the server stopped responding"),
+            ProbeFailure::Transport(error) => write!(f, "{}", error),
+        }
     }
+}
+
+/// What one attempt at the probe channel open says about the connection.
+pub(crate) fn classify_probe(result: Result<(), &ssh2::Error>) -> ProbeOutcome {
+    let Err(error) = result else {
+        // A server that actually opened the channel answered all the same.
+        return ProbeOutcome::Alive;
+    };
+    match error.code() {
+        ssh2::ErrorCode::Session(code)
+            if code == LIBSSH2_ERROR_CHANNEL_FAILURE
+                || code == LIBSSH2_ERROR_CHANNEL_REQUEST_DENIED =>
+        {
+            ProbeOutcome::Alive
+        }
+        ssh2::ErrorCode::Session(code) if code == LIBSSH2_ERROR_EAGAIN => ProbeOutcome::Pending,
+        _ => ProbeOutcome::Dead(error.to_string()),
+    }
+}
+
+/// Checks that the server still answers, by asking it to open a channel type
+/// it does not know and waiting for the refusal. Unlike `session_alive`, which
+/// only queues a keepalive, this needs a reply, so a half-open connection
+/// fails within `timeout`.
+///
+/// `lock` serializes the probe with other users of the session: a channel
+/// open must not interleave with another (see `SshConnection::open_lock`) or
+/// with a partially sent packet. With `release_while_waiting`, the lock is
+/// dropped once the request is fully sent, so a terminal can keep sending
+/// keystrokes while the reply is awaited; only safe when nothing else opens
+/// channels on the session.
+pub(crate) fn probe_reply<G>(
+    session: &Session,
+    timeout: Duration,
+    release_while_waiting: bool,
+    mut lock: impl FnMut() -> Result<G, String>,
+) -> Result<(), ProbeFailure> {
+    let blocking = session.is_blocking();
+    let previous_timeout = session.timeout();
+    if blocking {
+        session.set_timeout(timeout.as_millis().clamp(1, u32::MAX as u128) as u32);
+    }
+    let deadline = Instant::now() + timeout;
+    let mut wait = Duration::from_millis(2);
+    let mut guard = None;
+    let result = loop {
+        if guard.is_none() {
+            guard = Some(lock().map_err(ProbeFailure::Transport)?);
+        }
+        let attempt = session.channel_open(PROBE_CHANNEL_TYPE, 0x20_0000, 0x8000, None);
+        let outcome = match &attempt {
+            Ok(_) => classify_probe(Ok(())),
+            Err(error) => classify_probe(Err(error)),
+        };
+        if let Ok(mut channel) = attempt {
+            let _ = channel.close();
+        }
+        match outcome {
+            ProbeOutcome::Alive => break Ok(()),
+            ProbeOutcome::Dead(_) if blocking && Instant::now() >= deadline => {
+                // A blocking session reports the expired timeout as an error.
+                break Err(ProbeFailure::NoReply);
+            }
+            ProbeOutcome::Dead(error) => break Err(ProbeFailure::Transport(error)),
+            ProbeOutcome::Pending => {
+                if Instant::now() >= deadline {
+                    break Err(ProbeFailure::NoReply);
+                }
+                let request_sent = !matches!(
+                    session.block_directions(),
+                    ssh2::BlockDirections::Outbound | ssh2::BlockDirections::Both
+                );
+                if release_while_waiting && request_sent {
+                    guard = None;
+                }
+                thread::sleep(wait);
+                wait = (wait * 2).min(Duration::from_millis(50));
+            }
+        }
+    };
+    if blocking {
+        session.set_timeout(previous_timeout);
+    }
+    result
+}
+
+/// `probe_reply` for a connection that may host several channel opens at
+/// once (forwarding, ops): holds the connection's open lock throughout.
+pub(crate) fn connection_answers(connection: &SshConnection, timeout: Duration) -> bool {
+    probe_reply(&connection.session, timeout, false, || {
+        Ok(connection
+            .open_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()))
+    })
+    .is_ok()
 }
 
 /// Opens a direct-tcpip channel on a **nonblocking** session.
@@ -1289,7 +1426,7 @@ fn run_persistent_forward(
                     // serve anything again. Without distinguishing them a dead
                     // hop leaves the accept loop running, the port bound, and
                     // the caller polling a tunnel that will always fail.
-                    if !session_alive(&connection.session) {
+                    if !connection_answers(&connection, HOP_PROBE_TIMEOUT) {
                         hop_dead.store(true, Ordering::SeqCst);
                         break;
                     }
@@ -1933,6 +2070,32 @@ mod tests {
             private_key_path: None,
             proxy_jump_id: proxy.map(str::to_string),
             forwards: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_refused_probe_channel_means_the_server_answered() {
+        let error = |code: i32| ssh2::Error::new(ssh2::ErrorCode::Session(code), "test");
+        assert_eq!(classify_probe(Ok(())), ProbeOutcome::Alive);
+        assert_eq!(
+            classify_probe(Err(&error(LIBSSH2_ERROR_CHANNEL_FAILURE))),
+            ProbeOutcome::Alive
+        );
+        assert_eq!(
+            classify_probe(Err(&error(LIBSSH2_ERROR_CHANNEL_REQUEST_DENIED))),
+            ProbeOutcome::Alive
+        );
+        assert_eq!(
+            classify_probe(Err(&error(LIBSSH2_ERROR_EAGAIN))),
+            ProbeOutcome::Pending
+        );
+        // Socket send/receive failures and a disconnect mean the transport
+        // is gone.
+        for code in [-7, -43, -13] {
+            assert!(matches!(
+                classify_probe(Err(&error(code))),
+                ProbeOutcome::Dead(_)
+            ));
         }
     }
 

@@ -1,5 +1,5 @@
 use crate::ssh::credentials::CredentialStore;
-use crate::ssh::session::{open_ssh_session, SshConnection};
+use crate::ssh::session::{open_ssh_session, probe_reply, ProbeFailure, SshConnection};
 use crate::ssh::session::{
     profile_from_request, target_for_active_session, target_from_request, upsert_profile,
     ActiveConnection, AppState, OpsSessions, SessionConnectRequest, SshTarget, TerminalSessionInfo,
@@ -614,6 +614,9 @@ fn start_remote_terminal_reader(
         let mut last_keepalive = Instant::now();
         let mut wake_check = SleepDetector::new();
         let mut probe_now = false;
+        let mut liveness = LivenessMode::Uncalibrated;
+        let mut last_received = Instant::now();
+        let mut last_probe = Instant::now();
 
         while !stop.load(Ordering::SeqCst) {
             if wake_check.woke_from_sleep() {
@@ -641,6 +644,7 @@ fn start_remote_terminal_reader(
             let idle = match read_result {
                 Ok(bytes_read) if bytes_read > 0 => {
                     idle_sleep = MIN_IDLE_SLEEP;
+                    last_received = Instant::now();
                     let data = drain_utf8_stream(&mut pending, &buffer[..bytes_read]);
                     if !data.is_empty() {
                         let _ = app.emit(
@@ -667,7 +671,46 @@ fn start_remote_terminal_reader(
                 }
             };
 
-            if idle {
+            if idle && liveness != LivenessMode::KeepaliveOnly {
+                let due = liveness == LivenessMode::Uncalibrated
+                    || probe_now
+                    || (last_received.elapsed() >= PROBE_AFTER_IDLE
+                        && last_probe.elapsed() >= PROBE_AFTER_IDLE);
+                if due {
+                    probe_now = false;
+                    let timeout = if liveness == LivenessMode::Uncalibrated {
+                        CALIBRATION_PROBE_TIMEOUT
+                    } else {
+                        PROBE_TIMEOUT
+                    };
+                    // The channel mutex keeps input and resizes from
+                    // interleaving with the probe's packet; it is released
+                    // once that packet is sent, so typing is not held up
+                    // while the reply is awaited.
+                    let outcome = probe_reply(&session, timeout, true, || {
+                        channel
+                            .lock()
+                            .map_err(|_| "Terminal channel is unavailable".to_string())
+                    });
+                    last_probe = Instant::now();
+                    match (outcome, liveness) {
+                        (Ok(()), _) => liveness = LivenessMode::ReplyProbe,
+                        // Freshly connected and silent: this server does not
+                        // answer the probe (RFC 4254 says it must). Fall back
+                        // to keepalives rather than disconnecting it.
+                        (Err(ProbeFailure::NoReply), LivenessMode::Uncalibrated) => {
+                            liveness = LivenessMode::KeepaliveOnly;
+                        }
+                        (Err(failure), _) => {
+                            close_message = Some(format!("SSH connection lost: {}", failure));
+                            connection_lost = true;
+                            break;
+                        }
+                    }
+                }
+                thread::sleep(idle_sleep);
+                idle_sleep = (idle_sleep * 2).min(MAX_IDLE_SLEEP);
+            } else if idle {
                 if probe_now
                     || last_keepalive.elapsed() >= Duration::from_secs(KEEPALIVE_INTERVAL_SECS.into())
                 {
@@ -724,6 +767,25 @@ fn start_remote_terminal_reader(
         );
     });
 }
+
+/// How the reader checks that an idle connection is still there.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LivenessMode {
+    /// Not yet known whether the server answers the reply probe.
+    Uncalibrated,
+    /// The server answers: a missing reply means the connection is gone.
+    ReplyProbe,
+    /// The server never answered; only send keepalives, as before.
+    KeepaliveOnly,
+}
+
+/// Idle time after which the reader asks the server for a reply.
+const PROBE_AFTER_IDLE: Duration = Duration::from_secs(15);
+/// How long the server has to answer once the connection is known to answer.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
+/// The first probe, right after connecting, waits longer before concluding
+/// the server does not answer probes at all.
+const CALIBRATION_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Notices that the computer slept: the monotonic clock pauses during sleep
 /// on macOS and Linux while the wall clock keeps going.

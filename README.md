@@ -59,7 +59,7 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 - **Saved command snippets** — keep global or host-scoped commands in the terminal toolbar; multiline snippets use bracketed paste when the shell advertises it
 - **Terminal appearance and shortcuts** — choose among five themes, desktop monospace fonts, and an 8–28 px saved font size; the settings popover lists platform-safe split, pane, search, clear, and zoom shortcuts
 - **Disconnect is visible and recoverable** — a pane whose shell or channel ends shows the reason the backend reported and a **Reconnect** button instead of silently refusing input
-- **Automatic recovery after sleep or network loss** — unexpected disconnects retry with bounded backoff when the machine comes online, the window regains focus, or a suspended heartbeat resumes; authentication and host-key failures stop for review
+- **Automatic recovery after sleep or network loss** — unexpected disconnects retry with bounded backoff when the machine comes online, the window regains focus, or a suspended heartbeat resumes; authentication and host-key failures stop for review. An idle connection is asked for a reply every 15 s and right after the computer wakes, so a dead link is noticed in about 20 s rather than when TCP gives up
 - MOTD and early output are buffered and replayed, never lost to connection races
 - Serialized burst input plus a fully nonblocking SSH/TCP transport keeps simultaneous keys, modifier chords, and key repeat responsive without racing the terminal reader
 - Terminal writes avoid libssh2's incoming-data flush path, while writes, remote PTY resize, and SSH keepalive retry nonblocking operations without packet interleaving

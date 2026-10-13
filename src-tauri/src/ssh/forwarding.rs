@@ -20,8 +20,8 @@ use uuid::Uuid;
 
 use super::session::{
     is_would_block, list_profiles, open_direct_channel, open_forwarding_session,
-    pump_channel_socket, session_alive, target_for_active_session, try_reserve_slot, AppState,
-    CountGuard, IdleBackoff, SshConnection, SshTarget,
+    connection_answers, pump_channel_socket, target_for_active_session, try_reserve_slot,
+    AppState, CountGuard, IdleBackoff, SshConnection, SshTarget, HOP_PROBE_TIMEOUT,
 };
 
 /// Simultaneous connections per forward. A browser opens several per page; a
@@ -240,7 +240,7 @@ fn connection_for(
 ) -> Result<Arc<SshConnection>, String> {
     if let Ok(sets) = manager.sets.lock() {
         if let Some(set) = sets.get(&target.session_id) {
-            if session_alive(&set.connection.session) {
+            if connection_answers(&set.connection, HOP_PROBE_TIMEOUT) {
                 return Ok(Arc::clone(&set.connection));
             }
         }
@@ -546,7 +546,7 @@ fn run_listener(context: &RuleContext) -> Result<(), String> {
                 // connects, leaving the rule looking "listening".
                 if last_liveness_check.elapsed() >= IDLE_LIVENESS_INTERVAL {
                     last_liveness_check = Instant::now();
-                    if !session_alive(&context.connection.session) {
+                    if !connection_answers(&context.connection, HOP_PROBE_TIMEOUT) {
                         return Err("The SSH connection was lost".to_string());
                     }
                 }
@@ -587,7 +587,7 @@ fn run_listener(context: &RuleContext) -> Result<(), String> {
             Ok(channel) => context.pump(slot, channel, socket),
             Err(error) => {
                 drop(socket);
-                if !session_alive(&context.connection.session) {
+                if !connection_answers(&context.connection, HOP_PROBE_TIMEOUT) {
                     return Err("The SSH connection was lost".to_string());
                 }
                 // Per connection: the destination refused or is down.
@@ -669,7 +669,7 @@ fn run_remote(context: &RuleContext) -> Result<(), String> {
                 idle.sleep();
                 if last_liveness_check.elapsed() >= IDLE_LIVENESS_INTERVAL {
                     last_liveness_check = Instant::now();
-                    if !session_alive(&context.connection.session) {
+                    if !connection_answers(&context.connection, HOP_PROBE_TIMEOUT) {
                         return Err("The SSH connection was lost".to_string());
                     }
                 }
