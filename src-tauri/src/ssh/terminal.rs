@@ -62,6 +62,7 @@ struct TerminalReaderState {
     ops_sessions: OpsSessions,
     remote_os_cache: Arc<Mutex<HashMap<String, system_monitor::RemoteOs>>>,
     gpu_probe_cache: Arc<Mutex<HashMap<String, crate::ssh::gpu_monitor::GpuProbe>>>,
+    telemetry_history: Arc<crate::ssh::telemetry_history::TelemetryHistory>,
 }
 
 impl TerminalReaderState {
@@ -74,6 +75,7 @@ impl TerminalReaderState {
             ops_sessions: Arc::clone(&state.ops_sessions),
             remote_os_cache: Arc::clone(&state.remote_os_cache),
             gpu_probe_cache: Arc::clone(&state.gpu_probe_cache),
+            telemetry_history: Arc::clone(&state.telemetry_history),
         }
     }
 }
@@ -907,6 +909,7 @@ fn finish_terminal_reader(
         if let Ok(mut cache) = reader_state.gpu_probe_cache.lock() {
             cache.remove(&session_id);
         }
+        reader_state.telemetry_history.remove(&session_id);
     }
     let _ = app.emit(
         "terminal-closed",
@@ -987,6 +990,7 @@ fn stop_existing_session(state: &AppState, session_id: &str) {
     if let Ok(mut cache) = state.gpu_probe_cache.lock() {
         cache.remove(session_id);
     }
+    state.telemetry_history.remove(session_id);
     if let Ok(mut refreshes) = state.agent_quota_refreshes.lock() {
         refreshes.remove(session_id);
     }

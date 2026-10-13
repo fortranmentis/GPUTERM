@@ -11,6 +11,7 @@ import { GpuDetailContent } from "./GpuUsagePopover";
 import { MemoryDetailContent } from "./MemoryUsagePopover";
 import { UsersDetailContent } from "./UsersPopover";
 import { useLlmInstancesSync } from "../hooks/useLlmInstancesSync";
+import { useTelemetryHistory } from "../hooks/useTelemetryHistory";
 import type { RemoteTelemetry, TelemetrySettings } from "../types/gpu";
 import type { LlmInstance, LlmTelemetry } from "../types/llm";
 import type { ResourceDetails } from "../types/resourceDetails";
@@ -84,6 +85,10 @@ export function DetailWindow() {
   const [llmInstances, setLlmInstances] = useState<LlmInstance[]>([]);
   // Instances added, edited or removed in the main window show up here too.
   useLlmInstancesSync(setLlmInstances, resource === "llm");
+  const history = useTelemetryHistory(
+    sessionId,
+    resource === "cpu" || resource === "memory" || resource === "gpu" || resource === "disk",
+  );
   const [llmTelemetry, setLlmTelemetry] = useState<LlmTelemetry | null>(null);
 
   useEffect(() => {
@@ -259,6 +264,7 @@ export function DetailWindow() {
             thermal={telemetry?.thermal ?? null}
             thermalError={telemetry?.errors.thermal}
             error={details?.errors.cpu ?? detailsError}
+            history={history}
           />
         ) : resource === "memory" ? (
           <MemoryDetailContent
@@ -266,6 +272,7 @@ export function DetailWindow() {
             thermal={telemetry?.thermal ?? null}
             thermalError={telemetry?.errors.thermal}
             error={details?.errors.memory ?? detailsError}
+            history={history}
           />
         ) : resource === "gpu" ? (
           <GpuDetailContent
@@ -273,6 +280,7 @@ export function DetailWindow() {
             selectedGpuUuid={selectedGpuUuid}
             onSelectedGpuUuidChange={setSelectedGpuUuid}
             error={details?.errors.gpu ?? detailsError}
+            history={history}
           />
         ) : resource === "disk" ? (
           <DiskDetailContent
@@ -280,6 +288,7 @@ export function DetailWindow() {
             thermal={telemetry?.thermal ?? null}
             thermalError={telemetry?.errors.thermal}
             ignoredFsTypes={settings.diskIgnoreFsTypes}
+            history={history}
           />
         ) : resource === "users" ? (
           <UsersDetailContent

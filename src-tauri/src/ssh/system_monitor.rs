@@ -8,6 +8,7 @@ use crate::ssh::gpu_monitor::{
     LINUX_DRM_GPU_COMMAND, NVIDIA_SMI_QUERY, XPU_DISCOVERY_COMMAND,
 };
 use crate::ssh::macos_monitor;
+use crate::ssh::telemetry_history::{gpu_history_key, GpuSample, HistorySample};
 use crate::ssh::parse_util::{
     kib_to_mib, parse_average_clock, parse_cpu_model, parse_first_u64, parse_loadavg,
     parse_lscpu_value, parse_meminfo_values, required_section, split_sections,
@@ -30,7 +31,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -541,7 +542,65 @@ where
 }
 
 fn emit_telemetry(app: &AppHandle, telemetry: RemoteTelemetry) {
+    if let Some(state) = app.try_state::<AppState>() {
+        crate::ssh::telemetry_hub::observe(app, &state, &telemetry);
+    }
     let _ = app.emit("remote-telemetry", telemetry);
+}
+
+fn is_ignored_fs(disk: &DiskMetric, ignored_fs: &[String]) -> bool {
+    disk.fs_type
+        .as_deref()
+        .is_some_and(|fs| ignored_fs.iter().any(|ignored| ignored.eq_ignore_ascii_case(fs)))
+}
+
+impl RemoteTelemetry {
+    pub(crate) fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// What the usage history keeps from this reading, or None when the
+    /// poll failed entirely (a connection error is a gap, not a zero).
+    pub(crate) fn history_sample(&self, ignored_fs: &[String]) -> Option<HistorySample> {
+        if telemetry_all_failed(self) {
+            return None;
+        }
+        let memory = self.memory.as_ref();
+        let disk_max_percent = self
+            .disks
+            .iter()
+            .filter(|disk| !is_ignored_fs(disk, ignored_fs))
+            .filter_map(|disk| disk.usage_percent)
+            .fold(None, |max: Option<f64>, value| Some(max.map_or(value, |max| max.max(value))));
+        Some(HistorySample {
+            cpu_percent: self.cpu.as_ref().and_then(|cpu| cpu.usage_percent),
+            memory_percent: memory.and_then(|memory| memory.usage_percent),
+            swap_percent: memory.and_then(|memory| {
+                match (memory.swap_used_mi_b, memory.swap_total_mi_b) {
+                    (Some(used), Some(total)) if total > 0 => {
+                        Some(used as f64 / total as f64 * 100.0)
+                    }
+                    _ => None,
+                }
+            }),
+            disk_max_percent,
+            gpus: self
+                .gpu
+                .iter()
+                .map(|gpu| GpuSample {
+                    key: gpu_history_key(&gpu.uuid, gpu.index),
+                    index: gpu.index,
+                    name: gpu.name.clone(),
+                    util_percent: gpu.gpu_util_percent,
+                    vram_used_mi_b: gpu.memory_used_mi_b,
+                    vram_total_mi_b: gpu.memory_total_mi_b,
+                    temperature_c: gpu.temperature_c,
+                    power_w: gpu.power_draw_w,
+                    power_limit_w: gpu.power_limit_w,
+                })
+                .collect(),
+        })
+    }
 }
 
 fn collect_remote_telemetry(
@@ -1700,7 +1759,7 @@ fn prune_windows_scripts(sftp: &ssh2::Sftp, directory: &str) {
     }
 }
 
-fn now_epoch_seconds() -> u64 {
+pub(crate) fn now_epoch_seconds() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
@@ -2009,6 +2068,71 @@ fn timestamp() -> String {
 
 #[cfg(test)]
 mod tests {
+    fn telemetry_with(disks: Vec<DiskMetric>, errors: TelemetryErrors) -> RemoteTelemetry {
+        RemoteTelemetry {
+            session_id: "s".to_string(),
+            timestamp: String::new(),
+            hostname: None,
+            cpu: None,
+            memory: Some(MemoryMetric {
+                total_mi_b: Some(1_000),
+                used_mi_b: Some(250),
+                available_mi_b: None,
+                free_mi_b: None,
+                usage_percent: Some(25.0),
+                swap_total_mi_b: Some(200),
+                swap_used_mi_b: Some(50),
+                swap_free_mi_b: None,
+            }),
+            thermal: None,
+            disks,
+            gpu: Vec::new(),
+            users: Vec::new(),
+            agents: Vec::new(),
+            errors,
+        }
+    }
+
+    fn disk(mount: &str, fs_type: &str, usage: f64) -> DiskMetric {
+        DiskMetric {
+            filesystem: mount.to_string(),
+            fs_type: Some(fs_type.to_string()),
+            mount_point: mount.to_string(),
+            total_bytes: None,
+            used_bytes: None,
+            available_bytes: None,
+            usage_percent: Some(usage),
+        }
+    }
+
+    #[test]
+    fn history_sample_skips_ignored_filesystems_and_failed_polls() {
+        let telemetry = telemetry_with(
+            vec![disk("/", "ext4", 40.0), disk("/run", "tmpfs", 99.0), disk("/data", "xfs", 70.0)],
+            TelemetryErrors::default(),
+        );
+        let sample = telemetry.history_sample(&["tmpfs".to_string()]).unwrap();
+        assert_eq!(sample.disk_max_percent, Some(70.0));
+        assert_eq!(sample.memory_percent, Some(25.0));
+        assert_eq!(sample.swap_percent, Some(25.0));
+        assert_eq!(sample.cpu_percent, None);
+
+        let failed = RemoteTelemetry {
+            memory: None,
+            ..telemetry_with(
+                Vec::new(),
+                TelemetryErrors {
+                    cpu: Some("x".into()),
+                    memory: Some("x".into()),
+                    disk: Some("x".into()),
+                    agents: Some("x".into()),
+                    ..TelemetryErrors::default()
+                },
+            )
+        };
+        assert!(failed.history_sample(&[]).is_none());
+    }
+
     #[test]
     fn amd_metrics_fall_back_from_rocm_smi_to_amd_smi() {
         let amd_smi_json = r#"[{"gpu": 0, "usage": {"gfx_activity": 9}}]"#;

@@ -60,6 +60,7 @@ import {
   formatTemperature,
   formatWatts,
 } from "../utils/format";
+import { useTelemetryHistory } from "../hooks/useTelemetryHistory";
 
 type OpenResource =
   | ResourceDetailType
@@ -97,6 +98,13 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
   const llmInstances = useLlmStore((state) => state.instances);
   const setLlmInstances = useLlmStore((state) => state.setInstances);
   const [openResource, setOpenResource] = useState<OpenResource>(null);
+  const history = useTelemetryHistory(
+    activeSessionId,
+    openResource === "cpu" ||
+      openResource === "memory" ||
+      openResource === "gpu" ||
+      openResource === "disk",
+  );
   const [resourceDetails, setResourceDetails] = useState<ResourceDetails | null>(null);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [detailsRequestError, setDetailsRequestError] = useState<string | null>(null);
@@ -566,6 +574,7 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
           anchorRef={cpuButtonRef}
           onClose={() => setOpenResource(null)}
           onPopOut={() => void popOut("cpu")}
+          history={history}
         />
       )}
       {openResource === "memory" && (
@@ -578,6 +587,7 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
           anchorRef={memoryButtonRef}
           onClose={() => setOpenResource(null)}
           onPopOut={() => void popOut("memory")}
+          history={history}
         />
       )}
       {openResource === "gpu" && (
@@ -590,6 +600,7 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
           anchorRef={gpuButtonRef}
           onClose={() => setOpenResource(null)}
           onPopOut={() => void popOut("gpu")}
+          history={history}
         />
       )}
       {openResource === "disk" && telemetry && (
@@ -601,6 +612,7 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
           anchorRef={diskButtonRef}
           onClose={() => setOpenResource(null)}
           onPopOut={() => void popOut("disk")}
+          history={history}
         />
       )}
       {openResource === "users" && telemetry && (

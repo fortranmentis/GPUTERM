@@ -2,9 +2,15 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { useRef } from "react";
-import { LlmRuntimeDetailContent, LlmRuntimePopover } from "./LlmRuntimePopover";
+import {
+  CHART_RANGES,
+  LlmHistoryChart,
+  LlmRuntimeDetailContent,
+  LlmRuntimePopover,
+} from "./LlmRuntimePopover";
 import { useSessionStore } from "../stores/sessionStore";
 import type {
+  LlmHistoryPoint,
   LlmInstance,
   LlmInstanceTelemetry,
   LlmRuntimeMetrics,
@@ -597,6 +603,82 @@ describe("LlmRuntimePopover", () => {
         text: "Could not refresh LLM runtimes: poller stopped",
       }),
     );
+  });
+});
+
+describe("LLM trend range", () => {
+  function point(capturedAt: number, responseTimeMs: number): LlmHistoryPoint {
+    return {
+      capturedAt,
+      responseTimeMs,
+      requestsRunning: null,
+      requestsWaiting: null,
+      kvCacheUsageRatio: null,
+      promptTokensPerSecond: null,
+      generationTokensPerSecond: null,
+      requestsPerSecond: null,
+      preemptionsDelta: null,
+    };
+  }
+
+  // Two separate segments: a reading 30 minutes ago, a gap, then two recent.
+  const history = [
+    point(NOW - 30 * 60, 50),
+    { ...point(NOW - 20 * 60, 0), responseTimeMs: null },
+    point(NOW - 60, 10),
+    point(NOW, 12),
+  ];
+
+  function linePaths(container: HTMLElement) {
+    return container.querySelectorAll("svg path").length;
+  }
+
+  it("leaves out readings older than 15 minutes by default", () => {
+    const { container } = render(
+      <LlmHistoryChart
+        label="Response time (ms)"
+        history={history}
+        series={[{ key: "response", label: "Response", value: (p) => p.responseTimeMs }]}
+      />,
+    );
+    expect(
+      screen.getByRole("img", { name: "Response time (ms) over the last 15 minutes" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("−15m")).toBeInTheDocument();
+    const recentOnly = linePaths(container);
+
+    const { container: hour } = render(
+      <LlmHistoryChart
+        label="Response time (ms)"
+        history={history}
+        range={CHART_RANGES[1]}
+        series={[{ key: "response", label: "Response", value: (p) => p.responseTimeMs }]}
+      />,
+    );
+    expect(
+      screen.getByRole("img", { name: "Response time (ms) over the last hour" }),
+    ).toBeInTheDocument();
+    expect(linePaths(hour)).toBeGreaterThan(recentOnly);
+  });
+
+  it("switches every chart to the last hour", () => {
+    const instance = ollamaInstance();
+    render(
+      <LlmRuntimeDetailContent
+        telemetry={telemetryFor([entry(instance, { history })])}
+        instances={[instance]}
+        onInstancesChange={() => undefined}
+      />,
+    );
+
+    const hourButton = screen.getByRole("button", { name: "1h" });
+    expect(hourButton).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(hourButton);
+
+    expect(hourButton).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.getByRole("img", { name: "Response time (ms) over the last hour" }),
+    ).toBeInTheDocument();
   });
 });
 

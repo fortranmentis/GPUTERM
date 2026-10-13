@@ -11,6 +11,8 @@ pub mod sftp;
 pub mod snippets;
 pub mod ssh_config;
 pub mod system_monitor;
+pub mod telemetry_history;
+pub mod telemetry_hub;
 pub mod terminal;
 pub mod thermal_monitor;
 pub mod tmux;

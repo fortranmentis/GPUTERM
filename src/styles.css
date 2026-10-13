@@ -3996,11 +3996,53 @@ button.agent-summary-section {
 
 .llm-charts {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 6px;
+}
+
+.usage-history {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+.usage-history.compact {
+  margin: 6px 0;
+}
+
+/* Charts side by side where they fit, each one column wide: an SVG chart
+   scales its text with its width, so a lone chart stretched across the row
+   would draw oversized labels. Kept apart from the range toggle, which
+   spans the row. */
+.history-chart-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: 8px;
 }
 
-.llm-history-chart {
+.history-range {
+  display: flex;
+  justify-content: flex-end;
+  gap: 2px;
+}
+
+.history-range button {
+  min-width: 40px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.history-range button.selected {
+  border-color: var(--cyan);
+  color: #eef5ff;
+}
+
+.history-chart {
   display: grid;
   min-width: 0;
   gap: 4px;
@@ -4010,19 +4052,19 @@ button.agent-summary-section {
   background: #0a1119;
 }
 
-.llm-history-heading {
+.history-heading {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: 6px;
 }
 
-.llm-history-heading > strong {
+.history-heading > strong {
   color: #dce8f7;
   font-size: 10px;
 }
 
-.llm-history-legend {
+.history-legend {
   display: flex;
   min-width: 0;
   flex-wrap: wrap;
@@ -4030,13 +4072,13 @@ button.agent-summary-section {
   gap: 3px 7px;
 }
 
-.llm-history-legend span {
+.history-legend span {
   color: var(--subtle);
   font-size: 8px;
   white-space: nowrap;
 }
 
-.llm-history-legend span::before {
+.history-legend span::before {
   display: inline-block;
   width: 6px;
   height: 2px;
@@ -4047,30 +4089,37 @@ button.agent-summary-section {
   vertical-align: middle;
 }
 
-.llm-history-legend span.waiting::before,
-.llm-history-legend span.generation::before {
+.history-legend span.tone-amber::before {
   background: var(--amber);
 }
 
-.llm-history-chart svg {
+.history-legend span.tone-green::before {
+  background: var(--green);
+}
+
+.history-legend span.tone-red::before {
+  background: var(--red);
+}
+
+.history-chart svg {
   display: block;
   width: 100%;
   min-height: 72px;
   overflow: visible;
 }
 
-.llm-history-chart svg text {
+.history-chart svg text {
   fill: var(--subtle);
   font-size: 6px;
 }
 
-.llm-history-grid-line {
+.history-grid-line {
   stroke: rgba(148, 163, 184, 0.16);
   stroke-width: 0.7;
   vector-effect: non-scaling-stroke;
 }
 
-.llm-history-series path {
+.history-series path {
   fill: none;
   stroke: var(--cyan);
   stroke-linecap: round;
@@ -4079,21 +4128,35 @@ button.agent-summary-section {
   vector-effect: non-scaling-stroke;
 }
 
-.llm-history-series circle {
+.history-series circle {
   fill: var(--cyan);
 }
 
-.llm-history-series.waiting path,
-.llm-history-series.generation path {
+.history-series.tone-amber path {
   stroke: var(--amber);
 }
 
-.llm-history-series.waiting circle,
-.llm-history-series.generation circle {
+.history-series.tone-amber circle {
   fill: var(--amber);
 }
 
-.llm-history-pending {
+.history-series.tone-green path {
+  stroke: var(--green);
+}
+
+.history-series.tone-green circle {
+  fill: var(--green);
+}
+
+.history-series.tone-red path {
+  stroke: var(--red);
+}
+
+.history-series.tone-red circle {
+  fill: var(--red);
+}
+
+.history-pending {
   color: var(--subtle);
   font-size: 8px;
 }

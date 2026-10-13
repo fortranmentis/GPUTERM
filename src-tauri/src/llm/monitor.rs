@@ -36,6 +36,10 @@ pub const TELEMETRY_EVENT: &str = "llm-runtime-telemetry";
 pub const HISTORY_WINDOW_SECONDS: u64 = 3_600;
 pub const HISTORY_BUCKET_SECONDS: u64 = 10;
 pub const HISTORY_MAX_POINTS: usize = 400;
+// The point cap must not cut the window short: the UI offers a full-hour view.
+const _: () = assert!(
+    HISTORY_MAX_POINTS as u64 * HISTORY_BUCKET_SECONDS >= HISTORY_WINDOW_SECONDS
+);
 /// Recent state changes shown in the detail view.
 pub const MAX_EVENTS: usize = 20;
 

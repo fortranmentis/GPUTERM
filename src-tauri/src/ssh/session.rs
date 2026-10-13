@@ -68,6 +68,8 @@ pub struct AppState {
     /// re-probe (and re-run the slow `amd-smi static`); cleared with
     /// `remote_os_cache`.
     pub gpu_probe_cache: Arc<Mutex<HashMap<String, crate::ssh::gpu_monitor::GpuProbe>>>,
+    /// The last hour of usage per session, for the history charts.
+    pub telemetry_history: Arc<crate::ssh::telemetry_history::TelemetryHistory>,
     /// Provider names queued by the UI for an immediate account-quota refresh.
     pub agent_quota_refreshes: AgentQuotaRefreshes,
     /// In-memory AGY quota history keyed by monitored host/account identity.

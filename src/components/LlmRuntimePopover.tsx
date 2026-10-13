@@ -3,6 +3,12 @@ import { Boxes, Plus, RefreshCw } from "lucide-react";
 import { useMemo, useState, type RefObject } from "react";
 import { isLoopbackAddress, LlmInstanceForm } from "./LlmInstanceForm";
 import { DetailUsageBar, ResourceDetailPopover } from "./ResourceDetailPopover";
+import {
+  CHART_RANGES,
+  ChartRangeToggle,
+  HistoryChart,
+  type ChartRange,
+} from "./HistoryChart";
 import type {
   LlmEvent,
   LlmHistoryPoint,
@@ -20,7 +26,9 @@ import { formatBytes } from "../utils/formatBytes";
 import { isServingEngine, runtimeLabel } from "../utils/llmRuntimes";
 import { formatNumber, formatPercent } from "../utils/format";
 
-const CHART_WINDOW_SECONDS = 15 * 60;
+// The longest range must not exceed the backend's `HISTORY_WINDOW_SECONDS`
+// (llm/monitor.rs), or its left edge stays empty.
+export { CHART_RANGES, type ChartRange } from "./HistoryChart";
 
 /** Nothing here is ever rendered as `0`: a null reading stays visibly absent. */
 const UNKNOWN = "—";
@@ -698,218 +706,114 @@ function LlmCharts({
   history: LlmHistoryPoint[];
   runtimeType: LlmRuntimeType;
 }) {
+  const [range, setRange] = useState<ChartRange>(CHART_RANGES[0]);
   if (history.length === 0) {
     return null;
   }
 
   return (
     <section className="llm-charts">
-      <LlmHistoryChart
-        label="Response time (ms)"
-        history={history}
-        series={[
-          {
-            key: "response",
-            label: "Response",
-            value: (point) => point.responseTimeMs,
-          },
-        ]}
-      />
-      {isServingEngine(runtimeType) && (
-        <>
-          <LlmHistoryChart
-            label="KV cache (%)"
-            history={history}
-            max={100}
-            series={[
-              {
-                key: "kv",
-                label: "KV cache",
-                value: (point) =>
-                  point.kvCacheUsageRatio == null
-                    ? null
-                    : point.kvCacheUsageRatio * 100,
-              },
-            ]}
-          />
-          <LlmHistoryChart
-            label="Requests"
-            history={history}
-            series={[
-              {
-                key: "running",
-                label: "Running",
-                value: (point) => point.requestsRunning,
-              },
-              {
-                key: "waiting",
-                label: "Waiting",
-                value: (point) => point.requestsWaiting,
-              },
-            ]}
-          />
-          <LlmHistoryChart
-            label="Tokens/s"
-            history={history}
-            series={[
-              {
-                key: "prompt",
-                label: "Prompt",
-                value: (point) => point.promptTokensPerSecond,
-              },
-              {
-                key: "generation",
-                label: "Generated",
-                value: (point) => point.generationTokensPerSecond,
-              },
-            ]}
-          />
-        </>
-      )}
+      <ChartRangeToggle range={range} onChange={setRange} />
+      <div className="history-chart-grid">
+        <LlmHistoryChart
+          label="Response time (ms)"
+          history={history}
+          range={range}
+          series={[
+            {
+              key: "response",
+              label: "Response",
+              value: (point) => point.responseTimeMs,
+            },
+          ]}
+        />
+        {isServingEngine(runtimeType) && (
+          <>
+            <LlmHistoryChart
+              label="KV cache (%)"
+              history={history}
+              range={range}
+              max={100}
+              series={[
+                {
+                  key: "kv",
+                  label: "KV cache",
+                  value: (point) =>
+                    point.kvCacheUsageRatio == null
+                      ? null
+                      : point.kvCacheUsageRatio * 100,
+                },
+              ]}
+            />
+            <LlmHistoryChart
+              label="Requests"
+              history={history}
+              range={range}
+              series={[
+                {
+                  key: "running",
+                  label: "Running",
+                  value: (point) => point.requestsRunning,
+                },
+                {
+                  key: "waiting",
+                  label: "Waiting",
+                  value: (point) => point.requestsWaiting,
+                },
+              ]}
+            />
+            <LlmHistoryChart
+              label="Tokens/s"
+              history={history}
+              range={range}
+              series={[
+                {
+                  key: "prompt",
+                  label: "Prompt",
+                  value: (point) => point.promptTokensPerSecond,
+                },
+                {
+                  key: "generation",
+                  label: "Generated",
+                  value: (point) => point.generationTokensPerSecond,
+                },
+              ]}
+            />
+          </>
+        )}
+      </div>
     </section>
   );
 }
 
-/**
- * Inline SVG line chart, following `AgyHistoryChart`: no chart library, gaps
- * left as gaps rather than interpolated through missing readings.
- */
+/** Series drawn in amber; the rest use the default cyan. */
+const AMBER_SERIES = new Set(["waiting", "generation"]);
+
 export function LlmHistoryChart({
   label,
   history,
   series,
   max,
+  range = CHART_RANGES[0],
 }: {
   label: string;
   history: LlmHistoryPoint[];
   series: ChartSeries[];
   /** Fixed y-axis top; otherwise the axis follows the data. */
   max?: number;
+  range?: ChartRange;
 }) {
-  const width = 320;
-  const height = 72;
-  const left = 30;
-  const right = 6;
-  const top = 7;
-  const bottom = 14;
-  const plotWidth = width - left - right;
-  const plotHeight = height - top - bottom;
-
-  const now = Math.max(
-    Math.floor(Date.now() / 1000),
-    history.at(-1)?.capturedAt ?? 0,
-  );
-  const start = now - CHART_WINDOW_SECONDS;
-  const windowed = history.filter((point) => point.capturedAt >= start);
-
-  const observed = series.flatMap((item) =>
-    windowed
-      .map((point) => item.value(point))
-      .filter((value): value is number => value != null && Number.isFinite(value)),
-  );
-  // A flat zero line still needs a non-zero axis, or every point sits on the
-  // baseline and the chart looks broken.
-  const domainMax = max ?? Math.max(1, ...observed);
-
-  const x = (capturedAt: number) =>
-    left +
-    Math.max(0, Math.min(1, (capturedAt - start) / CHART_WINDOW_SECONDS)) *
-      plotWidth;
-  const y = (value: number) =>
-    top + (1 - Math.max(0, Math.min(domainMax, value)) / domainMax) * plotHeight;
-
-  const plotted = series.map((item) => {
-    const segments: Array<Array<{ at: number; value: number }>> = [];
-    let current: Array<{ at: number; value: number }> = [];
-    for (const point of windowed) {
-      const value = item.value(point);
-      if (value == null || !Number.isFinite(value)) {
-        // A missing reading breaks the line instead of being drawn as zero.
-        if (current.length > 0) {
-          segments.push(current);
-          current = [];
-        }
-        continue;
-      }
-      current.push({ at: point.capturedAt, value });
-    }
-    if (current.length > 0) {
-      segments.push(current);
-    }
-    const latest = segments.at(-1)?.at(-1)?.value ?? null;
-    return { ...item, segments, latest };
-  });
-
-  const pointCount = plotted.reduce(
-    (total, item) => total + item.segments.flat().length,
-    0,
-  );
-  const title = `${label} over the last 15 minutes`;
-
   return (
-    <div className="llm-history-chart">
-      <div className="llm-history-heading">
-        <strong>{label}</strong>
-        <div className="llm-history-legend">
-          {plotted.map((item) => (
-            <span className={item.key} key={item.key}>
-              {item.label}{" "}
-              {item.latest == null ? UNKNOWN : formatNumber(item.latest, 1)}
-            </span>
-          ))}
-        </div>
-      </div>
-      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={title}>
-        <title>{title}</title>
-        {[0, domainMax / 2, domainMax].map((value) => (
-          <g key={value}>
-            <line
-              className="llm-history-grid-line"
-              x1={left}
-              x2={width - right}
-              y1={y(value)}
-              y2={y(value)}
-            />
-            <text x={left - 4} y={y(value) + 3} textAnchor="end">
-              {formatNumber(value, value >= 10 ? 0 : 1)}
-            </text>
-          </g>
-        ))}
-        <text x={left} y={height - 2}>
-          −15m
-        </text>
-        <text x={width - right} y={height - 2} textAnchor="end">
-          now
-        </text>
-        {plotted.flatMap((item) =>
-          item.segments.map((segment, index) => {
-            const path = segment
-              .map(
-                (point, pointIndex) =>
-                  `${pointIndex === 0 ? "M" : "L"} ${x(point.at).toFixed(2)} ${y(
-                    point.value,
-                  ).toFixed(2)}`,
-              )
-              .join(" ");
-            const last = segment.at(-1);
-            return (
-              <g
-                className={`llm-history-series ${item.key}`}
-                key={`${item.key}:${index}`}
-              >
-                <path d={path} />
-                {last && <circle cx={x(last.at)} cy={y(last.value)} r={1.8} />}
-              </g>
-            );
-          }),
-        )}
-      </svg>
-      {pointCount < 2 && (
-        <small className="llm-history-pending">
-          The trend appears after the next successful poll.
-        </small>
-      )}
-    </div>
+    <HistoryChart
+      label={label}
+      points={history}
+      max={max}
+      range={range}
+      series={series.map((item) => ({
+        ...item,
+        tone: AMBER_SERIES.has(item.key) ? "amber" : "cyan",
+      }))}
+    />
   );
 }
 

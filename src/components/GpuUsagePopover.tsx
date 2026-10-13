@@ -18,6 +18,8 @@ import {
   Metric,
   ResourceDetailPopover,
 } from "./ResourceDetailPopover";
+import { gpuHistoryKey, type TelemetryHistory } from "../types/telemetryHistory";
+import { GpuHistory } from "./UsageHistory";
 
 type GpuUsagePopoverProps = {
   metrics: GpuDetailMetric[];
@@ -28,6 +30,7 @@ type GpuUsagePopoverProps = {
   anchorRef: RefObject<HTMLElement | null>;
   onClose: () => void;
   onPopOut?: () => void;
+  history?: TelemetryHistory | null;
 };
 
 export function GpuDetailContent({
@@ -35,11 +38,17 @@ export function GpuDetailContent({
   selectedGpuUuid,
   onSelectedGpuUuidChange,
   error,
+  history,
+  compactHistory = false,
 }: {
   metrics: GpuDetailMetric[];
   selectedGpuUuid: string | null;
   onSelectedGpuUuidChange: (gpuUuid: string | null) => void;
   error?: string | null;
+  /** Usage over time; drawn when present. */
+  history?: TelemetryHistory | null;
+  /** The popover's small sparkline instead of the full charts. */
+  compactHistory?: boolean;
 }) {
   useEffect(() => {
     if (metrics.length === 0) {
@@ -94,6 +103,11 @@ export function GpuDetailContent({
         <GpuGauge label="Power" value={ratio(selectedGpu.powerDrawW, selectedGpu.powerLimitW)} level={powerLevel(selectedGpu.powerDrawW, selectedGpu.powerLimitW)} />
         <GpuGauge label="Temperature" value={selectedGpu.temperatureC} level={temperatureLevel(selectedGpu.temperatureC)} suffix=" C" />
       </div>
+      <GpuHistory
+        history={history}
+        gpuKey={gpuHistoryKey(selectedGpu.uuid, selectedGpu.index)}
+        compact={compactHistory}
+      />
       <div className="resource-metric-grid gpu-metric-grid">
         <Metric label="Driver" value={selectedGpu.driverVersion ?? "n/a"} />
         <Metric label="VRAM" value={`${formatMiB(selectedGpu.memoryUsedMiB)} / ${formatMiB(selectedGpu.memoryTotalMiB)}`} />
@@ -138,6 +152,7 @@ export function GpuUsagePopover({
   anchorRef,
   onClose,
   onPopOut,
+  history,
 }: GpuUsagePopoverProps) {
   return (
     <ResourceDetailPopover
@@ -154,6 +169,8 @@ export function GpuUsagePopover({
         selectedGpuUuid={selectedGpuUuid}
         onSelectedGpuUuidChange={onSelectedGpuUuidChange}
         error={error}
+        history={history}
+        compactHistory
       />
     </ResourceDetailPopover>
   );

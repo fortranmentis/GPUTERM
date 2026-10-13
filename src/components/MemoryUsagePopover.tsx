@@ -11,6 +11,8 @@ import {
   ResourceDetailPopover,
   ThermalSection,
 } from "./ResourceDetailPopover";
+import type { TelemetryHistory } from "../types/telemetryHistory";
+import { MemoryHistory } from "./UsageHistory";
 
 type MemoryUsagePopoverProps = {
   metric: MemoryDetailMetric | null;
@@ -21,6 +23,7 @@ type MemoryUsagePopoverProps = {
   anchorRef: RefObject<HTMLElement | null>;
   onClose: () => void;
   onPopOut?: () => void;
+  history?: TelemetryHistory | null;
 };
 
 export function MemoryDetailContent({
@@ -28,11 +31,17 @@ export function MemoryDetailContent({
   thermal,
   thermalError,
   error,
+  history,
+  compactHistory = false,
 }: {
   metric: MemoryDetailMetric | null;
   thermal: ThermalMetric | null;
   thermalError?: string | null;
   error?: string | null;
+  /** Usage over time; drawn when present. */
+  history?: TelemetryHistory | null;
+  /** The popover's small sparkline instead of the full charts. */
+  compactHistory?: boolean;
 }) {
   const previousSwap = useRef<number | null>(null);
   const [swapIncreasing, setSwapIncreasing] = useState(false);
@@ -70,6 +79,7 @@ export function MemoryDetailContent({
         <span>Swap {formatMiB(metric.swapUsedMiB)} / {formatMiB(metric.swapTotalMiB)}</span>
         {swapIncreasing && <strong>Increasing</strong>}
       </div>
+      <MemoryHistory history={history} compact={compactHistory} />
       <ThermalSection thermal={thermal} kind="memory" error={thermalError} />
       <div className="process-table memory-process-table">
         <div className="process-row head">
@@ -99,6 +109,7 @@ export function MemoryUsagePopover({
   anchorRef,
   onClose,
   onPopOut,
+  history,
 }: MemoryUsagePopoverProps) {
   return (
     <ResourceDetailPopover
@@ -115,6 +126,8 @@ export function MemoryUsagePopover({
         thermal={thermal}
         thermalError={thermalError}
         error={error}
+        history={history}
+        compactHistory
       />
     </ResourceDetailPopover>
   );

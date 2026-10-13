@@ -69,6 +69,7 @@ pub fn run() {
             kill_tmux_session,
             get_telemetry_settings,
             update_telemetry_settings,
+            ssh::telemetry_history::get_telemetry_history,
             refresh_agent_quota,
             configure_claude_quota_monitor,
             get_resource_details,

@@ -93,6 +93,7 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 - **Bounded disk summaries** — long mount paths are ellipsized inside the card without hiding utilization, with the complete path available on hover
 - Click any section for a **draggable, resizable detail popover** whose tables expand with the window: per-core CPU usage, top processes, VRAM/power/temperature per GPU, a gauge per CPU/DIMM/drive temperature sensor, full mount list
 - **Pop any detail view out into its own OS window** — it refreshes independently and closes with its session
+- **Usage history** — CPU, memory, the fullest disk, and each GPU's utilization, VRAM, temperature, and power are kept for the last hour in 5-second buckets; popovers show a 15-minute trend and detached windows switch between 15 minutes and 1 hour
 - Remote telemetry runs on a dedicated SSH connection with automatic reconnect; local telemetry executes collectors directly without SSH
 - **Quiet Windows local monitoring** — PowerShell collectors run without allocating console windows and emit UTF-8 text, so localized device and volume names remain parseable
 - Hosts without any GPU gracefully fall back to system-only metrics
@@ -107,7 +108,7 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 - **Nothing is faked.** A metric this build of the runtime does not publish is shown as *not supported*, and a value that has not been read yet is shown as `—`. Neither is ever displayed as `0`
 - **Counter restarts are handled** — a counter that goes backwards produces a null rate for that interval and a "server was probably restarted" event, never a negative throughput
 - API keys go straight into the encrypted `credentials.enc` vault. They are never returned to the webview, never written to `llm_instances.json`, and masked out of error text
-- Per-instance poll interval and timeout, enable/disable, a connection test that saves nothing, exponential backoff on repeated failure, and a 15-minute in-memory trend chart
+- Per-instance poll interval and timeout, enable/disable, a connection test that saves nothing, exponential backoff on repeated failure, and an in-memory trend chart that switches between the last 15 minutes and the last hour
 
 ### 🔐 Security by default
 - Passwords and key passphrases are stored only in the local `credentials.enc` vault: Argon2id derives a 256-bit key from your GpuTerm master password, and AES-256-GCM encrypts and authenticates the complete credential payload

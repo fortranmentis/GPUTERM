@@ -9,6 +9,8 @@ import {
   sortDisksByPriority,
 } from "../utils/diskPriority";
 import { ResourceDetailPopover, ThermalSection } from "./ResourceDetailPopover";
+import type { TelemetryHistory } from "../types/telemetryHistory";
+import { DiskHistory } from "./UsageHistory";
 
 type DiskUsagePopoverProps = {
   disks: DiskMetric[];
@@ -18,6 +20,7 @@ type DiskUsagePopoverProps = {
   anchorRef: RefObject<HTMLElement | null>;
   onClose: () => void;
   onPopOut?: () => void;
+  history?: TelemetryHistory | null;
 };
 
 export function DiskDetailContent({
@@ -25,11 +28,17 @@ export function DiskDetailContent({
   thermal,
   thermalError,
   ignoredFsTypes,
+  history,
+  compactHistory = false,
 }: {
   disks: DiskMetric[];
   thermal: ThermalMetric | null;
   thermalError?: string | null;
   ignoredFsTypes: string[];
+  /** Usage over time; drawn when present. */
+  history?: TelemetryHistory | null;
+  /** The popover's small sparkline instead of the full charts. */
+  compactHistory?: boolean;
 }) {
   const [showHidden, setShowHidden] = useState(false);
   const visibleDisks = useMemo(
@@ -50,6 +59,7 @@ export function DiskDetailContent({
         />
         <span>Show hidden filesystems</span>
       </label>
+      <DiskHistory history={history} compact={compactHistory} />
       <ThermalSection thermal={thermal} kind="disk" error={thermalError} />
       {visibleDisks.length === 0 ? (
         <div className="empty-list">Disk metrics unavailable</div>
@@ -96,6 +106,7 @@ export function DiskUsagePopover({
   anchorRef,
   onClose,
   onPopOut,
+  history,
 }: DiskUsagePopoverProps) {
   return (
     <ResourceDetailPopover
@@ -111,6 +122,8 @@ export function DiskUsagePopover({
         thermal={thermal}
         thermalError={thermalError}
         ignoredFsTypes={ignoredFsTypes}
+        history={history}
+        compactHistory
       />
     </ResourceDetailPopover>
   );

@@ -17,6 +17,8 @@ import {
   ResourceDetailPopover,
   ThermalSection,
 } from "./ResourceDetailPopover";
+import type { TelemetryHistory } from "../types/telemetryHistory";
+import { CpuHistory } from "./UsageHistory";
 
 type CpuUsagePopoverProps = {
   metric: CpuDetailMetric | null;
@@ -27,6 +29,7 @@ type CpuUsagePopoverProps = {
   anchorRef: RefObject<HTMLElement | null>;
   onClose: () => void;
   onPopOut?: () => void;
+  history?: TelemetryHistory | null;
 };
 
 export function CpuDetailContent({
@@ -34,11 +37,17 @@ export function CpuDetailContent({
   thermal,
   thermalError,
   error,
+  history,
+  compactHistory = false,
 }: {
   metric: CpuDetailMetric | null;
   thermal: ThermalMetric | null;
   thermalError?: string | null;
   error?: string | null;
+  /** Usage over time; drawn when present. */
+  history?: TelemetryHistory | null;
+  /** The popover's small sparkline instead of the full charts. */
+  compactHistory?: boolean;
 }) {
   if (!metric) {
     return <MetricsUnavailable error={error} />;
@@ -62,6 +71,7 @@ export function CpuDetailContent({
         </div>
       </div>
 
+      <CpuHistory history={history} compact={compactHistory} />
       <ThermalSection thermal={thermal} kind="cpu" error={thermalError} />
 
       {metric.logicalCoreUsagePercent.length > 0 && (
@@ -107,6 +117,7 @@ export function CpuUsagePopover({
   anchorRef,
   onClose,
   onPopOut,
+  history,
 }: CpuUsagePopoverProps) {
   return (
     <ResourceDetailPopover
@@ -123,6 +134,8 @@ export function CpuUsagePopover({
         thermal={thermal}
         thermalError={thermalError}
         error={error}
+        history={history}
+        compactHistory
       />
     </ResourceDetailPopover>
   );
