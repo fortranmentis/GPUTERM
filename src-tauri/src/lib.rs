@@ -104,6 +104,11 @@ pub fn run() {
             // LLM runtimes are not tied to an SSH session, so their poller
             // cannot start from `connect_terminal` like the other monitors.
             let state = app.state::<AppState>();
+            // Restored before any session connects, so the first monitor
+            // already polls at the interval the user chose last time.
+            if let Ok(mut slot) = state.telemetry_settings.lock() {
+                *slot = ssh::system_monitor::load_persisted_settings();
+            }
             llm::load_into_state(&state);
             llm::monitor::start(app.handle().clone(), llm::monitor_context(&state));
             Ok(())

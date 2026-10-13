@@ -280,6 +280,7 @@ The tmux picker is optional and does not install anything: `tmux` must already b
 - **Interval:** 1, 2 (default), 5, or 10 seconds — detail popovers poll on the same cadence.
 - **Mode:** GPU + System, GPU only, or System only.
 - **Ignore FS:** comma-separated filesystem types hidden from the disk summary (default: `tmpfs`, `devtmpfs`, `squashfs`, `proc`, `sysfs`, `cgroup`, `cgroup2`, `overlay`, `devfs`, `autofs`). The disk popover can temporarily reveal them.
+- The interval, display mode and ignored filesystems are saved in `app_settings.json` and restored on the next launch.
 - Mount points are prioritized `/` → `/home` → `/data` → `/mnt*` → `/media*` → drive letters → others; disks ≥ 80% are flagged warning, ≥ 90% critical. Long compact-card paths are ellipsized, and their full value remains available as hover text and in the disk detail view.
 - **AI DASH:** the System modes include a 360 px summary card for AGY, Codex, and Claude Code. Its thin two-column gauges show every available 5-hour and weekly balance simultaneously; unsupported periods show `n/a`, expired windows show `reset`, and warning colors start at 25% and 10% remaining. Duplicate sessions share the newest account snapshot. The detail view keeps context and token data collapsed and includes descendants such as language servers, subagents, and background commands in CPU/memory totals. Codex uses account-wide `account/rateLimits/read` and labels its session-log fallback. Claude Code limits come from [Claude Code usage limits](#claude-code-usage-limits). AGY experimentally reads `/usage` in a hidden PTY every five minutes, preserves the Gemini and Claude/GPT model groups, and plots successful and failed samples over the last 24 hours without estimating missing balances.
 
@@ -407,7 +408,7 @@ Long-running work is isolated: blocking SSH I/O runs on `spawn_blocking` threads
 | --- | --- |
 | `sessions.json` | Session profiles — host, port, username, key *path*, ProxyJump, and optional forwarding rules |
 | `known_hosts.json` | Approved SHA-256 host key fingerprints |
-| `app_settings.json` | UI preferences such as the last local SFTP directory |
+| `app_settings.json` | UI preferences: the last local SFTP directory, terminal appearance, and monitoring interval, display mode and ignored filesystems |
 | `credentials.enc` | Versioned Argon2id parameters plus an AES-256-GCM encrypted and authenticated credential payload |
 | `credential_index.json` | Non-secret session ids used only to show which profiles have a saved vault entry |
 | `snippets.json` | Saved command names, text, return behavior, and optional profile ids. Never credentials |

@@ -2,7 +2,15 @@ use crate::ssh::session::config_dir;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
+
+use crate::ssh::system_monitor::SystemMonitorSettings;
+
+/// Serializes read-modify-write cycles on `app_settings.json`. Every writer
+/// rewrites the whole file, so two concurrent updates (say, a font change and
+/// a telemetry change) would otherwise drop one of them.
+static APP_SETTINGS_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -15,6 +23,10 @@ pub struct AppSettings {
     pub terminal_font_family: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_font_size: Option<u8>,
+    /// Monitoring interval, display mode and ignored filesystems. Absent in
+    /// files written before 1.3.4, which then start from the defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<SystemMonitorSettings>,
 }
 
 const MIN_TERMINAL_FONT_SIZE: u8 = 8;
@@ -56,16 +68,32 @@ pub fn load_app_settings() -> Result<AppSettings, String> {
 #[tauri::command(async)]
 pub fn update_recent_local_path(path: String) -> Result<AppSettings, String> {
     let normalized = validate_local_directory(&path)?;
-    let mut settings = read_app_settings()?;
-    settings.recent_local_path = Some(normalized);
-    write_app_settings(&settings)?;
-    Ok(settings)
+    modify_app_settings(|settings| settings.recent_local_path = Some(normalized))
 }
 
 #[tauri::command(async)]
 pub fn update_terminal_appearance(appearance: TerminalAppearance) -> Result<AppSettings, String> {
+    modify_app_settings(|settings| apply_terminal_appearance(settings, appearance))
+}
+
+/// Saves the monitoring settings so they survive a restart. The caller has
+/// already sanitized them.
+pub(crate) fn persist_telemetry_settings(
+    telemetry: &SystemMonitorSettings,
+) -> Result<AppSettings, String> {
+    modify_app_settings(|settings| settings.telemetry = Some(telemetry.clone()))
+}
+
+/// Reads the settings file, applies `change` and writes it back, holding the
+/// write lock throughout.
+pub(crate) fn modify_app_settings(
+    change: impl FnOnce(&mut AppSettings),
+) -> Result<AppSettings, String> {
+    let _guard = APP_SETTINGS_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut settings = read_app_settings()?;
-    apply_terminal_appearance(&mut settings, appearance);
+    change(&mut settings);
     write_app_settings(&settings)?;
     Ok(settings)
 }
@@ -201,7 +229,7 @@ fn validate_local_directory(path: &str) -> Result<String, String> {
     Ok(canonical.to_string_lossy().to_string())
 }
 
-fn read_app_settings() -> Result<AppSettings, String> {
+pub(crate) fn read_app_settings() -> Result<AppSettings, String> {
     let path = settings_path();
     if !path.exists() {
         return Ok(AppSettings::default());
@@ -223,6 +251,43 @@ fn settings_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{apply_terminal_appearance, describe_local_paths, AppSettings, TerminalAppearance};
+    use crate::ssh::system_monitor::SystemMonitorSettings;
+
+    #[test]
+    fn telemetry_settings_round_trip_beside_the_other_fields() {
+        // Files written before telemetry was saved still load, with none set.
+        let old: AppSettings =
+            serde_json::from_str(r#"{"recentLocalPath":"/x","terminalFontSize":14}"#).unwrap();
+        assert!(old.telemetry.is_none());
+
+        let mut settings = old;
+        settings.telemetry = Some(SystemMonitorSettings {
+            telemetry_interval_secs: 5,
+            display_mode: "gpu-only".to_string(),
+            disk_ignore_fs_types: vec!["tmpfs".to_string()],
+        });
+        let json = serde_json::to_string(&settings).unwrap();
+        let loaded: AppSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.recent_local_path.as_deref(), Some("/x"));
+        assert_eq!(loaded.terminal_font_size, Some(14));
+        let telemetry = loaded.telemetry.clone().unwrap();
+        assert_eq!(telemetry.telemetry_interval_secs, 5);
+        assert_eq!(telemetry.display_mode, "gpu-only");
+        assert_eq!(telemetry.disk_ignore_fs_types, vec!["tmpfs".to_string()]);
+
+        // Changing the appearance keeps the saved telemetry settings.
+        let mut settings = loaded;
+        settings.telemetry = Some(telemetry);
+        apply_terminal_appearance(
+            &mut settings,
+            TerminalAppearance {
+                theme: Some("nord".to_string()),
+                font_family: None,
+                font_size: None,
+            },
+        );
+        assert_eq!(settings.telemetry.unwrap().telemetry_interval_secs, 5);
+    }
 
     #[test]
     fn terminal_appearance_is_cleaned_and_clamped() {

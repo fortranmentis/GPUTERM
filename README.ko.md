@@ -274,6 +274,7 @@ tmux 선택기는 선택 기능이며 서버에 아무것도 설치하지 않습
 - **Interval:** 1, 2(기본), 5, 10초 — 상세 팝오버도 같은 주기로 폴링합니다.
 - **Mode:** GPU + System, GPU only, System only.
 - **Ignore FS:** 디스크 요약에서 숨길 파일시스템 타입을 쉼표로 구분해 지정 (기본: `tmpfs`, `devtmpfs`, `squashfs`, `proc`, `sysfs`, `cgroup`, `cgroup2`, `overlay`, `devfs`, `autofs`). 디스크 팝오버에서 일시적으로 표시할 수 있습니다.
+- 수집 주기, 표시 모드, 숨길 파일시스템 설정은 `app_settings.json`에 저장되어 다음 실행 때 그대로 복원됩니다.
 - 마운트 우선순위는 `/` → `/home` → `/data` → `/mnt*` → `/media*` → 드라이브 문자 → 기타이며, 사용률 80% 이상은 경고, 90% 이상은 위험으로 표시됩니다. 요약 카드의 긴 경로는 말줄임되고 전체 값은 hover와 디스크 상세창에서 확인할 수 있습니다.
 - **AI DASH:** System이 포함된 모드에서 AGY·Codex·Claude Code용 360px 요약 카드를 표시합니다. 얇은 2열 게이지로 사용 가능한 5시간·주간 잔여량을 모두 동시에 보여주며, 미지원 기간은 `n/a`, 만료된 값은 `reset`, 잔여량 25%·10% 이하는 각각 경고·위험 색상으로 표시합니다. 중복 세션은 가장 최신 계정 스냅샷 하나를 공유합니다. 상세창에서는 컨텍스트·토큰을 기본으로 접고 CPU·메모리는 전체 자식 트리를 합산합니다. Codex는 계정 단위 `account/rateLimits/read` 값과 명시적인 세션 로그 대체값을 사용하고, Claude Code 값은 [Claude Code 사용 한도](#claude-code-사용-한도)의 status line에서 옵니다. AGY는 5분마다 숨은 PTY에서 `/usage`를 실험적으로 판독해 Gemini와 Claude/GPT 그룹을 분리하며, 성공·실패 표본의 최근 24시간 추이를 표시하고 값을 읽을 수 없을 때는 추정하지 않습니다.
 
@@ -400,7 +401,7 @@ cp scripts/gputerm-claude-statusline.sh ~/.claude/gputerm-claude-statusline.sh &
 | --- | --- |
 | `sessions.json` | 세션 프로필 — host, port, username, 키 *경로*, ProxyJump, 선택적 포워딩 규칙 |
 | `known_hosts.json` | 승인된 SHA-256 호스트 키 지문 |
-| `app_settings.json` | 마지막 로컬 SFTP 디렉토리 등 UI 설정 |
+| `app_settings.json` | 마지막 로컬 SFTP 디렉토리, 터미널 모양, 모니터링 수집 주기·표시 모드·숨길 파일시스템 등 UI 설정 |
 | `credentials.enc` | 버전이 포함된 Argon2id 매개변수와 AES-256-GCM으로 암호화·인증된 자격증명 전체 페이로드 |
 | `credential_index.json` | 저장된 보안 항목을 화면에 표시할 때만 사용하는 비밀값 없는 세션 ID 목록 |
 | `snippets.json` | 저장 명령 이름·본문·Return 동작·선택적 프로필 id. 자격증명은 저장하지 않음 |

@@ -61,7 +61,7 @@ const DEFAULT_IGNORED_FS_TYPES: &[&str] = &[
 const CPU_COMMAND: &str = "printf '__PROC_STAT__\\n'; cat /proc/stat 2>/dev/null; printf '\\n__LOADAVG__\\n'; cat /proc/loadavg 2>/dev/null; printf '\\n__CPUINFO__\\n'; cat /proc/cpuinfo 2>/dev/null; printf '\\n__NPROC_ALL__\\n'; nproc --all 2>/dev/null || true; printf '\\n__NPROC_ONLINE__\\n'; nproc 2>/dev/null || true; printf '\\n__LSCPU__\\n'; lscpu 2>/dev/null || true";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct SystemMonitorSettings {
     pub telemetry_interval_secs: u64,
     pub display_mode: String,
@@ -247,18 +247,33 @@ pub fn get_telemetry_settings(state: State<AppState>) -> Result<SystemMonitorSet
         .map_err(|_| "Telemetry settings are unavailable".to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_telemetry_settings(
     state: State<AppState>,
     settings: SystemMonitorSettings,
 ) -> Result<SystemMonitorSettings, String> {
     let settings = sanitize_settings(settings);
+    // Saved before the in-memory copy changes: the UI rolls back when this
+    // fails, and the running monitors must not keep a value it rolled back.
+    crate::ssh::local_fs::persist_telemetry_settings(&settings)?;
     let mut stored = state
         .telemetry_settings
         .lock()
         .map_err(|_| "Telemetry settings are unavailable".to_string())?;
     *stored = settings.clone();
     Ok(settings)
+}
+
+/// The monitoring settings saved by a previous run, or the defaults. A file
+/// that cannot be read must not stop the app from starting.
+pub fn load_persisted_settings() -> SystemMonitorSettings {
+    match crate::ssh::local_fs::read_app_settings() {
+        Ok(settings) => settings.telemetry.map(sanitize_settings).unwrap_or_default(),
+        Err(error) => {
+            eprintln!("GpuTerm: could not load telemetry settings: {error}");
+            SystemMonitorSettings::default()
+        }
+    }
 }
 
 const RECONNECT_BACKOFF_INITIAL: Duration = Duration::from_secs(2);
@@ -1898,7 +1913,7 @@ fn is_windows_drive(path: &str) -> bool {
     bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
-fn sanitize_settings(mut settings: SystemMonitorSettings) -> SystemMonitorSettings {
+pub(crate) fn sanitize_settings(mut settings: SystemMonitorSettings) -> SystemMonitorSettings {
     if !matches!(settings.telemetry_interval_secs, 1 | 2 | 5 | 10) {
         settings.telemetry_interval_secs = DEFAULT_INTERVAL_SECS;
     }
@@ -1937,6 +1952,29 @@ fn timestamp() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn saved_telemetry_settings_fill_gaps_and_are_sanitized() {
+        // A partial object keeps the defaults for what it leaves out.
+        let partial: SystemMonitorSettings =
+            serde_json::from_str(r#"{"telemetryIntervalSecs":5}"#).unwrap();
+        assert_eq!(partial.telemetry_interval_secs, 5);
+        assert_eq!(partial.display_mode, "gpu-system");
+        assert_eq!(
+            partial.disk_ignore_fs_types,
+            SystemMonitorSettings::default().disk_ignore_fs_types
+        );
+
+        // A hand-edited file cannot smuggle in an unsupported interval or mode.
+        let edited = sanitize_settings(SystemMonitorSettings {
+            telemetry_interval_secs: 7,
+            display_mode: "bogus".to_string(),
+            disk_ignore_fs_types: vec![" TmpFS ".to_string(), "".to_string()],
+        });
+        assert_eq!(edited.telemetry_interval_secs, DEFAULT_INTERVAL_SECS);
+        assert_eq!(edited.display_mode, "gpu-system");
+        assert_eq!(edited.disk_ignore_fs_types, vec!["tmpfs".to_string()]);
+    }
+
     #[test]
     fn windows_scripts_switch_to_upload_only_once_they_outgrow_the_inline_form() {
         // A short script stays inline: one round trip, no remote file.
