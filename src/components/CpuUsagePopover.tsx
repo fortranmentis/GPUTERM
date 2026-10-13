@@ -19,6 +19,8 @@ import {
 } from "./ResourceDetailPopover";
 import type { TelemetryHistory } from "../types/telemetryHistory";
 import { CpuHistory } from "./UsageHistory";
+import { KillProcessButton } from "./KillProcessDialog";
+import type { KillTarget } from "../types/processControl";
 
 type CpuUsagePopoverProps = {
   metric: CpuDetailMetric | null;
@@ -30,6 +32,7 @@ type CpuUsagePopoverProps = {
   onClose: () => void;
   onPopOut?: () => void;
   history?: TelemetryHistory | null;
+  onKillProcess?: (target: KillTarget) => void;
 };
 
 export function CpuDetailContent({
@@ -39,6 +42,7 @@ export function CpuDetailContent({
   error,
   history,
   compactHistory = false,
+  onKillProcess,
 }: {
   metric: CpuDetailMetric | null;
   thermal: ThermalMetric | null;
@@ -48,6 +52,8 @@ export function CpuDetailContent({
   history?: TelemetryHistory | null;
   /** The popover's small sparkline instead of the full charts. */
   compactHistory?: boolean;
+  /** Offers to end a process from the table when set. */
+  onKillProcess?: (target: KillTarget) => void;
 }) {
   if (!metric) {
     return <MetricsUnavailable error={error} />;
@@ -89,9 +95,10 @@ export function CpuDetailContent({
         </details>
       )}
 
-      <div className="process-table cpu-process-table">
+      <div className={`process-table cpu-process-table${onKillProcess ? " with-actions" : ""}`}>
         <div className="process-row head">
           <span>PID</span><span>User</span><span>CPU</span><span>MEM</span><span>Elapsed</span><span>Command</span>
+          {onKillProcess && <span aria-hidden="true" />}
         </div>
         {metric.topProcesses.map((process) => (
           <div className="process-row" key={process.pid}>
@@ -101,6 +108,7 @@ export function CpuDetailContent({
             <span>{formatPercent(process.memoryPercent, 1)}</span>
             <span>{process.elapsedTime ?? "-"}</span>
             <span title={process.command ?? undefined}>{process.command ?? "-"}</span>
+            {onKillProcess && <KillProcessButton process={process} onKill={onKillProcess} />}
           </div>
         ))}
       </div>
@@ -118,6 +126,7 @@ export function CpuUsagePopover({
   onClose,
   onPopOut,
   history,
+  onKillProcess,
 }: CpuUsagePopoverProps) {
   return (
     <ResourceDetailPopover
@@ -136,6 +145,7 @@ export function CpuUsagePopover({
         error={error}
         history={history}
         compactHistory
+        onKillProcess={onKillProcess}
       />
     </ResourceDetailPopover>
   );

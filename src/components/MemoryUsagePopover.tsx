@@ -13,6 +13,8 @@ import {
 } from "./ResourceDetailPopover";
 import type { TelemetryHistory } from "../types/telemetryHistory";
 import { MemoryHistory } from "./UsageHistory";
+import { KillProcessButton } from "./KillProcessDialog";
+import type { KillTarget } from "../types/processControl";
 
 type MemoryUsagePopoverProps = {
   metric: MemoryDetailMetric | null;
@@ -24,6 +26,7 @@ type MemoryUsagePopoverProps = {
   onClose: () => void;
   onPopOut?: () => void;
   history?: TelemetryHistory | null;
+  onKillProcess?: (target: KillTarget) => void;
 };
 
 export function MemoryDetailContent({
@@ -33,6 +36,7 @@ export function MemoryDetailContent({
   error,
   history,
   compactHistory = false,
+  onKillProcess,
 }: {
   metric: MemoryDetailMetric | null;
   thermal: ThermalMetric | null;
@@ -42,6 +46,8 @@ export function MemoryDetailContent({
   history?: TelemetryHistory | null;
   /** The popover's small sparkline instead of the full charts. */
   compactHistory?: boolean;
+  /** Offers to end a process from the table when set. */
+  onKillProcess?: (target: KillTarget) => void;
 }) {
   const previousSwap = useRef<number | null>(null);
   const [swapIncreasing, setSwapIncreasing] = useState(false);
@@ -81,9 +87,10 @@ export function MemoryDetailContent({
       </div>
       <MemoryHistory history={history} compact={compactHistory} />
       <ThermalSection thermal={thermal} kind="memory" error={thermalError} />
-      <div className="process-table memory-process-table">
+      <div className={`process-table memory-process-table${onKillProcess ? " with-actions" : ""}`}>
         <div className="process-row head">
           <span>PID</span><span>User</span><span>RSS</span><span>VSZ</span><span>MEM</span><span>Command</span>
+          {onKillProcess && <span aria-hidden="true" />}
         </div>
         {metric.topProcesses.map((process) => (
           <div className="process-row" key={process.pid}>
@@ -93,6 +100,7 @@ export function MemoryDetailContent({
             <span>{formatBytes(process.vszBytes)}</span>
             <span>{formatPercent(process.memoryPercent, 1)}</span>
             <span title={process.command ?? undefined}>{process.command ?? "-"}</span>
+            {onKillProcess && <KillProcessButton process={process} onKill={onKillProcess} />}
           </div>
         ))}
       </div>
@@ -110,6 +118,7 @@ export function MemoryUsagePopover({
   onClose,
   onPopOut,
   history,
+  onKillProcess,
 }: MemoryUsagePopoverProps) {
   return (
     <ResourceDetailPopover
@@ -128,6 +137,7 @@ export function MemoryUsagePopover({
         error={error}
         history={history}
         compactHistory
+        onKillProcess={onKillProcess}
       />
     </ResourceDetailPopover>
   );

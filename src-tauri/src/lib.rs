@@ -74,6 +74,8 @@ pub fn run() {
             ssh::telemetry_history::get_telemetry_history,
             alerts::get_alert_settings,
             alerts::update_alert_settings,
+            ssh::process_control::inspect_process,
+            ssh::process_control::signal_process,
             refresh_agent_quota,
             configure_claude_quota_monitor,
             get_resource_details,

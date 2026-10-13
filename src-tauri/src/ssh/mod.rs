@@ -5,6 +5,7 @@ pub mod gpu_monitor;
 pub mod local_fs;
 pub mod macos_monitor;
 pub mod parse_util;
+pub mod process_control;
 pub mod resource_details;
 pub mod session;
 pub mod sftp;

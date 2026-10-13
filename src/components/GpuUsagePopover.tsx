@@ -20,6 +20,8 @@ import {
 } from "./ResourceDetailPopover";
 import { gpuHistoryKey, type TelemetryHistory } from "../types/telemetryHistory";
 import { GpuHistory } from "./UsageHistory";
+import { KillProcessButton } from "./KillProcessDialog";
+import type { KillTarget } from "../types/processControl";
 
 type GpuUsagePopoverProps = {
   metrics: GpuDetailMetric[];
@@ -31,6 +33,7 @@ type GpuUsagePopoverProps = {
   onClose: () => void;
   onPopOut?: () => void;
   history?: TelemetryHistory | null;
+  onKillProcess?: (target: KillTarget) => void;
 };
 
 export function GpuDetailContent({
@@ -40,6 +43,7 @@ export function GpuDetailContent({
   error,
   history,
   compactHistory = false,
+  onKillProcess,
 }: {
   metrics: GpuDetailMetric[];
   selectedGpuUuid: string | null;
@@ -49,6 +53,8 @@ export function GpuDetailContent({
   history?: TelemetryHistory | null;
   /** The popover's small sparkline instead of the full charts. */
   compactHistory?: boolean;
+  /** Offers to end a process from the table when set. */
+  onKillProcess?: (target: KillTarget) => void;
 }) {
   useEffect(() => {
     if (metrics.length === 0) {
@@ -120,9 +126,10 @@ export function GpuDetailContent({
         <Metric label="Persistence" value={selectedGpu.persistenceMode ?? "n/a"} />
         <Metric label="MIG mode" value={selectedGpu.migMode ?? "n/a"} />
       </div>
-      <div className="process-table gpu-process-table">
+      <div className={`process-table gpu-process-table${onKillProcess ? " with-actions" : ""}`}>
         <div className="process-row head">
           <span>GPU</span><span>PID</span><span>User</span><span>GPU memory</span><span>Process</span><span>Command</span>
+          {onKillProcess && <span aria-hidden="true" />}
         </div>
         {selectedProcesses.length === 0 && <div className="empty-list compact">No compute processes</div>}
         {selectedProcesses.map((process, index) => (
@@ -136,6 +143,12 @@ export function GpuDetailContent({
             <span>{formatMiB(process.usedMemoryMiB)}</span>
             <span title={process.processName ?? undefined}>{process.processName ?? "-"}</span>
             <span title={process.command ?? undefined}>{process.command ?? "-"}</span>
+            {onKillProcess && (
+              <KillProcessButton
+                process={{ ...process, command: process.command ?? process.processName ?? null }}
+                onKill={onKillProcess}
+              />
+            )}
           </div>
         ))}
       </div>
@@ -153,6 +166,7 @@ export function GpuUsagePopover({
   onClose,
   onPopOut,
   history,
+  onKillProcess,
 }: GpuUsagePopoverProps) {
   return (
     <ResourceDetailPopover
@@ -171,6 +185,7 @@ export function GpuUsagePopover({
         error={error}
         history={history}
         compactHistory
+        onKillProcess={onKillProcess}
       />
     </ResourceDetailPopover>
   );

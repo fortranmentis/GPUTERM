@@ -131,17 +131,20 @@ export function ResourceDetailPopover({
   };
 
   useEffect(() => {
+    // A dialog opened from the popover (it is portalled outside it) marks
+    // itself with data-keep-popover: clicks and Escape there are its own.
     const handlePointerDown = (event: MouseEvent) => {
       if (
         popoverRef.current?.contains(event.target as Node) ||
-        anchorRef.current?.contains(event.target as Node)
+        anchorRef.current?.contains(event.target as Node) ||
+        (event.target as Element | null)?.closest?.("[data-keep-popover]")
       ) {
         return;
       }
       onClose();
     };
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
+      if (event.key === "Escape" && !document.querySelector("[data-keep-popover]")) {
         onClose();
       }
     };

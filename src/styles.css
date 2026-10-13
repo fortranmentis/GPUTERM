@@ -3124,11 +3124,84 @@ button.agent-summary-section {
   grid-template-columns: 46px 62px 100px 100px minmax(120px, 0.8fr) minmax(180px, 1.4fr);
 }
 
+/* One more narrow column for the end-process button. */
+.cpu-process-table.with-actions .process-row {
+  grid-template-columns: 62px 100px 64px 64px 90px minmax(150px, 1fr) 26px;
+}
+
+.memory-process-table.with-actions .process-row {
+  grid-template-columns: 62px 100px 88px 88px 64px minmax(150px, 1fr) 26px;
+}
+
+.gpu-process-table.with-actions .process-row {
+  grid-template-columns: 46px 62px 100px 100px minmax(120px, 0.8fr) minmax(180px, 1.4fr) 26px;
+}
+
+.primary-button.danger {
+  border-color: rgba(248, 113, 113, 0.6);
+  background: #7f1d1d;
+}
+
 .session-edit-note {
   flex-shrink: 0;
   color: #fde68a;
   font-size: 11px;
   line-height: 1.4;
+}
+
+.kill-process-dialog {
+  width: min(520px, calc(100vw - 32px));
+}
+
+.kill-process-facts {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 4px 10px;
+  margin: 10px 0;
+  font-size: 12px;
+}
+
+.kill-process-facts dt {
+  color: var(--subtle);
+}
+
+.kill-process-facts dd {
+  margin: 0;
+  overflow: hidden;
+  font-family: var(--mono, ui-monospace, monospace);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kill-process-warning,
+.kill-process-notice.info {
+  color: #fde68a;
+  font-size: 12px;
+}
+
+.kill-process-notice.error {
+  color: #fecaca;
+  font-size: 12px;
+}
+
+.process-kill-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--subtle);
+  cursor: pointer;
+}
+
+.process-kill-button:hover,
+.process-kill-button:focus-visible {
+  background: rgba(248, 113, 113, 0.14);
+  color: var(--red);
 }
 
 .process-row.head {

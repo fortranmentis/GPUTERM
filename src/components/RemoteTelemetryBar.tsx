@@ -64,6 +64,7 @@ import {
   formatWatts,
 } from "../utils/format";
 import { useTelemetryHistory } from "../hooks/useTelemetryHistory";
+import { useProcessKill } from "../hooks/useProcessKill";
 
 type OpenResource =
   | ResourceDetailType
@@ -102,6 +103,9 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
   const setLlmInstances = useLlmStore((state) => state.setInstances);
   const [openResource, setOpenResource] = useState<OpenResource>(null);
   const [alertsOpen, setAlertsOpen] = useState(false);
+  // The detail poll's loader, so ending a process can refresh the table now.
+  const reloadDetailsRef = useRef<(() => void) | null>(null);
+  const processKill = useProcessKill(activeSessionId, () => reloadDetailsRef.current?.());
   const alertsButtonRef = useRef<HTMLButtonElement | null>(null);
   const firingAlerts = useAlertStore(
     (state) =>
@@ -218,10 +222,12 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
     };
 
     void loadDetails();
+    reloadDetailsRef.current = () => void loadDetails();
     const intervalMs = Math.max(1, settings.telemetryIntervalSecs) * 1000;
     const timer = window.setInterval(loadDetails, intervalMs);
     return () => {
       disposed = true;
+      reloadDetailsRef.current = null;
       window.clearInterval(timer);
     };
   }, [activeSessionId, connected, openResource, settings.telemetryIntervalSecs]);
@@ -576,6 +582,7 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
         )}
       </TelemetryButton>
 
+      {processKill.dialog}
       {alertsOpen && (
         <AlertSettingsPopover
           anchorRef={alertsButtonRef}
@@ -603,6 +610,7 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
           anchorRef={cpuButtonRef}
           onClose={() => setOpenResource(null)}
           onPopOut={() => void popOut("cpu")}
+          onKillProcess={processKill.request}
           history={history}
         />
       )}
@@ -616,6 +624,7 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
           anchorRef={memoryButtonRef}
           onClose={() => setOpenResource(null)}
           onPopOut={() => void popOut("memory")}
+          onKillProcess={processKill.request}
           history={history}
         />
       )}
@@ -629,6 +638,7 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
           anchorRef={gpuButtonRef}
           onClose={() => setOpenResource(null)}
           onPopOut={() => void popOut("gpu")}
+          onKillProcess={processKill.request}
           history={history}
         />
       )}

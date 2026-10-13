@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -12,6 +12,7 @@ import { MemoryDetailContent } from "./MemoryUsagePopover";
 import { UsersDetailContent } from "./UsersPopover";
 import { useLlmInstancesSync } from "../hooks/useLlmInstancesSync";
 import { useTelemetryHistory } from "../hooks/useTelemetryHistory";
+import { useProcessKill } from "../hooks/useProcessKill";
 import type { RemoteTelemetry, TelemetrySettings } from "../types/gpu";
 import type { LlmInstance, LlmTelemetry } from "../types/llm";
 import type { ResourceDetails } from "../types/resourceDetails";
@@ -85,6 +86,9 @@ export function DetailWindow() {
   const [llmInstances, setLlmInstances] = useState<LlmInstance[]>([]);
   // Instances added, edited or removed in the main window show up here too.
   useLlmInstancesSync(setLlmInstances, resource === "llm");
+  // The detail poll's loader, so ending a process can refresh the table now.
+  const reloadDetailsRef = useRef<(() => void) | null>(null);
+  const processKill = useProcessKill(sessionId, () => reloadDetailsRef.current?.());
   const history = useTelemetryHistory(
     sessionId,
     resource === "cpu" || resource === "memory" || resource === "gpu" || resource === "disk",
@@ -227,10 +231,12 @@ export function DetailWindow() {
     };
 
     void loadDetails();
+    reloadDetailsRef.current = () => void loadDetails();
     const intervalMs = Math.max(1, settings.telemetryIntervalSecs) * 1000;
     const timer = window.setInterval(loadDetails, intervalMs);
     return () => {
       disposed = true;
+      reloadDetailsRef.current = null;
       window.clearInterval(timer);
     };
   }, [resource, sessionId, settings.telemetryIntervalSecs]);
@@ -265,6 +271,7 @@ export function DetailWindow() {
             thermalError={telemetry?.errors.thermal}
             error={details?.errors.cpu ?? detailsError}
             history={history}
+            onKillProcess={processKill.request}
           />
         ) : resource === "memory" ? (
           <MemoryDetailContent
@@ -273,6 +280,7 @@ export function DetailWindow() {
             thermalError={telemetry?.errors.thermal}
             error={details?.errors.memory ?? detailsError}
             history={history}
+            onKillProcess={processKill.request}
           />
         ) : resource === "gpu" ? (
           <GpuDetailContent
@@ -281,6 +289,7 @@ export function DetailWindow() {
             onSelectedGpuUuidChange={setSelectedGpuUuid}
             error={details?.errors.gpu ?? detailsError}
             history={history}
+            onKillProcess={processKill.request}
           />
         ) : resource === "disk" ? (
           <DiskDetailContent
@@ -309,6 +318,7 @@ export function DetailWindow() {
           />
         )}
       </div>
+      {processKill.dialog}
     </div>
   );
 }

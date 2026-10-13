@@ -95,6 +95,7 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 - **Pop any detail view out into its own OS window** — it refreshes independently and closes with its session
 - **Usage history** — CPU, memory, the fullest disk, and each GPU's utilization, VRAM, temperature, and power are kept for the last hour in 5-second buckets; popovers show a 15-minute trend and detached windows switch between 15 minutes and 1 hour
 - **Alerts and notifications** — the bell in the monitoring bar sets thresholds for GPU temperature, VRAM, memory, each disk, an idle GPU still holding memory, and an LLM runtime turning critical. A reading must stay over its threshold for a chosen time, clears only below a lower level, and is notified once (system notification, or an in-app message while GpuTerm is in front)
+- **End a process** — CPU, memory, and GPU process tables can end a process after showing its owner and command; GpuTerm re-checks that the PID still belongs to the same process right before signalling, offers a forced stop if it keeps running, and never uses `sudo`
 - Remote telemetry runs on a dedicated SSH connection with automatic reconnect; local telemetry executes collectors directly without SSH
 - **Quiet Windows local monitoring** — PowerShell collectors run without allocating console windows and emit UTF-8 text, so localized device and volume names remain parseable
 - Hosts without any GPU gracefully fall back to system-only metrics
