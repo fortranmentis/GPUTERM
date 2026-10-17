@@ -16,11 +16,10 @@ use tauri::{AppHandle, State};
 use zeroize::Zeroizing;
 
 use super::credentials::CredentialStore;
-use super::kbdint::NonInteractive;
 use super::resource_details::resolve_remote_os;
 use super::session::{
-    list_profiles, open_ssh_session_with, set_managed_key_info, target_for_profile, AppState,
-    SessionProfile, SshTarget,
+    list_profiles, open_ssh_session_with, set_managed_key_info, target_for_profile,
+    verify_managed_key_session, AppState, SessionProfile, SshTarget,
 };
 use super::system_monitor::{
     now_epoch_seconds, run_remote_command_for, run_remote_command_with_budget, shell_quote,
@@ -215,18 +214,21 @@ else { $dir = Join-Path $env:USERPROFILE '.ssh'; New-Item -ItemType Directory -F
 
 pub(crate) fn windows_install_script(public_line: &str) -> String {
     format!(
-        "$key = '{public_line}'\n{WINDOWS_KEY_FILE}\n\
+        "$ErrorActionPreference = 'Stop'\n$key = '{public_line}'\n{WINDOWS_KEY_FILE}\n\
          if (-not (Test-Path -LiteralPath $file)) {{ New-Item -ItemType File -Force -Path $file | Out-Null }}\n\
          $lines = @(Get-Content -LiteralPath $file -ErrorAction SilentlyContinue)\n\
          if ($lines -notcontains $key) {{ Add-Content -LiteralPath $file -Value $key -Encoding ascii }}\n\
-         if ($isAdmin) {{ icacls $file /inheritance:r /grant '*S-1-5-32-544:F' /grant '*S-1-5-18:F' | Out-Null }}\n\
+         if ($isAdmin) {{\n\
+         \x20 icacls $file /inheritance:r /grant '*S-1-5-32-544:F' /grant '*S-1-5-18:F' | Out-Null\n\
+         \x20 if ($LASTEXITCODE -ne 0) {{ throw 'Could not secure authorized_keys permissions' }}\n\
+         }}\n\
          '__OK__'"
     )
 }
 
 pub(crate) fn windows_remove_script(public_line: &str) -> String {
     format!(
-        "$key = '{public_line}'\n{WINDOWS_KEY_FILE}\n\
+        "$ErrorActionPreference = 'Stop'\n$key = '{public_line}'\n{WINDOWS_KEY_FILE}\n\
          if (Test-Path -LiteralPath $file) {{\n\
          \x20 $kept = @(Get-Content -LiteralPath $file | Where-Object {{ $_ -ne $key }})\n\
          \x20 Set-Content -LiteralPath $file -Value $kept -Encoding ascii\n\
@@ -371,12 +373,17 @@ pub async fn setup_managed_key(
         install(session, os, &key.public_line)?;
 
         let secret = SecretKey::from_openssh(key.private_openssh.clone())?;
-        let verified =
-            open_ssh_session_with(&key_only(&target, secret), &mut NonInteractive::default());
+        let verified = verify_managed_key_session(&key_only(&target, secret));
         if let Err(error) = verified {
-            let _ = uninstall(session, os, &key.public_line);
+            let cleanup = match uninstall(session, os, &key.public_line) {
+                Ok(()) => "The new public key was removed again.".to_string(),
+                Err(cleanup_error) => format!(
+                    "The new public key could not be removed; revoke {} on the server. ({cleanup_error})",
+                    key.fingerprint
+                ),
+            };
             return Err(format!(
-                "The server did not accept the new key, so it was removed again. Check that the \
+                "The server did not accept the new key. {cleanup} Check that the \
                  home directory and ~/.ssh are not writable by others (sshd StrictModes) and that \
                  the server allows key sign-in without a second factor. ({error})"
             ));
@@ -386,8 +393,14 @@ pub async fn setup_managed_key(
             &managed_key_vault_key(&profile_id),
             key.private_openssh.to_string(),
         ) {
-            let _ = uninstall(session, os, &key.public_line);
-            return Err(format!("The key could not be saved in the vault: {error}"));
+            let cleanup = uninstall(session, os, &key.public_line)
+                .err()
+                .map(|cleanup_error| format!(
+                    " Public-key cleanup also failed; revoke {} on the server. ({cleanup_error})",
+                    key.fingerprint
+                ))
+                .unwrap_or_default();
+            return Err(format!("The key could not be saved in the vault: {error}.{cleanup}"));
         }
         // Replacing: the old key leaves the server only once the new one works.
         if let Some(previous) = profile.managed_key.as_ref() {
@@ -541,7 +554,10 @@ mod tests {
         let windows = windows_install_script(line);
         assert!(windows.contains("$key = 'ssh-ed25519 AAAAC3Nza gputerm:lab:2026-10-17'"));
         assert!(windows.contains("administrators_authorized_keys"));
+        assert!(windows.starts_with("$ErrorActionPreference = 'Stop'"));
+        assert!(windows.contains("if ($LASTEXITCODE -ne 0) { throw"));
         assert!(windows_remove_script(line).contains("$_ -ne $key"));
+        assert!(windows_remove_script(line).starts_with("$ErrorActionPreference = 'Stop'"));
     }
 
     #[test]

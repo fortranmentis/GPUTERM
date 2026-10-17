@@ -762,6 +762,21 @@ pub fn open_ssh_session_with(
     target: &SshTarget,
     auth: &mut dyn AuthResponder,
 ) -> Result<SshConnection, String> {
+    open_ssh_session_with_policy(target, auth, false)
+}
+
+/// Proves that this target accepts its managed key. Jump hosts use their
+/// usual credentials, but the final host cannot fall back to an agent,
+/// password, keyboard-interactive, or a successful "none" sign-in.
+pub(crate) fn verify_managed_key_session(target: &SshTarget) -> Result<SshConnection, String> {
+    open_ssh_session_with_policy(target, &mut NonInteractive::default(), true)
+}
+
+fn open_ssh_session_with_policy(
+    target: &SshTarget,
+    auth: &mut dyn AuthResponder,
+    managed_key_only: bool,
+) -> Result<SshConnection, String> {
     // Direct connection: TCP straight to the target.
     // Proxied connection: connect the bastion first, open a direct-tcpip
     // channel to the target through it, and expose it as a local socket the
@@ -824,7 +839,7 @@ pub fn open_ssh_session_with(
     })?;
 
     verify_known_host(&session, target)?;
-    authenticate(&session, target, auth)?;
+    authenticate(&session, target, auth, managed_key_only)?;
 
     if !session.authenticated() {
         return Err(
@@ -1651,7 +1666,12 @@ pub(crate) fn next_auth_method(
     has_key: bool,
     has_password: bool,
     tried: &[AuthMethod],
+    managed_key_only: bool,
 ) -> Option<AuthMethod> {
+    if managed_key_only {
+        return (has_managed_key && !tried.contains(&AuthMethod::ManagedKey))
+            .then_some(AuthMethod::ManagedKey);
+    }
     let offers = |name: &str| offered.split(',').any(|method| method.trim() == name);
     let first = if has_key {
         AuthMethod::PublicKey
@@ -1685,6 +1705,7 @@ fn authenticate(
     session: &Session,
     target: &SshTarget,
     auth: &mut dyn AuthResponder,
+    managed_key_only: bool,
 ) -> Result<(), String> {
     let private_key_path = normalize_optional_string(target.private_key_path.clone());
     if let Some(path) = &private_key_path {
@@ -1709,10 +1730,16 @@ fn authenticate(
 
     // Asking for the list is itself a "none" sign-in, which a server may
     // simply accept.
-    let mut offered = match session.auth_methods(&target.username) {
-        Ok(list) => list.to_string(),
-        Err(_) if session.authenticated() => return Ok(()),
-        Err(_) => String::new(),
+    let mut offered = if managed_key_only {
+        // Do not send "none": even a server accepting unauthenticated
+        // connections must prove that it accepts this particular key.
+        String::new()
+    } else {
+        match session.auth_methods(&target.username) {
+            Ok(list) => list.to_string(),
+            Err(_) if session.authenticated() => return Ok(()),
+            Err(_) => String::new(),
+        }
     };
     let mut tried = Vec::new();
     let mut last_error = None;
@@ -1722,6 +1749,7 @@ fn authenticate(
         private_key_path.is_some(),
         password.is_some(),
         &tried,
+        managed_key_only,
     ) {
         tried.push(method);
         match method {
@@ -1794,8 +1822,10 @@ fn authenticate(
         }
         // A partial success (say, a key accepted but a code still needed)
         // changes what the server offers next.
-        if let Ok(list) = session.auth_methods(&target.username) {
-            offered = list.to_string();
+        if !managed_key_only {
+            if let Ok(list) = session.auth_methods(&target.username) {
+                offered = list.to_string();
+            }
         }
     }
     Err(last_error
@@ -2316,7 +2346,7 @@ mod tests {
         use AuthMethod::*;
         let order = |offered: &str, key: bool, password: bool| {
             let mut tried = Vec::new();
-            while let Some(method) = next_auth_method(offered, false, key, password, &tried) {
+            while let Some(method) = next_auth_method(offered, false, key, password, &tried, false) {
                 tried.push(method);
             }
             tried
@@ -2340,7 +2370,7 @@ mod tests {
         use AuthMethod::*;
         let order = |offered: &str, key: bool, password: bool| {
             let mut tried = Vec::new();
-            while let Some(method) = next_auth_method(offered, true, key, password, &tried) {
+            while let Some(method) = next_auth_method(offered, true, key, password, &tried, false) {
                 tried.push(method);
             }
             tried
@@ -2351,6 +2381,16 @@ mod tests {
             [ManagedKey, Agent, KeyboardInteractive]
         );
         assert_eq!(order("publickey", true, false), [ManagedKey, PublicKey]);
+    }
+
+    #[test]
+    fn managed_key_verification_never_tries_other_credentials() {
+        use AuthMethod::*;
+        for offered in ["", "publickey,password", "keyboard-interactive", "password"] {
+            assert_eq!(next_auth_method(offered, true, true, true, &[], true), Some(ManagedKey));
+            assert_eq!(next_auth_method(offered, true, true, true, &[ManagedKey], true), None);
+            assert_eq!(next_auth_method(offered, false, true, true, &[], true), None);
+        }
     }
 
     /// Live check of the whole sign-in path with a vault-style key: needs
@@ -2378,7 +2418,7 @@ mod tests {
         let mut session = Session::new().unwrap();
         session.set_tcp_stream(tcp);
         session.handshake().unwrap();
-        authenticate(&session, &target, &mut NonInteractive::default()).unwrap();
+        authenticate(&session, &target, &mut NonInteractive::default(), false).unwrap();
         assert!(session.authenticated());
     }
 

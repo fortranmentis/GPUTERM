@@ -34,7 +34,6 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 - [What you can monitor](#what-you-can-monitor)
 - [Installation](#installation)
 - [Usage](#usage)
-- [Maintenance documentation](#maintenance-documentation)
 - [Architecture](#architecture)
 - [Development](#development)
 - [FAQ](#faq)
@@ -114,7 +113,7 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 - Per-instance poll interval and timeout, enable/disable, a connection test that saves nothing, exponential backoff on repeated failure, and an in-memory trend chart that switches between the last 15 minutes and the last hour
 
 ### 🔐 Security by default
-- **GpuTerm-managed SSH keys** — **SSH key → Set up key** on a saved profile creates an Ed25519 key, adds it to the server's `authorized_keys` (with the 700/600 permissions sshd requires, or `administrators_authorized_keys` for Windows administrators), and keeps it only after signing in with the key alone works. The private key is kept only in the encrypted vault and handed to libssh2 from memory; **Export…** writes it passphrase-encrypted (8+ characters) in OpenSSH format, and **Replace** / **Remove** take the old key off the server
+- **GpuTerm-managed SSH keys** — **SSH key → Set up key** on a saved profile creates an Ed25519 key, installs it in `authorized_keys` (700/600 permissions, or `administrators_authorized_keys` for Windows administrators), and verifies a new-key-only sign-in before saving it. The private key stays in the encrypted vault and goes to libssh2 from memory. **Export…** writes passphrase-encrypted OpenSSH files (8+ characters); **Replace** / **Remove** request old-key revocation, subject to server access and permissions
 - Passwords, key passphrases, and managed private keys are stored only in the local `credentials.enc` vault: Argon2id derives a 256-bit key from your GpuTerm master password, and AES-256-GCM encrypts and authenticates the complete credential payload
 - The master password and derived key are kept in memory only for the current app run; secrets are never written in plaintext or included in `sessions.json`
 - Saved-session password fields show a secure mask while keeping the actual secret out of the webview; leaving the field blank reuses the vault entry
@@ -225,6 +224,16 @@ npm run tauri:build
 4. **Split terminals** — use the columns button to open another shell for the focused session, or the **+** button to add a different saved session. Choose left/right/top/bottom placement and the new pane's initial size before adding it.
 5. **Work** — type in the terminal, drag or paste files into the remote SFTP panel, and watch live metrics in the bottom bar. Click CPU / RAM / Disk / GPU / Users for detail popovers you can drag around, resize, or pop out into separate windows with the ↗ button.
 6. **Register an LLM runtime (optional)** — click **LLM RUNTIME** in the monitoring bar, then **Add**. This card is not tied to a session, so it works before you connect anything.
+
+<details>
+<summary>Set up a GpuTerm-managed SSH key</summary>
+
+- Unlock the vault, save/select a remote profile and enter working password/key/agent credentials. Open **SSH key → Set up key**; this explicitly changes the remote authorized-key file. ProxyJump hops keep their own credentials.
+- After setup succeeds, normal connections try the managed key first. Inspect its public key and SHA-256 fingerprint in the panel. Setup verification permits only the new key on the final host, so a password or agent cannot disguise rejection.
+- Use **Export…** for a backup: choose and repeat an 8+ character passphrase, then save an encrypted OpenSSH private key and adjacent `.pub` file. Keep both the exported file and passphrase safe.
+- **Replace** verifies the new key before attempting old-key removal. **Remove** removes it from the server by default; unticking the server option forgets it locally only. Profile deletion/vault reset also leaves the server's public key in place. Confirm server-side revocation if cleanup reports a failure.
+
+</details>
 
 <details>
 <summary>Terminal split controls</summary>
@@ -384,10 +393,6 @@ Only these fields are written: session id, working directory, model name and id,
 
 Two conditions come from Claude Code itself: `rate_limits` is present for subscription accounts only, and it appears after the session's first response. Rather than guessing a balance, the card names the step that is actually blocking — helper missing, helper present but empty, no status line configured, a different status line in the way, or installed and waiting for the first message.
 
-## Maintenance documentation
-
-Requirements, functional specifications, architecture, validation traceability, data/security design, build/release operations and ADRs are available in the [English maintenance index](docs/README.md) and [Korean maintenance index](docs/README.ko.md).
-
 ## Architecture
 
 ```
@@ -543,6 +548,7 @@ GpuTerm is free for personal and noncommercial use under [PolyForm Noncommercial
 
 ## Roadmap / Known limitations
 
+- Managed SSH key setup needs an unlocked vault, write access to the server's authorized-key file, and a server accepting the new key without a second factor. Verification never falls back to an agent or password. Key installation/revocation is a remote configuration change; rollback and old-key cleanup can fail on network or permission errors, so confirm server-side revocation when replacing/removing keys. Deleting a profile or resetting the vault alone does not revoke its server-side public key.
 - `amd-smi` JSON support is covered by fixtures for several layouts; real AMD hardware validation remains pending. Missing fields stay unavailable, and fan speed/clock are not collected.
 - Reply-based SSH liveness checks run after 15 seconds of inactivity and allow 8 seconds for a reply (roughly 23 seconds total). Servers that do not answer the initial probe fall back to keepalives/TCP detection; the detection time is therefore not a guarantee for every server. Live OTP and disconnect detection tests remain pending.
 - Process termination rechecks the process start marker immediately before signalling and uses the current account's permissions. This reduces PID-reuse risk but does not make the check and signal atomic. OS notifications depend on installation and system notification settings; an in-app alert remains available when delivery fails.
