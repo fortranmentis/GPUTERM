@@ -18,6 +18,7 @@ import { useDisconnectSession } from "../hooks/useDisconnectSession";
 import { withHostKeyPrompt } from "../utils/hostKeyPrompt";
 import { describeImport, SshConfigImport } from "./SshConfigImport";
 import { PortForwards } from "./PortForwards";
+import { ManagedKeyPanel } from "./ManagedKeyPanel";
 import gtLogo from "../assets/gt-logo.png";
 import type {
   SessionConnectRequest,
@@ -775,8 +776,11 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
                   )}
                 </small>
               </span>
-              {!session.isLocal && session.privateKeyPath && (
-                <KeyRound size={14} />
+              {!session.isLocal && (session.privateKeyPath || session.managedKey) && (
+                <KeyRound
+                  size={14}
+                  aria-label={session.managedKey ? "GpuTerm key" : "Key file"}
+                />
               )}
             </button>
           ))}
@@ -874,10 +878,13 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
       )}
 
       {!formOpen && !showImport && selectedProfile && !selectedProfile.isLocal && (
-        <PortForwards
-          profile={selectedProfile}
-          connected={connectedSessionIds.includes(selectedProfile.id)}
-        />
+        <>
+          <ManagedKeyPanel profile={selectedProfile} />
+          <PortForwards
+            profile={selectedProfile}
+            connected={connectedSessionIds.includes(selectedProfile.id)}
+          />
+        </>
       )}
 
       <button

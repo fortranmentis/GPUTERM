@@ -5041,3 +5041,52 @@ button.agent-summary-section {
   color: #cbd5e1;
   font-size: 12px;
 }
+
+.managed-key-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px 8px;
+  margin: 0;
+  font-size: 11px;
+}
+
+.managed-key-facts dt {
+  color: var(--muted);
+}
+
+.managed-key-facts dd {
+  margin: 0;
+  overflow: hidden;
+  font-family: var(--mono, ui-monospace, monospace);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.managed-key-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.managed-key-dialog {
+  display: grid;
+  gap: 10px;
+  width: min(440px, calc(100vw - 32px));
+}
+
+.managed-key-problem {
+  color: #fecaca;
+  font-size: 11px;
+}
+
+.managed-key-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+
+.managed-key-check input {
+  width: 14px;
+  height: 14px;
+  padding: 0;
+}

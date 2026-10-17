@@ -524,4 +524,22 @@ describe("SessionSidebar editing a saved profile", () => {
     ).toBeInTheDocument();
     expect(mockInvoke).not.toHaveBeenCalledWith("save_session", expect.anything());
   });
+
+  it("marks a profile that has a GpuTerm key", () => {
+    useSessionStore.setState({
+      sessions: [
+        {
+          ...savedProfile,
+          managedKey: {
+            publicKey: "ssh-ed25519 AAAA gputerm:x",
+            fingerprint: "SHA256:x",
+            createdAt: 1,
+            installedAt: 1,
+          },
+        },
+      ],
+    });
+    render(<SessionSidebar />);
+    expect(screen.getByLabelText("GpuTerm key")).toBeInTheDocument();
+  });
 });

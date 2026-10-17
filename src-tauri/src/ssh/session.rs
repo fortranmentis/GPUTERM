@@ -115,6 +115,11 @@ pub struct SessionProfile {
     /// `save_profile_forwards` changes them; other saves keep what is stored.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub forwards: Vec<crate::ssh::forwarding::ForwardSpec>,
+    /// The key GpuTerm generated and installed for this profile. Its private
+    /// half lives only in the vault. Like `forwards`, only its own commands
+    /// change it; other saves keep what is stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_key: Option<crate::ssh::managed_key::ManagedKeyInfo>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -166,6 +171,8 @@ pub struct SshTarget {
     pub username: String,
     pub password: Option<String>,
     pub private_key_path: Option<String>,
+    /// The profile's GpuTerm-managed key, loaded from the vault; tried first.
+    pub managed_key: Option<crate::ssh::managed_key::SecretKey>,
     /// Jump host to tunnel through, resolved from the saved profile chain.
     pub proxy: Option<Box<SshTarget>>,
 }
@@ -269,8 +276,12 @@ pub async fn delete_session(
         // Vault clean-up is best effort: a locked or not-yet-initialized vault
         // must not make profile deletion impossible. Any leftover entry is
         // unreachable once the profile is gone.
-        if let Err(error) = credentials.clear_password(&id) {
-            eprintln!("GpuTerm: could not clear stored credential for a deleted profile: {error}");
+        for key in [id.clone(), crate::ssh::managed_key::managed_key_vault_key(&id)] {
+            if let Err(error) = credentials.clear_password(&key) {
+                eprintln!(
+                    "GpuTerm: could not clear stored credential for a deleted profile: {error}"
+                );
+            }
         }
         Ok::<_, String>(profiles)
     })
@@ -383,6 +394,7 @@ pub async fn test_ssh_connection(
         if request.reuse_stored_credentials {
             restore_stored_credentials(&mut target, &credentials)?;
         }
+        crate::ssh::managed_key::attach_managed_keys(&mut target, &credentials);
         let connection = open_ssh_session_with(&target, auth.as_mut())?;
         let _ = connection
             .session
@@ -482,6 +494,7 @@ pub fn profile_from_request(request: &SessionConnectRequest) -> SessionProfile {
         proxy_jump_id: normalize_optional_string(request.proxy_jump_id.clone()),
         // Kept from the stored profile by `upsert_profile`.
         forwards: Vec::new(),
+        managed_key: None,
     })
 }
 
@@ -511,6 +524,7 @@ pub fn target_from_request(
         username: profile.username.clone(),
         password: normalize_optional_string(request.password.clone()),
         private_key_path: profile.private_key_path.clone(),
+        managed_key: None,
         proxy,
     })
 }
@@ -535,15 +549,18 @@ pub fn target_for_active_session(state: &AppState, session_id: &str) -> Result<S
     // store keyed by the jump profile id, so reconnects find them here.
     let password_for = |id: &str| state.credentials.get_password(id).ok().flatten();
     let proxy = resolve_proxy_chain(profile.proxy_jump_id.as_deref(), &password_for)?;
-    Ok(SshTarget {
+    let mut target = SshTarget {
         session_id: profile.id.clone(),
         host: profile.host,
         port: profile.port,
         username: profile.username,
         password: state.credentials.get_password(session_id).ok().flatten(),
         private_key_path: profile.private_key_path,
+        managed_key: None,
         proxy,
-    })
+    };
+    crate::ssh::managed_key::attach_managed_keys(&mut target, &state.credentials);
+    Ok(target)
 }
 
 const MAX_PROXY_DEPTH: usize = 3;
@@ -598,6 +615,7 @@ fn build_proxy_target(
         username: profile.username.clone(),
         password: password_for(&profile.id),
         private_key_path: profile.private_key_path.clone(),
+        managed_key: None,
         proxy,
     })))
 }
@@ -620,10 +638,29 @@ pub fn upsert_profile(profile: SessionProfile) -> Result<Vec<SessionProfile>, St
 fn merge_profile(profiles: &mut Vec<SessionProfile>, mut profile: SessionProfile) {
     if let Some(existing) = profiles.iter_mut().find(|item| item.id == profile.id) {
         profile.forwards = std::mem::take(&mut existing.forwards);
+        if !profile.is_local {
+            profile.managed_key = existing.managed_key.take();
+        }
         *existing = profile;
     } else {
         profiles.push(profile);
     }
+}
+
+/// Records (or, with None, forgets) a profile's managed key.
+pub(crate) fn set_managed_key_info(
+    profile_id: &str,
+    info: Option<crate::ssh::managed_key::ManagedKeyInfo>,
+) -> Result<Vec<SessionProfile>, String> {
+    let _write_guard = lock_profiles()?;
+    let mut profiles = read_profiles()?;
+    let profile = profiles
+        .iter_mut()
+        .find(|profile| profile.id == profile_id)
+        .ok_or_else(|| "That session profile no longer exists".to_string())?;
+    profile.managed_key = info;
+    write_profiles(&profiles)?;
+    Ok(profiles)
 }
 
 /// Fails if following jump hosts from `id` comes back to `id`.
@@ -1545,15 +1582,18 @@ pub fn target_for_profile(
 
     let password_for = |id: &str| credentials.get_password(id).ok().flatten();
     let proxy = resolve_proxy_chain(profile.proxy_jump_id.as_deref(), &password_for)?;
-    Ok(SshTarget {
+    let mut target = SshTarget {
         session_id: profile.id.clone(),
         host: profile.host,
         port: profile.port,
         username: profile.username,
         password: credentials.get_password(profile_id).ok().flatten(),
         private_key_path: profile.private_key_path,
+        managed_key: None,
         proxy,
-    })
+    };
+    crate::ssh::managed_key::attach_managed_keys(&mut target, credentials);
+    Ok(target)
 }
 
 /// A stable description of everything that affects where a connection lands.
@@ -1562,11 +1602,15 @@ pub fn target_for_profile(
 /// a connection that is already working.
 pub fn target_signature(target: &SshTarget) -> String {
     let mut signature = format!(
-        "{}@{}:{}|{}",
+        "{}@{}:{}|{}|{}",
         target.username,
         target.host.to_lowercase(),
         target.port,
-        target.private_key_path.as_deref().unwrap_or("-")
+        target.private_key_path.as_deref().unwrap_or("-"),
+        target
+            .managed_key
+            .as_ref()
+            .map_or("-", |key| key.fingerprint.as_str())
     );
     let mut hop = target.proxy.as_deref();
     while let Some(current) = hop {
@@ -1584,6 +1628,8 @@ pub fn target_signature(target: &SshTarget) -> String {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AuthMethod {
+    /// The GpuTerm-managed key, from the vault.
+    ManagedKey,
     PublicKey,
     Password,
     KeyboardInteractive,
@@ -1601,6 +1647,7 @@ pub(crate) enum AuthMethod {
 /// after a key or password succeeded partially.
 pub(crate) fn next_auth_method(
     offered: &str,
+    has_managed_key: bool,
     has_key: bool,
     has_password: bool,
     tried: &[AuthMethod],
@@ -1618,10 +1665,16 @@ pub(crate) fn next_auth_method(
     } else {
         AuthMethod::Agent
     };
-    [first, AuthMethod::KeyboardInteractive]
+    // The managed key goes first: when the server has dropped it, the
+    // profile's other credentials still sign in.
+    let managed = has_managed_key.then_some(AuthMethod::ManagedKey);
+    managed
         .into_iter()
+        .chain([first, AuthMethod::KeyboardInteractive])
         .filter(|method| !tried.contains(method))
-        .find(|method| *method == first || offers("keyboard-interactive"))
+        .find(|method| {
+            *method == first || Some(*method) == managed || offers("keyboard-interactive")
+        })
 }
 
 fn interactive_auth_sentinel(hop: &HopInfo) -> String {
@@ -1665,12 +1718,24 @@ fn authenticate(
     let mut last_error = None;
     while let Some(method) = next_auth_method(
         &offered,
+        target.managed_key.is_some(),
         private_key_path.is_some(),
         password.is_some(),
         &tried,
     ) {
         tried.push(method);
         match method {
+            AuthMethod::ManagedKey => {
+                let key = target.managed_key.as_ref().expect("planned only with a key");
+                if session
+                    .userauth_pubkey_memory(&target.username, None, &key.private_openssh, None)
+                    .is_err()
+                {
+                    last_error = Some(
+                        "The server no longer accepts this profile's GpuTerm key. Set the key up again.",
+                    );
+                }
+            }
             AuthMethod::PublicKey => {
                 let key = Path::new(private_key_path.as_deref().unwrap_or_default());
                 if session
@@ -1952,6 +2017,7 @@ fn normalize_profile(mut profile: SessionProfile) -> SessionProfile {
         profile.username = "local".to_string();
         profile.private_key_path = None;
         profile.proxy_jump_id = None;
+        profile.managed_key = None;
     }
     profile.private_key_path = normalize_optional_string(profile.private_key_path);
     profile.proxy_jump_id = normalize_optional_string(profile.proxy_jump_id)
@@ -2136,6 +2202,7 @@ mod tests {
             username: "user".to_string(),
             password: Some("hunter2".to_string()),
             private_key_path: None,
+            managed_key: None,
             proxy: None,
         };
         let signature = target_signature(&base);
@@ -2164,6 +2231,7 @@ mod tests {
             username: "jump".to_string(),
             password: Some("also-secret".to_string()),
             private_key_path: None,
+            managed_key: None,
             proxy: None,
         }));
         let jumped_signature = target_signature(&jumped);
@@ -2239,6 +2307,7 @@ mod tests {
             private_key_path: None,
             proxy_jump_id: proxy.map(str::to_string),
             forwards: Vec::new(),
+            managed_key: None,
         }
     }
 
@@ -2247,7 +2316,7 @@ mod tests {
         use AuthMethod::*;
         let order = |offered: &str, key: bool, password: bool| {
             let mut tried = Vec::new();
-            while let Some(method) = next_auth_method(offered, key, password, &tried) {
+            while let Some(method) = next_auth_method(offered, false, key, password, &tried) {
                 tried.push(method);
             }
             tried
@@ -2264,6 +2333,53 @@ mod tests {
         // An unknown list keeps the old single attempt.
         assert_eq!(order("", false, true), [Password]);
         assert_eq!(order("", false, false), [Agent]);
+    }
+
+    #[test]
+    fn a_managed_key_goes_first_and_the_password_still_works_after_it() {
+        use AuthMethod::*;
+        let order = |offered: &str, key: bool, password: bool| {
+            let mut tried = Vec::new();
+            while let Some(method) = next_auth_method(offered, true, key, password, &tried) {
+                tried.push(method);
+            }
+            tried
+        };
+        assert_eq!(order("publickey,password", false, true), [ManagedKey, Password]);
+        assert_eq!(
+            order("publickey,keyboard-interactive", false, false),
+            [ManagedKey, Agent, KeyboardInteractive]
+        );
+        assert_eq!(order("publickey", true, false), [ManagedKey, PublicKey]);
+    }
+
+    /// Live check of the whole sign-in path with a vault-style key: needs
+    /// `GPUTERM_TEST_SSH_USER` and `GPUTERM_TEST_SSH_KEYDIR/id` trusted by the
+    /// local sshd (see managed_key's `write_spike_key`).
+    #[test]
+    #[ignore]
+    fn authenticate_signs_in_with_a_managed_key() {
+        let user = std::env::var("GPUTERM_TEST_SSH_USER").unwrap();
+        let dir = std::env::var("GPUTERM_TEST_SSH_KEYDIR").unwrap();
+        let private = std::fs::read_to_string(format!("{dir}/id")).unwrap();
+        let key = crate::ssh::managed_key::SecretKey::from_openssh(zeroize::Zeroizing::new(private))
+            .unwrap();
+        let target = SshTarget {
+            session_id: "local-test".into(),
+            host: "127.0.0.1".into(),
+            port: 22,
+            username: user,
+            password: None,
+            private_key_path: None,
+            managed_key: Some(key),
+            proxy: None,
+        };
+        let tcp = TcpStream::connect("127.0.0.1:22").unwrap();
+        let mut session = Session::new().unwrap();
+        session.set_tcp_stream(tcp);
+        session.handshake().unwrap();
+        authenticate(&session, &target, &mut NonInteractive::default()).unwrap();
+        assert!(session.authenticated());
     }
 
     #[test]
@@ -2511,6 +2627,7 @@ mod tests {
             username: "user".to_string(),
             password: None,
             private_key_path: None,
+            managed_key: None,
             proxy: Some(Box::new(SshTarget {
                 session_id: "jump".to_string(),
                 host: "jump.example".to_string(),
@@ -2518,6 +2635,7 @@ mod tests {
                 username: "user".to_string(),
                 password: None,
                 private_key_path: None,
+                managed_key: None,
                 proxy: None,
             })),
         };

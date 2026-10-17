@@ -135,6 +135,9 @@ pub async fn connect_terminal(
         if reuse_stored_credentials {
             fill_stored_credentials(&mut target, &credentials, &mut credential_warnings);
         }
+        // The managed key is not something the form types in, so it is used
+        // whether or not stored passwords are.
+        crate::ssh::managed_key::attach_managed_keys(&mut target, &credentials);
         let opened = open_terminal_channel(&target, cols, rows, auth.as_mut());
         // A password typed into the sign-in dialog is saved like one typed
         // into the form, so background connections can use it too.
@@ -1344,6 +1347,7 @@ mod tests {
             username: "u".into(),
             password: None,
             private_key_path: key.map(str::to_string),
+            managed_key: None,
             proxy: proxy.map(Box::new),
         };
         let mut target = hop("gpu", None, Some(hop("jump", Some("/k"), None)));
@@ -1484,6 +1488,7 @@ mod tests {
             username: "target-user".to_string(),
             password: None,
             private_key_path: None,
+            managed_key: None,
             proxy: Some(Box::new(SshTarget {
                 session_id: "jump".to_string(),
                 host: "jump.example".to_string(),
@@ -1491,6 +1496,7 @@ mod tests {
                 username: "jump-user".to_string(),
                 password: None,
                 private_key_path: None,
+                managed_key: None,
                 proxy: None,
             })),
         };

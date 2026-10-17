@@ -73,7 +73,7 @@ export function CredentialVaultGate() {
 
   const resetVault = async () => {
     const accepted = await confirm(
-      "Resetting the vault permanently deletes every SSH password saved by GpuTerm. Session profiles are kept. Continue?",
+      "Resetting the vault permanently deletes every SSH password saved by GpuTerm, and the private half of every SSH key GpuTerm created (export any you still need first). Session profiles are kept. Continue?",
       { title: "Reset credential vault", kind: "warning" },
     );
     if (!accepted) return;

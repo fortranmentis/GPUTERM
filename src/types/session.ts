@@ -9,6 +9,16 @@ export type SessionProfile = {
   proxyJumpId?: string | null;
   /** Saved port forwards, started when the profile connects. */
   forwards?: ForwardSpec[];
+  /** The key GpuTerm created and installed; its private half is in the vault. */
+  managedKey?: ManagedKeyInfo | null;
+};
+
+/** Mirrors `ManagedKeyInfo` in src-tauri/src/ssh/managed_key.rs. */
+export type ManagedKeyInfo = {
+  publicKey: string;
+  fingerprint: string;
+  createdAt: number;
+  installedAt: number;
 };
 
 export type ForwardKind = "local" | "remote" | "dynamic";

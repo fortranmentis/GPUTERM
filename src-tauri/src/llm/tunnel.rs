@@ -653,6 +653,7 @@ mod tests {
                     username: "user".to_string(),
                     password: None,
                     private_key_path: None,
+                    managed_key: None,
                     proxy: None,
                 },
             })

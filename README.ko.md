@@ -34,6 +34,7 @@
 - [모니터링 지원 범위](#모니터링-지원-범위)
 - [설치](#설치)
 - [사용법](#사용법)
+- [개발·유지보수 문서](#개발유지보수-문서)
 - [아키텍처](#아키텍처)
 - [개발](#개발)
 - [FAQ](#faq)
@@ -52,7 +53,7 @@
 - **OpenSSH 설정 가져오기** — `~/.ssh/config`의 `Host`, `Hostname`, `User`, `Port`, `IdentityFile`, `ProxyJump`, 포워딩 규칙을 미리 확인하고, 충돌을 조용히 덮어쓰지 않은 채 선택한 프로필만 가져옵니다
 - **내장 포트 포워딩** — 로컬(`-L`), 원격(`-R`), SOCKS5 동적(`-D`) 규칙을 저장하거나 즉시 시작하고 프로필 패널에서 상태와 전송 바이트를 확인합니다
 - **네이티브 로컬 터미널** — SSH 없이 현재 컴퓨터의 셸을 열고 동일한 터미널 분할과 모니터링 UI 사용
-- 비밀번호, 개인키(패스프레이즈 포함), SSH 에이전트, keyboard-interactive 인증 지원 — 일회용 코드(Google Authenticator, Duo)와 PAM 비밀번호 질문은 대화상자로 묻고, Jump host마다 따로 묻습니다
+- 비밀번호, 개인키(패스프레이즈 포함), SSH 에이전트, keyboard-interactive, GpuTerm 관리 키 인증 지원 — 일회용 코드(Google Authenticator, Duo)와 PAM 비밀번호 질문은 대화상자로 묻고, Jump host마다 따로 묻습니다
 - UTF-8 안전 스트리밍 — 청크 경계에 걸린 멀티바이트 문자(한글, 日本語, 이모지)가 깨지지 않음
 - **한글 입력 정상 동작** — WebKit 계열 웹뷰의 자모 분리 버그를 네이티브 터미널과 같은 백스페이스-재작성 방식으로 해결해, 터미널에서 한글 IME 조합이 올바르게 처리됩니다
 - **스크롤백 검색** — `Ctrl`/`Cmd`+`F`로 패인 안에 검색 바가 열리고 일치 개수를 표시합니다. `Enter`/`Shift`+`Enter`로 이동, `Escape`로 셸에 포커스 복귀
@@ -110,7 +111,8 @@
 - 인스턴스별 수집 주기·타임아웃, 활성화 토글, 저장하지 않는 연결 테스트, 연속 실패 시 백오프, 메모리에만 두는 추이 그래프(최근 15분/1시간 전환)
 
 ### 🔐 기본 보안
-- 비밀번호와 키 패스프레이즈는 로컬 `credentials.enc` 보안 저장소에만 저장: GpuTerm 마스터 비밀번호를 Argon2id로 256비트 키로 유도하고, 전체 자격증명 페이로드를 AES-256-GCM으로 암호화·인증
+- **GpuTerm 관리 SSH 키** — 저장한 프로필의 **SSH key → Set up key**를 누르면 Ed25519 키를 만들어 서버의 `authorized_keys`에 등록하고(sshd가 요구하는 700/600 권한 적용, Windows 관리자는 `administrators_authorized_keys`), 새 키만으로 로그인되는 것을 확인한 뒤에만 보관합니다. 개인키는 암호화된 보안 저장소에만 있고 메모리에서 바로 libssh2에 전달됩니다. **Export…**는 passphrase(8자 이상)로 암호화한 OpenSSH 형식으로 내보내고, **Replace**/**Remove**는 예전 키를 서버에서 지웁니다
+- 비밀번호, 키 패스프레이즈, 관리 개인키는 로컬 `credentials.enc` 보안 저장소에만 저장: GpuTerm 마스터 비밀번호를 Argon2id로 256비트 키로 유도하고, 전체 자격증명 페이로드를 AES-256-GCM으로 암호화·인증
 - 마스터 비밀번호와 유도 키는 현재 앱 실행 중에만 메모리에 유지하며, 비밀값을 평문이나 `sessions.json`에 기록하지 않음
 - 저장 세션의 비밀번호 입력란에는 보안 마스크만 표시하고 실제 비밀값은 웹뷰로 전달하지 않음; 빈 상태로 연결하면 보안 저장소 값을 재사용
 - 최초 접속 시 SHA-256 호스트 키 지문을 확인하는 TOFU 프롬프트; 키가 바뀌면 이전·새 지문을 함께 표시하고 명시적으로 승인한 경우에만 교체
@@ -376,6 +378,10 @@ cp scripts/gputerm-claude-statusline.sh ~/.claude/gputerm-claude-statusline.sh &
 
 두 가지 조건은 Claude Code 자체에서 옵니다. `rate_limits`는 구독 계정에만 제공되며, 세션의 첫 응답 이후에 나타납니다. 잔여량을 추측하는 대신 실제로 막혀 있는 단계를 카드에 표시합니다 — 헬퍼 없음, 헬퍼가 비어 있음, status line 미설정, 다른 status line이 점유, 또는 설치 완료 후 첫 메시지 대기.
 
+## 개발·유지보수 문서
+
+요구사항정의서, 기능명세서, 아키텍처, 검증 대응표, 데이터·보안 설계서, 빌드·릴리스 운영서와 ADR은 [한국어 문서 색인](docs/README.ko.md)과 [영어 문서 색인](docs/README.md)에서 확인할 수 있습니다.
+
 ## 아키텍처
 
 ```
@@ -410,7 +416,7 @@ cp scripts/gputerm-claude-statusline.sh ~/.claude/gputerm-claude-statusline.sh &
 | `snippets.json` | 저장 명령 이름·본문·Return 동작·선택적 프로필 id. 자격증명은 저장하지 않음 |
 | `llm_instances.json` | 등록한 LLM 런타임 인스턴스 — 이름·어댑터·URL·수집 주기·선택적 SSH 터널 프로필 id. API 키는 저장하지 않음 |
 
-비밀번호와 키 패스프레이즈는 **평문으로 기록되지 않습니다**. 개인키 내용은 GpuTerm 설정 파일에 복사하지 않습니다.
+비밀번호, 키 패스프레이즈, 관리 개인키는 **평문으로 기록되지 않습니다**. 프로필에 지정한 키 *파일*의 내용은 복사하지 않으며, GpuTerm 관리 키는 내보내기 전까지 `credentials.enc` 안에만 있습니다.
 
 ## 개발
 
@@ -468,9 +474,9 @@ src-tauri/src/ssh/      Rust 백엔드
 <details>
 <summary><b>비밀번호는 어디에 저장되나요?</b></summary>
 
-비밀번호와 키 패스프레이즈는 `credentials.enc`에 저장됩니다. GpuTerm은 마스터 비밀번호를 Argon2id(64 MiB, 3회 반복)로 256비트 키로 유도하고, 쓸 때마다 새 무작위 nonce를 사용해 전체 페이로드를 AES-256-GCM으로 암호화·인증합니다. 마스터 비밀번호와 키는 현재 실행 중에만 메모리에 유지하며, `sessions.json`에는 host 등의 메타데이터와 개인키의 *경로*만 들어갑니다. 프로필을 삭제하면 해당 보안 항목도 삭제됩니다.
+비밀번호와 키 패스프레이즈는 `credentials.enc`에 저장됩니다. GpuTerm은 마스터 비밀번호를 Argon2id(64 MiB, 3회 반복)로 256비트 키로 유도하고, 쓸 때마다 새 무작위 nonce를 사용해 전체 페이로드를 AES-256-GCM으로 암호화·인증합니다. 마스터 비밀번호와 키는 현재 실행 중에만 메모리에 유지하며, `sessions.json`에는 host 등의 메타데이터, 개인키의 *경로*, 관리 키의 공개키와 지문만 들어갑니다. 프로필을 삭제하면 해당 보안 항목도 삭제됩니다(관리 키는 서버의 `authorized_keys`에 남으므로, 먼저 **Remove**로 지우세요).
 
-이전 Keychain/Credential Manager/Secret Service 항목은 가져오거나 접근하지 않습니다. 업그레이드 후 SSH 비밀번호를 다시 입력하세요. 마스터 비밀번호를 잊으면 보안 저장소를 초기화할 수 있으며, 프로필은 유지되지만 저장 비밀번호는 다시 입력해야 합니다. [데이터 저장 위치](#아키텍처) 표를 참고하세요.
+이전 Keychain/Credential Manager/Secret Service 항목은 가져오거나 접근하지 않습니다. 업그레이드 후 SSH 비밀번호를 다시 입력하세요. 마스터 비밀번호를 잊으면 보안 저장소를 초기화할 수 있으며, 프로필은 유지되지만 저장 비밀번호는 다시 입력해야 하고 GpuTerm 관리 키는 사라집니다(미리 내보내거나 다시 설정하세요). [데이터 저장 위치](#아키텍처) 표를 참고하세요.
 
 </details>
 
@@ -511,7 +517,7 @@ GpuTerm은 [PolyForm Noncommercial 1.0.0](./LICENSE)에 따라 개인·비상업
 | `cargo`를 찾을 수 없음 | [rustup](https://rustup.rs)으로 설치 후 터미널 재시작 (`%USERPROFILE%\.cargo\bin`이 PATH에 있어야 함) |
 | SSH 인증 실패 | host/port/user/자격증명 확인; 서버가 해당 인증 방식을 허용하는지 확인 |
 | 여러 키를 누르면 `Terminal stream failed: transport read` 표시 | 갱신된 v1.1.3-beta를 다시 받으세요. 잘못된 SSH 채널 flush를 제거하고 비차단 입력·PTY 크기 조절·keepalive를 직렬화했습니다 |
-| 마스터 비밀번호가 틀렸거나 기억나지 않음 | 비밀번호를 확인하거나 **Reset vault**를 선택하세요. 프로필은 유지되지만 저장된 SSH 비밀번호는 모두 삭제되어 다시 입력해야 합니다 |
+| 마스터 비밀번호가 틀렸거나 기억나지 않음 | 비밀번호를 확인하거나 **Reset vault**를 선택하세요. 프로필은 유지되지만 저장된 SSH 비밀번호와 GpuTerm 관리 키는 모두 삭제됩니다. 비밀번호는 다시 입력하고 키는 다시 설정하세요 |
 | 호스트 키 불일치 | 다른 경로로 서버 지문을 검증한 뒤 `known_hosts.json`에서 이전 항목 제거 |
 | GPU가 '사용 불가'로 표시 | GPU 도구(`nvidia-smi`, `rocm-smi`, `amd-smi`, `xpu-smi`, `intel_gpu_top`) 설치 또는 Linux `/sys/class/drm` 읽기 권한 확인 — 다른 지표는 무관하게 정상 동작 |
 | Windows 하이브리드 PC에서 외장 GPU만 표시 | 최신 빌드로 업데이트하세요. WDDM GPU Engine 카운터가 아직 없는 유휴 Intel/AMD 어댑터도 `Win32_VideoController` 탐색 결과에서 유지합니다 |

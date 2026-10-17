@@ -34,6 +34,7 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 - [What you can monitor](#what-you-can-monitor)
 - [Installation](#installation)
 - [Usage](#usage)
+- [Maintenance documentation](#maintenance-documentation)
 - [Architecture](#architecture)
 - [Development](#development)
 - [FAQ](#faq)
@@ -52,7 +53,7 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 - **OpenSSH config import** — preview `~/.ssh/config`, resolve `Host`, `Hostname`, `User`, `Port`, `IdentityFile`, `ProxyJump`, and forwarding rules, then select the profiles to import without overwriting collisions silently
 - **Built-in port forwarding** — save or start local (`-L`), remote (`-R`), and SOCKS5 dynamic (`-D`) rules, with live state and byte counts in the profile panel
 - **Native local terminal** — open the current machine without SSH and use the same terminal splits and monitoring UI
-- Password, private key (with passphrase), SSH agent, and keyboard-interactive authentication — one-time codes (Google Authenticator, Duo) and PAM password prompts are asked in a dialog, including for each jump host
+- Password, private key (with passphrase), SSH agent, keyboard-interactive, and GpuTerm-managed key authentication — one-time codes (Google Authenticator, Duo) and PAM password prompts are asked in a dialog, including for each jump host
 - UTF-8 safe streaming — multibyte characters (한글, 日本語, emoji) survive chunked reads
 - **CJK input works correctly** — Korean IME composition in the terminal is handled with the same backspace-rewrite protocol native terminals use, fixing the jamo-splitting bug in WebKit-based webviews
 - **Scrollback search** — `Ctrl`/`Cmd`+`F` opens an in-pane find bar with match count, `Enter`/`Shift`+`Enter` to step through hits, `Escape` to return focus to the shell
@@ -113,7 +114,8 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 - Per-instance poll interval and timeout, enable/disable, a connection test that saves nothing, exponential backoff on repeated failure, and an in-memory trend chart that switches between the last 15 minutes and the last hour
 
 ### 🔐 Security by default
-- Passwords and key passphrases are stored only in the local `credentials.enc` vault: Argon2id derives a 256-bit key from your GpuTerm master password, and AES-256-GCM encrypts and authenticates the complete credential payload
+- **GpuTerm-managed SSH keys** — **SSH key → Set up key** on a saved profile creates an Ed25519 key, adds it to the server's `authorized_keys` (with the 700/600 permissions sshd requires, or `administrators_authorized_keys` for Windows administrators), and keeps it only after signing in with the key alone works. The private key is kept only in the encrypted vault and handed to libssh2 from memory; **Export…** writes it passphrase-encrypted (8+ characters) in OpenSSH format, and **Replace** / **Remove** take the old key off the server
+- Passwords, key passphrases, and managed private keys are stored only in the local `credentials.enc` vault: Argon2id derives a 256-bit key from your GpuTerm master password, and AES-256-GCM encrypts and authenticates the complete credential payload
 - The master password and derived key are kept in memory only for the current app run; secrets are never written in plaintext or included in `sessions.json`
 - Saved-session password fields show a secure mask while keeping the actual secret out of the webview; leaving the field blank reuses the vault entry
 - Trust-on-first-use host key prompt with SHA-256 fingerprint; a changed key shows the old and new fingerprints and is replaced only after explicit confirmation
@@ -382,6 +384,10 @@ Only these fields are written: session id, working directory, model name and id,
 
 Two conditions come from Claude Code itself: `rate_limits` is present for subscription accounts only, and it appears after the session's first response. Rather than guessing a balance, the card names the step that is actually blocking — helper missing, helper present but empty, no status line configured, a different status line in the way, or installed and waiting for the first message.
 
+## Maintenance documentation
+
+Requirements, functional specifications, architecture, validation traceability, data/security design, build/release operations and ADRs are available in the [English maintenance index](docs/README.md) and [Korean maintenance index](docs/README.ko.md).
+
 ## Architecture
 
 ```
@@ -417,7 +423,7 @@ Long-running work is isolated: blocking SSH I/O runs on `spawn_blocking` threads
 | `snippets.json` | Saved command names, text, return behavior, and optional profile ids. Never credentials |
 | `llm_instances.json` | Registered LLM runtime instances — name, adapter, URL, poll interval, optional SSH tunnel profile id. Never the API key |
 
-Passwords and key passphrases are **never written in plaintext**. Private key contents are never copied into GpuTerm's configuration files.
+Passwords, key passphrases, and managed private keys are **never written in plaintext**. The contents of a key *file* you point a profile at are never copied; a GpuTerm-managed key exists only inside `credentials.enc` until you export it.
 
 ## Development
 
@@ -475,9 +481,9 @@ Almost never, and never without you asking. Every metric comes from one-shot, re
 <details>
 <summary><b>Where are my passwords stored?</b></summary>
 
-Passwords and key passphrases are stored in `credentials.enc`. GpuTerm derives a 256-bit key from your master password with Argon2id (64 MiB, 3 iterations) and encrypts the complete payload with AES-256-GCM and a fresh random nonce on every write. The master password and key are kept only in memory for the current run; `sessions.json` contains host metadata and the *path* to a private key, never a secret. Deleting a profile also deletes its vault entry.
+Passwords and key passphrases are stored in `credentials.enc`. GpuTerm derives a 256-bit key from your master password with Argon2id (64 MiB, 3 iterations) and encrypts the complete payload with AES-256-GCM and a fresh random nonce on every write. The master password and key are kept only in memory for the current run; `sessions.json` contains host metadata, the *path* to a private key, and a managed key's public half and fingerprint, never a secret. Deleting a profile also deletes its vault entries (the managed key stays in the server's `authorized_keys`; use **Remove** first to take it off).
 
-Older Keychain/Credential Manager/Secret Service entries are not imported or accessed. After upgrading, enter each SSH password again. If you forget the master password, reset the vault; profiles remain, but saved passwords must be entered again. See the [data locations](#architecture) table.
+Older Keychain/Credential Manager/Secret Service entries are not imported or accessed. After upgrading, enter each SSH password again. If you forget the master password, reset the vault; profiles remain, but saved passwords must be entered again and GpuTerm-managed keys are lost (export them beforehand, or set them up again). See the [data locations](#architecture) table.
 
 </details>
 
@@ -518,7 +524,7 @@ GpuTerm is free for personal and noncommercial use under [PolyForm Noncommercial
 | `cargo` not found | Install via [rustup](https://rustup.rs), reopen the terminal (`%USERPROFILE%\.cargo\bin` on PATH) |
 | SSH auth fails | Verify host/port/user/credentials; confirm the server allows the auth method |
 | Pressing multiple keys shows `Terminal stream failed: transport read` | Re-download v1.1.3-beta: the refreshed installers remove the destructive SSH channel flush and serialize nonblocking input, PTY resize, and keepalive operations |
-| Master password is rejected or forgotten | Check the password, or choose **Reset vault**. Profiles are kept, but all saved SSH passwords are deleted and must be entered again |
+| Master password is rejected or forgotten | Check the password, or choose **Reset vault**. Profiles are kept, but all saved SSH passwords and GpuTerm-managed keys are deleted; enter the passwords again and set the keys up again |
 | Host key mismatch | Verify the server fingerprint out-of-band, then remove the stale entry from `known_hosts.json` |
 | GPU shows unavailable | Confirm a GPU tool is installed (`nvidia-smi`, `rocm-smi`, `amd-smi`, `xpu-smi`, or `intel_gpu_top`) or Linux `/sys/class/drm` is readable; other metrics still work regardless |
 | Hybrid Windows PC only shows the dGPU | Update to the latest build. Idle Intel/AMD adapters are now retained from `Win32_VideoController` even when WDDM has not created a GPU Engine counter instance yet |
