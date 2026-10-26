@@ -89,6 +89,7 @@ pub fn platform_store() -> Arc<dyn BiometricKeyStore> {
     }
 }
 
+#[cfg(any(target_os = "macos", windows))]
 pub(crate) fn key_from_bytes(bytes: &[u8]) -> Result<VaultKey, String> {
     if bytes.len() != VAULT_KEY_BYTES {
         return Err("The stored vault key is damaged".to_string());
