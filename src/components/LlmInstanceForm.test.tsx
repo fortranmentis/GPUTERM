@@ -268,6 +268,7 @@ describe("LlmInstanceForm", () => {
     ).toBeInTheDocument();
 
     // Choosing the hop resolves it, and the caption changes to say whose it is.
+    await screen.findByRole("option", { name: /Wsl/ });
     fireEvent.change(screen.getByLabelText("Reach through"), {
       target: { value: "wsl" },
     });
@@ -321,7 +322,10 @@ describe("LlmInstanceForm", () => {
       />,
     );
 
-    fireEvent.change(await screen.findByLabelText("Reach through"), {
+    // The select exists before its asynchronously loaded SSH options do.
+    // Wait for the actual option so a slow runner cannot silently select Direct.
+    await screen.findByRole("option", { name: /Wsl/ });
+    fireEvent.change(screen.getByLabelText("Reach through"), {
       target: { value: "wsl" },
     });
     fireEvent.change(screen.getByLabelText("Address"), {
@@ -384,7 +388,8 @@ describe("LlmInstanceForm", () => {
       />,
     );
 
-    fireEvent.change(await screen.findByLabelText("Reach through"), {
+    await screen.findByRole("option", { name: /Wsl/ });
+    fireEvent.change(screen.getByLabelText("Reach through"), {
       target: { value: "wsl" },
     });
     fireEvent.change(screen.getByLabelText("Address"), {

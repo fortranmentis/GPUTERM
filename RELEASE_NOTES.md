@@ -13,6 +13,7 @@
 
 - Attach Windows Hello verification to GpuTerm's main window through the [desktop UserConsentVerifier interop API](https://learn.microsoft.com/en-us/windows/apps/develop/ui/display-ui-objects), instead of the UWP-only request. Refuse missing window handles before prompting and expose the toggle only where the desktop bridge is available.
 - Compile platform-specific biometric key conversion only on macOS/Windows, keeping Linux's password-only build free of unused-code warnings under strict Clippy checks.
+- Stabilize SSH-tunnel form tests by waiting for asynchronously loaded host options before selecting them on slower CI runners.
 - Keep the existing per-profile managed-key flow while supporting assigned shared keys; avoid attempting an identical key twice across those two sources.
 - Report unavailable container tools, runtime permissions and kubeconfig/RBAC failures rather than using privilege escalation. Hide Containers where no supported runtime/client is found; restrict collection/actions to remote Linux hosts.
 - Keep DB passwords out of command arguments and exported password environment variables. Use stdin and mode-600 temporary client-credential files with exit cleanup; escape client-option/passfile values and keep DB passwords out of instance JSON.
