@@ -64,6 +64,22 @@ describe("SessionSidebar profile form", () => {
     });
   });
 
+  it("keeps header tools icon-only with accessible names and New labelled", async () => {
+    render(<SessionSidebar />);
+
+    const importButton = screen.getByRole("button", { name: "Import" });
+    const keyButton = screen.getByRole("button", { name: "SSH keys" });
+    for (const button of [importButton, keyButton]) {
+      expect(button).toHaveClass("icon-only");
+      expect(button.textContent).toBe("");
+      expect(button.querySelector("svg")).not.toBeNull();
+    }
+    expect(importButton).toHaveAttribute("title", "Import hosts from ~/.ssh/config");
+    expect(keyButton).toHaveAttribute("title", "Generate and manage SSH key pairs");
+    expect(screen.getByRole("button", { name: "New" })).toHaveTextContent("New");
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalled());
+  });
+
   it("shows profile fields only after New while keeping saved-session auth available", () => {
     render(<SessionSidebar />);
 
