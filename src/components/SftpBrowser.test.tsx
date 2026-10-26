@@ -781,6 +781,87 @@ describe("SftpBrowser local path browse", () => {
     });
   });
 
+  it("selects remote rows with checkboxes, Shift ranges and the header checkbox", async () => {
+    remoteEntries = [
+      remoteFile("d.dat"),
+      remoteFile("b.dat"),
+      remoteFile("a.dat"),
+      remoteFile("c.dat"),
+    ];
+    render(<SftpBrowser />);
+    await screen.findByText("/srv");
+
+    const row = (name: string) =>
+      screen.getByRole("button", { name: new RegExp(name.replace(".", "\\.")) }).closest(
+        "[role=row]",
+      );
+    const header = screen.getByRole("checkbox", { name: "Select all remote items" });
+    expect(header).not.toBeChecked();
+
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Select a.dat" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select c.dat" }));
+    expect(row("a.dat")).toHaveAttribute("aria-selected", "true");
+    expect(row("b.dat")).toHaveAttribute("aria-selected", "false");
+    expect(row("c.dat")).toHaveAttribute("aria-selected", "true");
+    expect((header as HTMLInputElement).indeterminate).toBe(true);
+    expect(screen.getByRole("button", { name: /^delete$/i })).toHaveTextContent("Delete (2)");
+    expect(screen.getByRole("button", { name: /^download$/i })).toHaveTextContent(
+      "Download (2)",
+    );
+
+    // Shift+click ranges follow the sorted order (a, b, c, d), from the anchor c.
+    fireEvent.click(screen.getByRole("button", { name: /a\.dat/ }), { shiftKey: true });
+    expect(row("a.dat")).toHaveAttribute("aria-selected", "true");
+    expect(row("b.dat")).toHaveAttribute("aria-selected", "true");
+    expect(row("c.dat")).toHaveAttribute("aria-selected", "true");
+    expect(row("d.dat")).toHaveAttribute("aria-selected", "false");
+
+    fireEvent.click(header);
+    expect(header).toBeChecked();
+    expect((header as HTMLInputElement).indeterminate).toBe(false);
+    expect(row("d.dat")).toHaveAttribute("aria-selected", "true");
+    fireEvent.click(header);
+    expect(screen.getByRole("button", { name: /^delete$/i })).toHaveTextContent(/^Delete$/);
+
+    // A plain row click still selects just that row.
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select a.dat" }));
+    fireEvent.click(screen.getByRole("button", { name: /d\.dat/ }));
+    expect(row("a.dat")).toHaveAttribute("aria-selected", "false");
+    expect(row("d.dat")).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("selects every remote item with Ctrl+A but leaves the path field alone", async () => {
+    remoteEntries = [remoteFile("a.dat"), remoteFile("b.dat")];
+    render(<SftpBrowser />);
+    await screen.findByText("/srv");
+    await screen.findByRole("button", { name: /a\.dat/ });
+
+    const zone = screen.getByTestId("remote-drop-zone");
+    const pathInput = zone.querySelector(".path-row input") as HTMLInputElement;
+    fireEvent.keyDown(pathInput, { key: "a", ctrlKey: true });
+    expect(screen.getByRole("button", { name: /^delete$/i })).toHaveTextContent(/^Delete$/);
+
+    fireEvent.keyDown(zone, { key: "a", metaKey: true });
+    expect(screen.getByRole("button", { name: /^delete$/i })).toHaveTextContent("Delete (2)");
+  });
+
+  it("selects local items with checkboxes and clears them when the folder changes", async () => {
+    localEntries = [localFile("one.txt"), localFile("two.txt"), localDirectory("sub")];
+    render(<SftpBrowser />);
+    await screen.findByText("one.txt");
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select all local items" }));
+    expect(screen.getByRole("button", { name: /^upload$/i })).toHaveTextContent("Upload (3)");
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select two.txt" }));
+    expect(screen.getByRole("button", { name: /^upload$/i })).toHaveTextContent("Upload (2)");
+
+    fireEvent.doubleClick(screen.getByRole("button", { name: /sub/ }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^upload$/i })).toHaveTextContent(/^Upload$/),
+    );
+  });
+
   it("deletes nothing when the confirmation is declined", async () => {
     remoteEntries = [remoteFile("a.dat")];
     mockConfirm.mockResolvedValue(false);

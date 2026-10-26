@@ -136,4 +136,88 @@ describe("CredentialVaultGate", () => {
     expect(await screen.findByRole("dialog", { name: "Create credential vault" }))
       .toBeInTheDocument();
   });
+  it("tries Touch ID once on its own and unlocks the vault", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_credential_vault_status") {
+        return Promise.resolve({ exists: true, unlocked: false, hasCredentials: true });
+      }
+      if (command === "biometric_status") {
+        return Promise.resolve({ available: true, enabled: true, kind: "Touch ID" });
+      }
+      if (command === "unlock_credential_vault_biometric") {
+        return Promise.resolve({ exists: true, unlocked: true, hasCredentials: true });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<CredentialVaultGate />);
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("unlock_credential_vault_biometric"),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Unlock credential vault" }))
+        .not.toBeInTheDocument(),
+    );
+    expect(
+      mockInvoke.mock.calls.filter(([command]) => command === "unlock_credential_vault_biometric"),
+    ).toHaveLength(1);
+  });
+
+  it("falls back to the master password when Touch ID is cancelled", async () => {
+    let biometricAttempts = 0;
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_credential_vault_status") {
+        return Promise.resolve({ exists: true, unlocked: false, hasCredentials: true });
+      }
+      if (command === "biometric_status") {
+        return Promise.resolve({ available: true, enabled: true, kind: "Touch ID" });
+      }
+      if (command === "unlock_credential_vault_biometric") {
+        biometricAttempts += 1;
+        return Promise.reject("Touch ID was cancelled");
+      }
+      if (command === "unlock_credential_vault") {
+        return Promise.resolve({ exists: true, unlocked: true, hasCredentials: true });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<CredentialVaultGate />);
+    await screen.findByRole("dialog", { name: "Unlock credential vault" });
+    expect(await screen.findByText(/enter your master password instead/i)).toBeInTheDocument();
+    // Not an error, and the prompt is not repeated by itself.
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(biometricAttempts).toBe(1);
+
+    // The button asks again.
+    fireEvent.click(screen.getByRole("button", { name: "Unlock with Touch ID" }));
+    await waitFor(() => expect(biometricAttempts).toBe(2));
+
+    fireEvent.change(screen.getByLabelText("Master password"), {
+      target: { value: "correct horse battery staple" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Unlock" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: "Unlock credential vault" }))
+        .not.toBeInTheDocument(),
+    );
+  });
+
+  it("does not offer Touch ID when it is not turned on", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "get_credential_vault_status") {
+        return Promise.resolve({ exists: true, unlocked: false, hasCredentials: true });
+      }
+      if (command === "biometric_status") {
+        return Promise.resolve({ available: true, enabled: false, kind: "Touch ID" });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<CredentialVaultGate />);
+    await screen.findByRole("dialog", { name: "Unlock credential vault" });
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("biometric_status"));
+    expect(screen.queryByRole("button", { name: /Unlock with/ })).not.toBeInTheDocument();
+    expect(mockInvoke).not.toHaveBeenCalledWith("unlock_credential_vault_biometric");
+  });
 });

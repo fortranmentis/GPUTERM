@@ -654,6 +654,7 @@ mod tests {
                     password: None,
                     private_key_path: None,
                     managed_key: None,
+                    assigned_key: None,
                     proxy: None,
                 },
             })

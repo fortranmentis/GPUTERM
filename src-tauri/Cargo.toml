@@ -29,9 +29,9 @@ portable-pty = "0.8"
 rand_core = { version = "0.6", features = ["getrandom"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Generates the per-profile SSH keys GpuTerm manages and exports them
-# passphrase-encrypted in OpenSSH format.
-ssh-key = { version = "0.6.7", features = ["ed25519", "encryption"] }
+# Generates the per-profile SSH keys and the key manager's key pairs
+# (Ed25519, RSA, ECDSA) and exports them in OpenSSH format.
+ssh-key = { version = "0.6.7", features = ["ed25519", "rsa", "p256", "p384", "p521", "encryption"] }
 # TCP keepalive tuning on SSH sockets, so a dead peer is noticed in seconds.
 socket2 = { version = "0.6", features = ["all"] }
 # openssl-on-win32 + vendored-openssl build libssh2 against OpenSSL instead of
@@ -53,3 +53,25 @@ ureq = { version = "3.3", features = ["json", "platform-verifier"] }
 gdkx11 = "0.18"
 gtk = "0.18"
 url = "2"
+
+# RSA key generation is unusably slow unoptimized (several minutes for 4096
+# bits in a debug build); optimize just the big-number crates.
+[profile.dev.package.rsa]
+opt-level = 3
+
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
+# Touch ID unlock of the credential vault: LocalAuthentication gates reading
+# the vault key from the login Keychain.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSError"] }
+objc2-local-authentication = { version = "0.3", default-features = false, features = ["std", "block2", "LABiometryType", "LAContext", "LAError"] }
+security-framework = "3"
+
+# Windows Hello unlock of the credential vault: the vault key is protected
+# with DPAPI for the current user and released after Windows Hello verifies.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = ["Foundation", "Security_Credentials_UI", "Win32_Foundation", "Win32_Security_Cryptography"] }

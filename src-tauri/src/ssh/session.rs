@@ -173,6 +173,9 @@ pub struct SshTarget {
     pub private_key_path: Option<String>,
     /// The profile's GpuTerm-managed key, loaded from the vault; tried first.
     pub managed_key: Option<crate::ssh::managed_key::SecretKey>,
+    /// The key manager key assigned to the profile, loaded from the vault;
+    /// tried right after `managed_key`.
+    pub assigned_key: Option<crate::ssh::managed_key::SecretKey>,
     /// Jump host to tunnel through, resolved from the saved profile chain.
     pub proxy: Option<Box<SshTarget>>,
 }
@@ -525,6 +528,7 @@ pub fn target_from_request(
         password: normalize_optional_string(request.password.clone()),
         private_key_path: profile.private_key_path.clone(),
         managed_key: None,
+        assigned_key: None,
         proxy,
     })
 }
@@ -557,6 +561,7 @@ pub fn target_for_active_session(state: &AppState, session_id: &str) -> Result<S
         password: state.credentials.get_password(session_id).ok().flatten(),
         private_key_path: profile.private_key_path,
         managed_key: None,
+        assigned_key: None,
         proxy,
     };
     crate::ssh::managed_key::attach_managed_keys(&mut target, &state.credentials);
@@ -616,6 +621,7 @@ fn build_proxy_target(
         password: password_for(&profile.id),
         private_key_path: profile.private_key_path.clone(),
         managed_key: None,
+        assigned_key: None,
         proxy,
     })))
 }
@@ -1605,6 +1611,7 @@ pub fn target_for_profile(
         password: credentials.get_password(profile_id).ok().flatten(),
         private_key_path: profile.private_key_path,
         managed_key: None,
+        assigned_key: None,
         proxy,
     };
     crate::ssh::managed_key::attach_managed_keys(&mut target, credentials);
@@ -1627,6 +1634,9 @@ pub fn target_signature(target: &SshTarget) -> String {
             .as_ref()
             .map_or("-", |key| key.fingerprint.as_str())
     );
+    if let Some(key) = target.assigned_key.as_ref() {
+        let _ = write!(signature, "+{}", key.fingerprint);
+    }
     let mut hop = target.proxy.as_deref();
     while let Some(current) = hop {
         let _ = write!(
@@ -1745,7 +1755,7 @@ fn authenticate(
     let mut last_error = None;
     while let Some(method) = next_auth_method(
         &offered,
-        target.managed_key.is_some(),
+        target.managed_key.is_some() || target.assigned_key.is_some(),
         private_key_path.is_some(),
         password.is_some(),
         &tried,
@@ -1754,11 +1764,16 @@ fn authenticate(
         tried.push(method);
         match method {
             AuthMethod::ManagedKey => {
-                let key = target.managed_key.as_ref().expect("planned only with a key");
-                if session
-                    .userauth_pubkey_memory(&target.username, None, &key.private_openssh, None)
-                    .is_err()
-                {
+                // The profile's own managed key, then the key manager key
+                // assigned to it.
+                for key in target.managed_key.iter().chain(target.assigned_key.iter()) {
+                    if session
+                        .userauth_pubkey_memory(&target.username, None, &key.private_openssh, None)
+                        .is_ok()
+                        || session.authenticated()
+                    {
+                        break;
+                    }
                     last_error = Some(
                         "The server no longer accepts this profile's GpuTerm key. Set the key up again.",
                     );
@@ -2233,6 +2248,7 @@ mod tests {
             password: Some("hunter2".to_string()),
             private_key_path: None,
             managed_key: None,
+            assigned_key: None,
             proxy: None,
         };
         let signature = target_signature(&base);
@@ -2262,6 +2278,7 @@ mod tests {
             password: Some("also-secret".to_string()),
             private_key_path: None,
             managed_key: None,
+            assigned_key: None,
             proxy: None,
         }));
         let jumped_signature = target_signature(&jumped);
@@ -2412,6 +2429,7 @@ mod tests {
             password: None,
             private_key_path: None,
             managed_key: Some(key),
+            assigned_key: None,
             proxy: None,
         };
         let tcp = TcpStream::connect("127.0.0.1:22").unwrap();
@@ -2668,6 +2686,7 @@ mod tests {
             password: None,
             private_key_path: None,
             managed_key: None,
+            assigned_key: None,
             proxy: Some(Box::new(SshTarget {
                 session_id: "jump".to_string(),
                 host: "jump.example".to_string(),
@@ -2676,6 +2695,7 @@ mod tests {
                 password: None,
                 private_key_path: None,
                 managed_key: None,
+                assigned_key: None,
                 proxy: None,
             })),
         };

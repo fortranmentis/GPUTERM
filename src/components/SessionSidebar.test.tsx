@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { SessionSidebar } from "./SessionSidebar";
 import { useSessionStore } from "../stores/sessionStore";
+import { useKeyStore } from "../stores/keyStore";
 import type { SessionConnectRequest, SessionProfile } from "../types/session";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -77,6 +78,21 @@ describe("SessionSidebar profile form", () => {
     fireEvent.click(screen.getByRole("button", { name: /^new$/i }));
     expect(screen.getByText("New profile")).toBeInTheDocument();
     expect(screen.getByPlaceholderText("10.0.0.21")).toHaveValue("");
+  });
+
+  it("opens the SSH key manager and offers key sign-in for a saved profile", async () => {
+    useKeyStore.setState({ keys: [], loaded: false });
+    render(<SessionSidebar />);
+
+    fireEvent.click(screen.getByRole("button", { name: /lab-a100/i }));
+    expect(await screen.findByRole("combobox", { name: /Sign in with key/ })).toHaveValue("");
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("list_keys"));
+
+    fireEvent.click(screen.getByRole("button", { name: "SSH keys" }));
+    const dialog = screen.getByRole("dialog", { name: "SSH keys" });
+    expect(within(dialog).getByRole("button", { name: "Generate key pair" })).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close SSH keys" }));
+    expect(screen.queryByRole("dialog", { name: "SSH keys" })).toBeNull();
   });
 
   it("sends a password entered for a saved session", async () => {

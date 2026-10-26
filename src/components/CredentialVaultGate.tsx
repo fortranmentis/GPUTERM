@@ -1,8 +1,12 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { confirm } from "@tauri-apps/plugin-dialog";
-import { KeyRound, LoaderCircle, ShieldCheck, Trash2 } from "lucide-react";
-import type { CredentialVaultStatus } from "../types/credentials";
+import { Fingerprint, KeyRound, LoaderCircle, ShieldCheck, Trash2 } from "lucide-react";
+import {
+  biometricName,
+  type BiometricStatus,
+  type CredentialVaultStatus,
+} from "../types/credentials";
 
 const MIN_MASTER_PASSWORD_CHARS = 8;
 
@@ -12,6 +16,11 @@ export function CredentialVaultGate() {
   const [confirmation, setConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [biometric, setBiometric] = useState<BiometricStatus | null>(null);
+  const [biometricNote, setBiometricNote] = useState<string | null>(null);
+  // Touch ID / Windows Hello is offered by itself once per opening; after
+  // that only the button asks again.
+  const autoTriedRef = useRef(false);
 
   const loadStatus = async () => {
     setError(null);
@@ -27,6 +36,60 @@ export function CredentialVaultGate() {
   useEffect(() => {
     void loadStatus();
   }, []);
+
+  const unlockWithBiometrics = async () => {
+    setError(null);
+    setBiometricNote(null);
+    setBusy(true);
+    try {
+      setStatus(
+        await invoke<CredentialVaultStatus>("unlock_credential_vault_biometric"),
+      );
+    } catch (unlockError) {
+      // Cancelling is normal; the master password always works.
+      setBiometricNote(
+        `${biometricName(biometric)} did not unlock the vault (${String(unlockError)}). Enter your master password instead.`,
+      );
+      try {
+        setBiometric(await invoke<BiometricStatus>("biometric_status"));
+      } catch {
+        // Keep the last known state.
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const locked = status?.exists === true && !status.unlocked;
+  useEffect(() => {
+    if (!locked) {
+      return;
+    }
+    let disposed = false;
+    void (async () => {
+      let next: BiometricStatus | null = null;
+      try {
+        next = (await invoke<BiometricStatus>("biometric_status")) ?? null;
+      } catch {
+        next = null;
+      }
+      if (disposed) return;
+      setBiometric(next);
+    })();
+    return () => {
+      disposed = true;
+    };
+  }, [locked]);
+
+  const biometricReady = locked && biometric?.available === true && biometric.enabled;
+  useEffect(() => {
+    if (biometricReady && !autoTriedRef.current) {
+      autoTriedRef.current = true;
+      void unlockWithBiometrics();
+    }
+    // Runs once when the stored key is known to be usable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [biometricReady]);
 
   if (status?.unlocked) {
     return null;
@@ -73,7 +136,7 @@ export function CredentialVaultGate() {
 
   const resetVault = async () => {
     const accepted = await confirm(
-      "Resetting the vault permanently deletes every SSH password saved by GpuTerm, and the private half of every SSH key GpuTerm created (export any you still need first). Session profiles are kept. Continue?",
+      "Resetting the vault permanently deletes every SSH password saved by GpuTerm, and the private half of every SSH key GpuTerm created (export any you still need first). It also turns off Touch ID / Windows Hello unlock. Session profiles are kept. Continue?",
       { title: "Reset credential vault", kind: "warning" },
     );
     if (!accepted) return;
@@ -84,6 +147,8 @@ export function CredentialVaultGate() {
       setStatus(
         await invoke<CredentialVaultStatus>("reset_credential_vault"),
       );
+      setBiometric(null);
+      setBiometricNote(null);
       setPassword("");
       setConfirmation("");
     } catch (resetError) {
@@ -153,6 +218,11 @@ export function CredentialVaultGate() {
           </>
         )}
 
+        {biometricNote && (
+          <small className="credential-vault-note" role="status">
+            {biometricNote}
+          </small>
+        )}
         {error && <div className="credential-vault-error" role="alert">{error}</div>}
 
         <div className="credential-vault-actions">
@@ -164,6 +234,17 @@ export function CredentialVaultGate() {
             ) : null
           ) : (
             <>
+              {biometricReady && (
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void unlockWithBiometrics()}
+                >
+                  <Fingerprint size={15} />
+                  Unlock with {biometricName(biometric)}
+                </button>
+              )}
               {!creating && (
                 <button
                   className="secondary-button danger"

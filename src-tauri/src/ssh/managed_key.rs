@@ -7,7 +7,11 @@
 //! checked by signing in with the new key alone before it is relied on.
 
 use serde::{Deserialize, Serialize};
-use ssh_key::{rand_core::OsRng, Algorithm, HashAlg, LineEnding, PrivateKey};
+use ssh_key::{
+    private::{KeypairData, RsaKeypair},
+    rand_core::OsRng,
+    Algorithm, EcdsaCurve, HashAlg, LineEnding, PrivateKey,
+};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -75,37 +79,110 @@ pub fn managed_key_vault_key(profile_id: &str) -> String {
     format!("sshkey:{profile_id}")
 }
 
-/// Loads the managed key of every hop in `target` that has one. A locked
-/// vault or a missing entry leaves the hop to its other credentials.
+/// Loads the managed key of every hop in `target` that has one, and the key
+/// manager key assigned to it. A locked vault or a missing entry leaves the
+/// hop to its other credentials.
 pub fn attach_managed_keys(target: &mut SshTarget, credentials: &impl CredentialStore) {
+    attach_managed_keys_with(
+        target,
+        &|account: &str| credentials.get_password(account).ok().flatten(),
+        &super::keyring::assigned_key_id,
+    );
+}
+
+/// `load` reads a vault entry; `assigned` names the key manager key a
+/// profile signs in with. Sign-in tries the profile's own managed key first,
+/// then the assigned key, then the profile's other credentials.
+pub(crate) fn attach_managed_keys_with(
+    target: &mut SshTarget,
+    load: &dyn Fn(&str) -> Option<String>,
+    assigned: &dyn Fn(&str) -> Option<String>,
+) {
+    let read = |account: &str| {
+        load(account).and_then(|private| {
+            SecretKey::from_openssh(Zeroizing::new(private))
+                .inspect_err(|error| eprintln!("GpuTerm: {error}"))
+                .ok()
+        })
+    };
     let mut hop = Some(target);
     while let Some(current) = hop {
         if current.managed_key.is_none() {
-            if let Ok(Some(private)) =
-                credentials.get_password(&managed_key_vault_key(&current.session_id))
-            {
-                match SecretKey::from_openssh(Zeroizing::new(private)) {
-                    Ok(key) => current.managed_key = Some(key),
-                    Err(error) => eprintln!("GpuTerm: {error}"),
-                }
-            }
+            current.managed_key = read(&managed_key_vault_key(&current.session_id));
+        }
+        if current.assigned_key.is_none() {
+            current.assigned_key = assigned(&current.session_id)
+                .and_then(|key_id| read(&super::keyring::key_vault_key(&key_id)))
+                // The same key twice would only spend another failed attempt.
+                .filter(|key| {
+                    current
+                        .managed_key
+                        .as_ref()
+                        .is_none_or(|own| own.fingerprint != key.fingerprint)
+                });
         }
         hop = current.proxy.as_deref_mut();
     }
+}
+
+/// Key types GpuTerm can generate: what `ssh-keygen -t` offers, minus DSA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KeyKind {
+    #[serde(rename = "ed25519")]
+    Ed25519,
+    #[serde(rename = "rsa-3072")]
+    Rsa3072,
+    #[serde(rename = "rsa-4096")]
+    Rsa4096,
+    #[serde(rename = "ecdsa-p256")]
+    EcdsaP256,
+    #[serde(rename = "ecdsa-p384")]
+    EcdsaP384,
+    #[serde(rename = "ecdsa-p521")]
+    EcdsaP521,
+}
+
+impl KeyKind {
+    pub fn parse(value: &str) -> Result<Self, String> {
+        serde_json::from_value(serde_json::Value::String(value.to_string()))
+            .map_err(|_| format!("Unknown SSH key type: {value}"))
+    }
+
+    fn private_key(self) -> Result<PrivateKey, ssh_key::Error> {
+        let ecdsa = |curve| PrivateKey::random(&mut OsRng, Algorithm::Ecdsa { curve });
+        match self {
+            KeyKind::Ed25519 => PrivateKey::random(&mut OsRng, Algorithm::Ed25519),
+            KeyKind::Rsa3072 => rsa(3072),
+            KeyKind::Rsa4096 => rsa(4096),
+            KeyKind::EcdsaP256 => ecdsa(EcdsaCurve::NistP256),
+            KeyKind::EcdsaP384 => ecdsa(EcdsaCurve::NistP384),
+            KeyKind::EcdsaP521 => ecdsa(EcdsaCurve::NistP521),
+        }
+    }
+}
+
+fn rsa(bits: usize) -> Result<PrivateKey, ssh_key::Error> {
+    PrivateKey::new(KeypairData::from(RsaKeypair::random(&mut OsRng, bits)?), "")
 }
 
 /// A freshly generated key pair.
 pub struct GeneratedKey {
     /// OpenSSH private key format, unencrypted (the vault encrypts it).
     pub private_openssh: Zeroizing<String>,
-    /// `ssh-ed25519 <base64> <comment>`, one line.
+    /// `<algorithm> <base64> <comment>`, one line.
     pub public_line: String,
     /// `SHA256:...`, as `ssh-keygen -l` prints it.
     pub fingerprint: String,
 }
 
+/// An Ed25519 key, as profile setup creates.
 pub fn generate(comment: &str) -> Result<GeneratedKey, String> {
-    let mut key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519)
+    generate_kind(KeyKind::Ed25519, comment)
+}
+
+pub fn generate_kind(kind: KeyKind, comment: &str) -> Result<GeneratedKey, String> {
+    let mut key = kind
+        .private_key()
         .map_err(|error| format!("Could not generate an SSH key: {error}"))?;
     key.set_comment(comment);
     let private_openssh = key
@@ -142,14 +219,24 @@ pub fn key_comment(profile_name: &str, now_epoch: u64) -> String {
     format!("gputerm:{name}:{date}")
 }
 
-/// Accepts only `ssh-ed25519 <base64> [comment]` with a plain comment, so the
-/// line is safe inside single quotes in both sh and PowerShell.
+/// Public-key algorithms GpuTerm generates and installs.
+const INSTALLABLE_ALGORITHMS: &[&str] = &[
+    "ssh-ed25519",
+    "ssh-rsa",
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+];
+
+/// Accepts only `<algorithm> <base64> [comment]` for a known algorithm with
+/// a plain comment, so the line is safe inside single quotes in both sh and
+/// PowerShell.
 pub(crate) fn validate_public_line(line: &str) -> Result<(), String> {
     let mut parts = line.split(' ');
     let algorithm = parts.next().unwrap_or_default();
     let body = parts.next().unwrap_or_default();
     let comment: Vec<&str> = parts.collect();
-    let valid = algorithm == "ssh-ed25519"
+    let valid = INSTALLABLE_ALGORITHMS.contains(&algorithm)
         && !body.is_empty()
         && body
             .chars()
@@ -258,7 +345,7 @@ fn run_key_script(
     }
 }
 
-fn install(session: &ssh2::Session, os: RemoteOs, public_line: &str) -> Result<(), String> {
+pub(crate) fn install(session: &ssh2::Session, os: RemoteOs, public_line: &str) -> Result<(), String> {
     validate_public_line(public_line)?;
     run_key_script(
         session,
@@ -296,7 +383,7 @@ pub fn render_export(private_openssh: &str, passphrase: &str) -> Result<Zeroizin
 
 /// Writes through a temporary file readable only by the user, then renames
 /// it into place.
-fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), String> {
+pub(crate) fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), String> {
     let temp = path.with_file_name(format!(
         ".{}.{}.tmp",
         path.file_name()
@@ -325,7 +412,7 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn find_profile(profile_id: &str) -> Result<SessionProfile, String> {
+pub(crate) fn find_profile(profile_id: &str) -> Result<SessionProfile, String> {
     list_profiles()?
         .into_iter()
         .find(|profile| profile.id == profile_id)
@@ -334,11 +421,12 @@ fn find_profile(profile_id: &str) -> Result<SessionProfile, String> {
 
 /// The target with its own sign-in credentials replaced by `key` alone, so a
 /// sign-in proves the server accepts that key. Jump hosts keep theirs.
-fn key_only(target: &SshTarget, key: SecretKey) -> SshTarget {
+pub(crate) fn key_only(target: &SshTarget, key: SecretKey) -> SshTarget {
     SshTarget {
         password: None,
         private_key_path: None,
         managed_key: Some(key),
+        assigned_key: None,
         ..target.clone()
     }
 }
@@ -533,8 +621,11 @@ mod tests {
     #[test]
     fn refuses_public_keys_that_could_escape_quotes() {
         for bad in [
-            "ssh-rsa AAAA x",
+            "ssh-dss AAAA x",
+            "ecdsa-sha2-nistp224 AAAA x",
             "ssh-ed25519 AAAA' ; rm -rf ~ '",
+            "ssh-rsa AAAA' ; rm -rf ~ '",
+            "ecdsa-sha2-nistp256 AAAA $(id)",
             "ssh-ed25519 AAAA $(id)",
             "ssh-ed25519 AAAA a b",
             "ssh-ed25519",
@@ -584,6 +675,24 @@ mod tests {
         assert!(!printed.contains("PRIVATE KEY"));
     }
 
+    fn hop(id: &str, proxy: Option<SshTarget>) -> SshTarget {
+        SshTarget {
+            session_id: id.into(),
+            host: id.into(),
+            port: 22,
+            username: "u".into(),
+            password: None,
+            private_key_path: None,
+            managed_key: None,
+            assigned_key: None,
+            proxy: proxy.map(Box::new),
+        }
+    }
+
+    fn vault_loader(credentials: &MemoryCredentialStore) -> impl Fn(&str) -> Option<String> + '_ {
+        |account: &str| credentials.get_password(account).ok().flatten()
+    }
+
     #[test]
     fn every_hop_gets_its_own_managed_key() {
         let credentials = MemoryCredentialStore::default();
@@ -596,18 +705,8 @@ mod tests {
             .unwrap();
         // A password under the bare id is not mistaken for a key.
         credentials.set_password("gpu", "pw".into()).unwrap();
-        let hop = |id: &str, proxy: Option<SshTarget>| SshTarget {
-            session_id: id.into(),
-            host: id.into(),
-            port: 22,
-            username: "u".into(),
-            password: None,
-            private_key_path: None,
-            managed_key: None,
-            proxy: proxy.map(Box::new),
-        };
         let mut target = hop("gpu", Some(hop("jump", None)));
-        attach_managed_keys(&mut target, &credentials);
+        attach_managed_keys_with(&mut target, &vault_loader(&credentials), &|_| None);
         assert!(target.managed_key.is_none());
         assert_eq!(
             target
@@ -620,6 +719,54 @@ mod tests {
                 .fingerprint,
             key.fingerprint
         );
+    }
+
+    #[test]
+    fn an_assigned_key_signs_in_after_the_profiles_own_key() {
+        let credentials = MemoryCredentialStore::default();
+        let own = generate("gputerm:own").unwrap();
+        let shared = generate_kind(KeyKind::EcdsaP256, "shared").unwrap();
+        credentials
+            .set_password(&managed_key_vault_key("gpu"), own.private_openssh.to_string())
+            .unwrap();
+        credentials
+            .set_password(
+                &crate::ssh::keyring::key_vault_key("k1"),
+                shared.private_openssh.to_string(),
+            )
+            .unwrap();
+        let assigned = |profile: &str| (profile != "jump").then(|| "k1".to_string());
+        let mut target = hop("gpu", Some(hop("jump", None)));
+        attach_managed_keys_with(&mut target, &vault_loader(&credentials), &assigned);
+        assert_eq!(target.managed_key.as_ref().unwrap().fingerprint, own.fingerprint);
+        assert_eq!(target.assigned_key.as_ref().unwrap().fingerprint, shared.fingerprint);
+        let jump = target.proxy.as_ref().unwrap();
+        assert!(jump.managed_key.is_none() && jump.assigned_key.is_none());
+
+        // Without its own key, a profile signs in with the assigned key alone.
+        let mut bare = hop("other", None);
+        attach_managed_keys_with(&mut bare, &vault_loader(&credentials), &assigned);
+        assert!(bare.managed_key.is_none());
+        assert_eq!(bare.assigned_key.as_ref().unwrap().fingerprint, shared.fingerprint);
+
+        // A locked vault (nothing readable) leaves every slot empty.
+        let mut locked = hop("gpu", None);
+        attach_managed_keys_with(&mut locked, &|_| None, &assigned);
+        assert!(locked.managed_key.is_none() && locked.assigned_key.is_none());
+
+        // Verification with one key never carries the assigned key along.
+        let verify = key_only(&target, SecretKey::from_openssh(shared.private_openssh).unwrap());
+        assert!(verify.assigned_key.is_none());
+        assert_eq!(verify.managed_key.unwrap().fingerprint, shared.fingerprint);
+    }
+
+    #[test]
+    fn an_unreadable_stored_key_is_skipped() {
+        let mut target = hop("gpu", None);
+        attach_managed_keys_with(&mut target, &|_| Some("not a key".to_string()), &|_| {
+            Some("k".to_string())
+        });
+        assert!(target.managed_key.is_none() && target.assigned_key.is_none());
     }
 
     #[test]

@@ -1348,6 +1348,7 @@ mod tests {
             password: None,
             private_key_path: key.map(str::to_string),
             managed_key: None,
+            assigned_key: None,
             proxy: proxy.map(Box::new),
         };
         let mut target = hop("gpu", None, Some(hop("jump", Some("/k"), None)));
@@ -1489,6 +1490,7 @@ mod tests {
             password: None,
             private_key_path: None,
             managed_key: None,
+            assigned_key: None,
             proxy: Some(Box::new(SshTarget {
                 session_id: "jump".to_string(),
                 host: "jump.example".to_string(),
@@ -1497,6 +1499,7 @@ mod tests {
                 password: None,
                 private_key_path: None,
                 managed_key: None,
+                assigned_key: None,
                 proxy: None,
             })),
         };

@@ -22,6 +22,14 @@ import { TransferQueue } from "./TransferQueue";
 import { selectIsActiveConnected, useSessionStore } from "../stores/sessionStore";
 import { useTransferStore } from "../stores/transferStore";
 import { mapWithConcurrencyLimit } from "../utils/concurrency";
+import {
+  applySelectionGesture,
+  countLabel,
+  selectAll,
+  toggleAll,
+  type FileSelection,
+  type SelectionGesture,
+} from "../utils/fileSelection";
 import { startNativeFileDrag } from "../utils/nativeFileDrag";
 import type {
   AppSettings,
@@ -122,6 +130,8 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
   const pointerDragRef = useRef<PointerDragState | null>(null);
   const dragOutCacheRef = useRef<Map<string, Promise<string[]>>>(new Map());
   const suppressPointerClickRef = useRef(false);
+  const remoteAnchorRef = useRef<string | null>(null);
+  const localAnchorRef = useRef<string | null>(null);
   // The local folder last listed. `localPath` doubles as the path input's
   // draft, so it cannot tell which folder the panel actually shows.
   const loadedLocalDirRef = useRef<string | null>(null);
@@ -183,6 +193,7 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
     } else {
       setEntries([]);
       setSelectedRemotePaths([]);
+      remoteAnchorRef.current = null;
       setCreatingFolder(false);
       setNewFolderName("");
     }
@@ -230,6 +241,7 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
         setPathDraft(response.path);
         setEntries(response.entries);
         setSelectedRemotePaths([]);
+        remoteAnchorRef.current = null;
       }
     } finally {
       setLoading(false);
@@ -244,6 +256,7 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
     setLocalPath(response.path);
     setLocalEntries(response.entries);
     setSelectedLocalPaths([]);
+    localAnchorRef.current = null;
     return response;
   };
 
@@ -1060,19 +1073,47 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
 
   prepareRemoteDragOutRef.current = prepareRemoteDragOut;
 
-  const selectRemoteEntry = (entry: SftpEntry, additive: boolean) => {
-    setSelectedRemotePaths((current) =>
-      additive
-        ? toggleSelection(current, entry.path)
-        : current.includes(entry.path) && current.length === 1
-          ? current
-          : [entry.path],
+  // Selection changes go through one updater so the anchor (the last
+  // non-Shift click) moves with the paths it extends a range from.
+  const updateRemoteSelection = (
+    change: (selection: FileSelection) => FileSelection,
+  ) => {
+    const next = change({
+      paths: selectedRemotePaths,
+      anchor: remoteAnchorRef.current,
+    });
+    remoteAnchorRef.current = next.anchor;
+    setSelectedRemotePaths(next.paths);
+  };
+
+  const updateLocalSelection = (
+    change: (selection: FileSelection) => FileSelection,
+  ) => {
+    const next = change({
+      paths: selectedLocalPaths,
+      anchor: localAnchorRef.current,
+    });
+    localAnchorRef.current = next.anchor;
+    setSelectedLocalPaths(next.paths);
+  };
+
+  const selectRemoteEntry = (
+    entry: SftpEntry,
+    gesture: SelectionGesture,
+    orderedPaths: string[],
+  ) => {
+    updateRemoteSelection((selection) =>
+      applySelectionGesture(selection, orderedPaths, entry.path, gesture),
     );
   };
 
-  const selectLocalEntry = (entry: LocalEntry, additive: boolean) => {
-    setSelectedLocalPaths((current) =>
-      additive ? toggleSelection(current, entry.path) : [entry.path],
+  const selectLocalEntry = (
+    entry: LocalEntry,
+    gesture: SelectionGesture,
+    orderedPaths: string[],
+  ) => {
+    updateLocalSelection((selection) =>
+      applySelectionGesture(selection, orderedPaths, entry.path, gesture),
     );
   };
 
@@ -1260,6 +1301,12 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
           }
           onGoUp={goUp}
           onSelectEntry={selectRemoteEntry}
+          onToggleAll={(orderedPaths) =>
+            updateRemoteSelection((selection) => toggleAll(selection, orderedPaths))
+          }
+          onSelectAll={(orderedPaths) =>
+            updateRemoteSelection((selection) => selectAll(selection, orderedPaths))
+          }
           onOpenDirectory={(nextPath) =>
             loadDirectory(nextPath).catch((error) =>
               setMessage({ kind: "error", text: String(error) }),
@@ -1342,6 +1389,12 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
           }
           onBrowse={browseLocalDirectory}
           onSelectEntry={selectLocalEntry}
+          onToggleAll={(orderedPaths) =>
+            updateLocalSelection((selection) => toggleAll(selection, orderedPaths))
+          }
+          onSelectAll={(orderedPaths) =>
+            updateLocalSelection((selection) => selectAll(selection, orderedPaths))
+          }
           onOpenDirectory={(nextPath) =>
             applyLocalPath(nextPath).catch((error) =>
               setMessage({ kind: "error", text: String(error) }),
@@ -1369,7 +1422,9 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
             onClick={downloadSelected}
           >
             <Download size={16} />
-            <span className="button-label">Download</span>
+            <span className="button-label">
+              {countLabel("Download", selectedRemoteEntries.length)}
+            </span>
           </button>
           <button
             className="secondary-button"
@@ -1380,7 +1435,9 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
             onClick={uploadLocalFile}
           >
             <Upload size={16} />
-            <span className="button-label">Upload</span>
+            <span className="button-label">
+              {countLabel("Upload", selectedLocalEntries.length)}
+            </span>
           </button>
           <button
             className="secondary-button"
@@ -1402,7 +1459,9 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
             onClick={deleteSelected}
           >
             <Trash2 size={16} />
-            <span className="button-label">Delete</span>
+            <span className="button-label">
+              {countLabel("Delete", selectedRemoteEntries.length)}
+            </span>
           </button>
         </div>
 
@@ -1440,12 +1499,6 @@ function createTransferTask(
 
 function createTransferId() {
   return globalThis.crypto?.randomUUID?.() ?? `transfer-${Date.now()}-${Math.random()}`;
-}
-
-function toggleSelection(current: string[], path: string) {
-  return current.includes(path)
-    ? current.filter((item) => item !== path)
-    : [...current, path];
 }
 
 function localEntryToDragFile(entry: LocalEntry): LocalDragFile {

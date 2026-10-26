@@ -8,6 +8,7 @@ use crate::ssh::gpu_monitor::{
     LINUX_DRM_GPU_COMMAND, NVIDIA_SMI_QUERY, XPU_DISCOVERY_COMMAND,
 };
 use crate::ssh::macos_monitor;
+use crate::ssh::os_release::{parse_os_release, OsRelease, OS_RELEASE_COMMAND};
 use crate::ssh::telemetry_history::{gpu_history_key, GpuSample, HistorySample};
 use crate::ssh::parse_util::{
     kib_to_mib, parse_average_clock, parse_cpu_model, parse_first_u64, parse_loadavg,
@@ -60,6 +61,10 @@ const DEFAULT_IGNORED_FS_TYPES: &[&str] = &[
     "autofs",
 ];
 
+// Linux collectors only use /proc plus GNU coreutils/procps/util-linux
+// (`df -P -T -B1`, `nproc`, `lscpu`, `ps --sort`), which Debian/Ubuntu, RHEL/
+// Fedora, openSUSE, Arch and Gentoo all ship; BusyBox-only hosts degrade to
+// the /proc sections. The distribution name comes from os-release(5).
 const CPU_COMMAND: &str = "printf '__PROC_STAT__\\n'; cat /proc/stat 2>/dev/null; printf '\\n__LOADAVG__\\n'; cat /proc/loadavg 2>/dev/null; printf '\\n__CPUINFO__\\n'; cat /proc/cpuinfo 2>/dev/null; printf '\\n__NPROC_ALL__\\n'; nproc --all 2>/dev/null || true; printf '\\n__NPROC_ONLINE__\\n'; nproc 2>/dev/null || true; printf '\\n__LSCPU__\\n'; lscpu 2>/dev/null || true";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +168,9 @@ pub struct RemoteTelemetry {
     gpu: Vec<GpuMetric>,
     users: Vec<RemoteUserSession>,
     agents: Vec<AgentMetric>,
+    /// The Linux distribution, read once per connection; None elsewhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    os_release: Option<OsRelease>,
     errors: TelemetryErrors,
 }
 
@@ -332,6 +340,8 @@ pub fn start(
             // Bound per reconnect iteration, like `gpu_probe`: a newly loaded
             // sensor module or a hot-added drive is picked up on reconnect.
             let mut thermal_probe = None;
+            // Outer None until read; the inner value is what the host reported.
+            let mut os_release: Option<Option<OsRelease>> = None;
             let mut host_os: Option<RemoteOs> = None;
             let mut consecutive_total_failures = 0_u32;
             while !stop.load(Ordering::SeqCst) {
@@ -361,6 +371,7 @@ pub fn start(
                     &mut previous_cpu,
                     &mut gpu_probe,
                     &mut thermal_probe,
+                    &mut os_release,
                     &mut agent_state,
                 );
                 let all_failed = telemetry_all_failed(&telemetry);
@@ -409,6 +420,7 @@ pub fn start_local(
         // Bound for the thread's life, matching `gpu_probe`: a `modprobe
         // drivetemp` after start-up is picked up on restart, not mid-session.
         let mut thermal_probe = None;
+        let mut os_release: Option<Option<OsRelease>> = None;
 
         while !stop.load(Ordering::SeqCst) {
             let settings_snapshot = settings
@@ -422,6 +434,7 @@ pub fn start_local(
                 &mut previous_cpu,
                 &mut gpu_probe,
                 &mut thermal_probe,
+                &mut os_release,
                 &mut agent_state,
             );
             emit_telemetry(&app, telemetry);
@@ -474,6 +487,7 @@ fn emit_connection_error_telemetry(app: &AppHandle, session_id: &str, error: &st
             gpu: Vec::new(),
             users: Vec::new(),
             agents: Vec::new(),
+            os_release: None,
             errors: TelemetryErrors {
                 cpu: Some(format!("Telemetry SSH connection failed: {}", error)),
                 memory: Some("Telemetry SSH connection failed".to_string()),
@@ -640,6 +654,7 @@ impl RemoteTelemetry {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_remote_telemetry(
     target: &SshTarget,
     session: &Session,
@@ -647,6 +662,7 @@ fn collect_remote_telemetry(
     previous_cpu: &mut Option<CpuStatSample>,
     gpu_probe: &mut Option<GpuProbe>,
     thermal_probe: &mut Option<ThermalProbe>,
+    os_release: &mut Option<Option<OsRelease>>,
     agent_state: &mut AgentMonitorState,
 ) -> RemoteTelemetry {
     if os == RemoteOs::Windows {
@@ -660,6 +676,14 @@ fn collect_remote_telemetry(
         );
     }
     let mut errors = TelemetryErrors::default();
+
+    if os == RemoteOs::Linux && os_release.is_none() {
+        // A failed read is retried next poll; a host without the file is
+        // remembered as unnamed.
+        if let Ok(output) = run_remote_command(session, OS_RELEASE_COMMAND) {
+            *os_release = Some(parse_os_release(&output));
+        }
+    }
 
     let hostname = run_remote_command(
         session,
@@ -728,8 +752,8 @@ fn collect_remote_telemetry(
         }
     };
 
-    let users = match run_remote_command(session, "LC_ALL=C who 2>/dev/null || true") {
-        Ok(output) => parse_who_output(&output),
+    let users = match run_remote_command(session, USERS_COMMAND) {
+        Ok(output) => parse_users_output(&output),
         Err(error) => {
             errors.users = Some(error);
             Vec::new()
@@ -754,6 +778,7 @@ fn collect_remote_telemetry(
         gpu,
         users,
         agents,
+        os_release: os_release.clone().flatten(),
         errors,
     }
 }
@@ -764,6 +789,7 @@ fn collect_local_telemetry(
     previous_cpu: &mut Option<CpuStatSample>,
     gpu_probe: &mut Option<GpuProbe>,
     thermal_probe: &mut Option<ThermalProbe>,
+    os_release: &mut Option<Option<OsRelease>>,
     agent_state: &mut AgentMonitorState,
 ) -> RemoteTelemetry {
     if os == RemoteOs::Windows {
@@ -777,6 +803,11 @@ fn collect_local_telemetry(
     }
 
     let mut errors = TelemetryErrors::default();
+    if os == RemoteOs::Linux && os_release.is_none() {
+        if let Ok(output) = run_local_command_for(os, OS_RELEASE_COMMAND) {
+            *os_release = Some(parse_os_release(&output));
+        }
+    }
     let hostname =
         run_local_command_for(os, "hostname 2>/dev/null || uname -n 2>/dev/null || true")
             .ok()
@@ -822,8 +853,8 @@ fn collect_local_telemetry(
     let gpu = collect_local_gpu_metrics(os, gpu_probe)
         .map_err(|error| errors.gpu = Some(error))
         .unwrap_or_default();
-    let users = run_local_command_for(os, "LC_ALL=C who 2>/dev/null || true")
-        .map(|output| parse_who_output(&output))
+    let users = run_local_command_for(os, USERS_COMMAND)
+        .map(|output| parse_users_output(&output))
         .map_err(|error| errors.users = Some(error))
         .unwrap_or_default();
     let agents = agent_monitor::collect_local_agents(os, agent_state)
@@ -841,6 +872,7 @@ fn collect_local_telemetry(
         gpu,
         users,
         agents,
+        os_release: os_release.clone().flatten(),
         errors,
     }
 }
@@ -922,6 +954,7 @@ fn collect_local_windows_telemetry(
         gpu,
         users,
         agents,
+        os_release: None,
         errors,
     }
 }
@@ -1383,7 +1416,80 @@ fn collect_windows_telemetry(
         gpu,
         users,
         agents,
+        os_release: None,
         errors,
+    }
+}
+
+/// `who` reads utmp, which newer systemd distributions (openSUSE Tumbleweed
+/// among them) no longer write, so an empty answer falls back to logind's
+/// sessions, one `key=value` block per session.
+const USERS_COMMAND: &str = "out=$(LC_ALL=C who 2>/dev/null); if [ -n \"$out\" ]; then printf '%s\\n' \"$out\"; elif command -v loginctl >/dev/null 2>&1; then echo __LOGINCTL__; for s in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do loginctl show-session \"$s\" -p Name -p TTY -p RemoteHost -p Timestamp -p Class 2>/dev/null; echo; done; fi; true";
+
+const LOGINCTL_MARKER: &str = "__LOGINCTL__";
+
+fn parse_users_output(output: &str) -> Vec<RemoteUserSession> {
+    match output.trim_start().strip_prefix(LOGINCTL_MARKER) {
+        Some(rest) => parse_loginctl_sessions(rest),
+        None => parse_who_output(output),
+    }
+}
+
+/// Parses `loginctl show-session -p …` blocks. Only user sessions count, as
+/// `who` would list them: greeters, lock screens and the per-user service
+/// manager are skipped.
+pub fn parse_loginctl_sessions(output: &str) -> Vec<RemoteUserSession> {
+    output
+        .split("\n\n")
+        .filter_map(|block| {
+            let mut name = None;
+            let mut tty = None;
+            let mut remote_host = None;
+            let mut timestamp = None;
+            let mut class = None;
+            for line in block.lines() {
+                let Some((key, value)) = line.trim().split_once('=') else {
+                    continue;
+                };
+                let value = Some(value.trim().to_string()).filter(|value| !value.is_empty());
+                match key {
+                    "Name" => name = value,
+                    "TTY" => tty = value,
+                    "RemoteHost" => remote_host = value,
+                    "Timestamp" => timestamp = value,
+                    "Class" => class = value,
+                    _ => {}
+                }
+            }
+            if class
+                .as_deref()
+                .is_some_and(|class| !class.starts_with("user"))
+            {
+                return None;
+            }
+            Some(RemoteUserSession {
+                user: name?,
+                tty: tty.unwrap_or_else(|| "-".to_string()),
+                login_time: timestamp
+                    .as_deref()
+                    .map(loginctl_login_time)
+                    .unwrap_or_default(),
+                from: remote_host,
+            })
+        })
+        .collect()
+}
+
+/// `Sun 2026-10-25 09:12:33 KST` → `2026-10-25 09:12`, the GNU `who` form.
+fn loginctl_login_time(timestamp: &str) -> String {
+    let fields: Vec<&str> = timestamp.split_whitespace().collect();
+    let date_index = fields.iter().position(|field| field.contains('-'));
+    match date_index {
+        Some(index) if index + 1 < fields.len() => {
+            let time = fields[index + 1];
+            format!("{} {}", fields[index], time.get(..5).unwrap_or(time))
+        }
+        _ => timestamp.to_string(),
     }
 }
 
@@ -1433,6 +1539,18 @@ pub(crate) fn run_remote_command_with_budget(
     command: &str,
     budget_secs: u64,
 ) -> Result<String, String> {
+    run_remote_command_with_input(session, command, None, budget_secs)
+}
+
+/// The same, writing `input` to the command's stdin and then closing it.
+/// For secrets a script reads with `read`: unlike arguments or environment
+/// variables, stdin is not visible to other users in `ps` or /proc.
+pub(crate) fn run_remote_command_with_input(
+    session: &Session,
+    command: &str,
+    input: Option<&[u8]>,
+    budget_secs: u64,
+) -> Result<String, String> {
     // `timeout` is missing on macOS <= 12, so fall back to a bare shell there;
     // libssh2's session timeout still bounds the fallback branch.
     let quoted = shell_quote(command);
@@ -1450,7 +1568,7 @@ pub(crate) fn run_remote_command_with_budget(
     if session_timeout != previous_timeout {
         session.set_timeout(session_timeout);
     }
-    let result = exec_remote(session, &wrapped);
+    let result = exec_remote_with_input(session, &wrapped, input);
     if session_timeout != previous_timeout {
         session.set_timeout(previous_timeout);
     }
@@ -1821,12 +1939,28 @@ fn run_raw_remote_command(session: &Session, command: &str) -> Result<(String, i
 /// Output is decoded lossily: Windows hosts in particular may emit non-UTF-8
 /// bytes for localized names, which must not fail the whole poll.
 fn exec_remote(session: &Session, wire_command: &str) -> Result<(String, String, i32), String> {
+    exec_remote_with_input(session, wire_command, None)
+}
+
+fn exec_remote_with_input(
+    session: &Session,
+    wire_command: &str,
+    input: Option<&[u8]>,
+) -> Result<(String, String, i32), String> {
     let mut channel = session
         .channel_session()
         .map_err(|error| format!("failed to open telemetry command channel: {}", error))?;
     channel
         .exec(wire_command)
         .map_err(|error| format!("failed to execute telemetry command: {}", error))?;
+    if let Some(input) = input {
+        channel
+            .write_all(input)
+            .and_then(|()| channel.flush())
+            .map_err(|error| format!("failed to send command input: {}", error))?;
+        // The script's `read` sees end of input instead of waiting for more.
+        let _ = channel.send_eof();
+    }
 
     let mut stdout = Vec::new();
     channel
@@ -2126,6 +2260,7 @@ mod tests {
             gpu: Vec::new(),
             users: Vec::new(),
             agents: Vec::new(),
+            os_release: None,
             errors,
         }
     }
@@ -2424,6 +2559,7 @@ mod tests {
         let mut previous_cpu = None;
         let mut gpu_probe = None;
         let mut thermal_probe = None;
+        let mut os_release = None;
         let mut agent_state = AgentMonitorState::default();
         let telemetry = collect_local_telemetry(
             "local-test",
@@ -2431,6 +2567,7 @@ mod tests {
             &mut previous_cpu,
             &mut gpu_probe,
             &mut thermal_probe,
+            &mut os_release,
             &mut agent_state,
         );
 
@@ -2477,6 +2614,7 @@ mod tests {
             gpu: Vec::new(),
             users: Vec::new(),
             agents: Vec::new(),
+            os_release: None,
             errors: TelemetryErrors {
                 cpu: Some("failed".to_string()),
                 memory: Some("failed".to_string()),
@@ -2516,6 +2654,7 @@ mod tests {
             gpu: Vec::new(),
             users: Vec::new(),
             agents: Vec::new(),
+            os_release: None,
             errors: TelemetryErrors {
                 cpu: Some("failed".to_string()),
                 memory: Some("failed".to_string()),
@@ -2562,6 +2701,45 @@ mod tests {
         assert_eq!(sessions[1].login_time, "2026-07-14 22:03");
         assert_eq!(sessions[2].login_time, "Jul 15 09:30");
         assert_eq!(sessions[2].from.as_deref(), Some("workstation.local"));
+    }
+
+    /// Captured from openSUSE Tumbleweed (systemd 256), where `who` is empty.
+    const LOGINCTL_SESSIONS: &str = "__LOGINCTL__\nName=alice\nTTY=pts/0\nRemoteHost=10.0.0.5\nTimestamp=Sun 2026-10-25 09:12:33 KST\nClass=user\n\nName=gdm\nTTY=tty1\nRemoteHost=\nTimestamp=Sun 2026-10-25 08:00:01 KST\nClass=greeter\n\nName=bob\nTTY=\nRemoteHost=\nTimestamp=Sun 2026-10-25 10:00:00 KST\nClass=user-early\n\nName=alice\nTTY=\nRemoteHost=\nTimestamp=Sun 2026-10-25 09:12:30 KST\nClass=manager\n\n";
+
+    #[test]
+    fn falls_back_to_logind_sessions_without_utmp() {
+        let sessions = parse_users_output(LOGINCTL_SESSIONS);
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].user, "alice");
+        assert_eq!(sessions[0].tty, "pts/0");
+        assert_eq!(sessions[0].login_time, "2026-10-25 09:12");
+        assert_eq!(sessions[0].from.as_deref(), Some("10.0.0.5"));
+        // A session without a terminal or remote host still lists its user.
+        assert_eq!(sessions[1].user, "bob");
+        assert_eq!(sessions[1].tty, "-");
+        assert_eq!(sessions[1].from, None);
+    }
+
+    #[test]
+    fn prefers_who_when_utmp_answers() {
+        let sessions = parse_users_output("alice    pts/0        2026-10-25 09:12 (10.0.0.5)\n");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].login_time, "2026-10-25 09:12");
+        assert!(parse_users_output("__LOGINCTL__\n").is_empty());
+    }
+
+    #[test]
+    fn serializes_os_release_only_when_known() {
+        let mut telemetry = telemetry_with(Vec::new(), TelemetryErrors::default());
+        let json = serde_json::to_value(&telemetry).unwrap();
+        assert!(json.get("osRelease").is_none());
+        telemetry.os_release = parse_os_release(
+            "NAME=\"Fedora Linux\"\nID=fedora\nVERSION_ID=41\nPRETTY_NAME=\"Fedora Linux 41 (Server Edition)\"\n",
+        );
+        let json = serde_json::to_value(&telemetry).unwrap();
+        assert_eq!(json["osRelease"]["prettyName"], "Fedora Linux 41 (Server Edition)");
+        assert_eq!(json["osRelease"]["id"], "fedora");
+        assert_eq!(json["osRelease"]["versionId"], "41");
     }
 
     #[test]

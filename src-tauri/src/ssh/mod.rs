@@ -1,11 +1,16 @@
 pub mod agent_monitor;
+pub mod biometric;
+pub mod container_monitor;
 pub mod credentials;
+pub mod db_monitor;
 pub mod forwarding;
 pub mod gpu_monitor;
 pub mod kbdint;
+pub mod keyring;
 pub mod local_fs;
 pub mod macos_monitor;
 pub mod managed_key;
+pub mod os_release;
 pub mod parse_util;
 pub mod process_control;
 pub mod resource_details;

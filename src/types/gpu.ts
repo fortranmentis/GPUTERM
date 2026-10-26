@@ -163,6 +163,15 @@ export type ThermalMetric = {
   unsupported: ThermalUnsupported[];
 };
 
+export type OsRelease = {
+  /** Lowercase machine id: `fedora`, `opensuse-tumbleweed`, `arch`, `gentoo`. */
+  id: string;
+  idLike?: string[];
+  /** For display: `Fedora Linux 41 (Server Edition)`. */
+  prettyName: string;
+  versionId?: string;
+};
+
 export type RemoteTelemetry = {
   sessionId: string;
   timestamp: string;
@@ -176,6 +185,8 @@ export type RemoteTelemetry = {
   gpu: GpuMetric[];
   users: RemoteUserSession[];
   agents: AgentMetric[];
+  /** Linux distribution from os-release(5); absent on Windows/macOS or until read. */
+  osRelease?: OsRelease;
   errors: {
     cpu?: string;
     memory?: string;

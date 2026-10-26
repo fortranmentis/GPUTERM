@@ -371,8 +371,83 @@ select:disabled {
 }
 
 .local-file-item,
-.file-list > .file-row:not(.file-head) {
+.file-list .file-row:not(.file-head) {
   cursor: grab;
+}
+
+/* Checkbox selection column (SFTP remote and local panels). */
+.file-select-row,
+.local-file-select-row,
+.local-file-head {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.file-select-row {
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.file-select-row > .file-row {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-bottom: 0;
+}
+
+.file-select-row.selected {
+  background: rgba(34, 211, 238, 0.2);
+}
+
+.file-select-row.selected > button.file-row.selected {
+  background: transparent;
+}
+
+.file-select-head {
+  flex: 0 0 auto;
+  background: #111923;
+}
+
+.local-file-select-row {
+  gap: 2px;
+}
+
+.local-file-select-row > .local-file-item {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.local-file-head {
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.file-select-cell {
+  display: inline-flex;
+  flex: 0 0 26px;
+  align-items: center;
+  justify-content: center;
+  align-self: stretch;
+}
+
+.file-select-checkbox {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--cyan-strong);
+  cursor: pointer;
+}
+
+.file-select-checkbox:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.file-select-checkbox:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 1px;
 }
 
 body.sftp-pointer-dragging,
@@ -1823,6 +1898,13 @@ button.file-row.selected {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.telemetry-status-label .telemetry-os-label {
+  flex: 0 1 auto;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .mini-control {
@@ -3565,6 +3647,7 @@ button.agent-summary-section {
 
 .credential-vault-dialog > label,
 .credential-vault-warning,
+.credential-vault-note,
 .credential-vault-error,
 .credential-vault-loading,
 .credential-vault-actions {
@@ -3584,6 +3667,27 @@ button.agent-summary-section {
 
 .credential-vault-warning {
   color: #fbbf24;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.biometric-unlock-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 10px;
+  padding: 6px 2px;
+  color: #cbd5e1;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.biometric-unlock-toggle input {
+  margin: 0;
+}
+
+.credential-vault-note {
+  color: #cbd5e1;
   font-size: 11px;
   line-height: 1.45;
 }
@@ -5089,4 +5193,442 @@ button.agent-summary-section {
   width: 14px;
   height: 14px;
   padding: 0;
+}
+
+/* SSH key manager ----------------------------------------------------------
+   Reuses the app-modal, managed-key and port-forwards primitives above. */
+
+.key-manager-dialog {
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+}
+
+.key-manager-title {
+  color: var(--cyan);
+}
+
+.key-manager-close {
+  margin-left: auto;
+}
+
+.key-manager-success {
+  color: #86efac;
+  font-size: 12px;
+}
+
+.key-manager-hint {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.key-manager-actions {
+  gap: 8px;
+}
+
+.key-generate-button {
+  align-self: flex-start;
+}
+
+.key-generate-form {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #0a1018;
+}
+
+.key-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.key-row {
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #0a1018;
+}
+
+.key-row-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.key-row-summary:hover {
+  background: #121d29;
+}
+
+.key-row-summary > svg:nth-child(2) {
+  flex: none;
+  color: var(--cyan);
+}
+
+.key-row-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.key-row-text strong,
+.key-row-text small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.key-row-text small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.key-row-details {
+  display: grid;
+  gap: 8px;
+  padding: 0 10px 10px;
+}
+
+.key-row-public {
+  display: block;
+  max-height: 72px;
+  overflow: auto;
+  padding: 6px 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: #070b11;
+  color: #cbd5e1;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.key-rename-row {
+  display: flex;
+  gap: 6px;
+}
+
+.key-rename-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.key-export-backdrop {
+  z-index: 55;
+}
+
+.profile-key-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.profile-key-select {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.profile-key-select > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.profile-key-install {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.profile-key-install small {
+  flex: 1 1 160px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* Containers and databases popovers */
+.telemetry-section-body strong.telemetry-warn {
+  color: var(--amber);
+}
+
+.containers-detail,
+.databases-detail {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.containers-section {
+  display: grid;
+  gap: 6px;
+}
+
+.containers-section h3,
+.containers-section h4 {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.containers-section h4 {
+  font-size: 10px;
+}
+
+.containers-muted,
+.containers-warn,
+.containers-bad,
+.containers-problem,
+.containers-footer {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.containers-muted,
+.containers-footer {
+  color: var(--subtle);
+}
+
+.containers-muted[role="status"] {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.containers-warn,
+.containers-problem {
+  color: var(--amber);
+}
+
+.containers-bad {
+  color: var(--red);
+}
+
+.containers-error {
+  padding: 8px 10px;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  border-radius: 7px;
+  background: rgba(127, 29, 29, 0.2);
+  color: #fecaca;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.container-row,
+.database-row {
+  display: grid;
+  gap: 4px;
+  padding: 9px 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #0a1119;
+}
+
+.database-row.attention {
+  border-color: var(--amber);
+}
+
+.container-row-main,
+.kube-row,
+.database-row-head {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.container-row-main strong,
+.kube-row strong,
+.database-row-title strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.container-image {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.container-usage {
+  overflow: hidden;
+  color: var(--subtle);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.container-actions,
+.databases-add,
+.database-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.container-actions .secondary-button.compact,
+.kube-row .secondary-button.compact,
+.databases-add .secondary-button.compact {
+  height: 26px;
+  gap: 4px;
+  font-size: 11px;
+}
+
+.container-state-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--subtle);
+}
+
+.container-state-dot.running {
+  background: var(--green);
+}
+
+.container-state-dot.warning {
+  background: var(--amber);
+}
+
+.container-state-dot.failed {
+  background: var(--red);
+}
+
+.kube-row {
+  font-size: 11px;
+}
+
+.kube-row-text,
+.database-row-title {
+  display: grid;
+  min-width: 0;
+  flex: 1 1 auto;
+  gap: 1px;
+}
+
+.kube-row-text span,
+.database-row-title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.database-row-head .icon-button {
+  flex: 0 0 auto;
+}
+
+.database-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 4px 12px;
+  margin: 2px 0 0;
+}
+
+.database-status-grid > div {
+  display: flex;
+  min-width: 0;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.database-status-grid dt {
+  color: var(--subtle);
+}
+
+.database-status-grid dd {
+  overflow: hidden;
+  margin: 0;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.database-form {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #0a1119;
+}
+
+.database-form label {
+  display: grid;
+  min-width: 0;
+  flex: 1 1 0;
+  gap: 4px;
+}
+
+.database-form label > span {
+  color: var(--subtle);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.database-form input:not([type="checkbox"]),
+.database-form select {
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-soft);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.database-form-row {
+  display: flex;
+  gap: 8px;
+}
+
+.database-form .database-port {
+  flex: 0 0 96px;
+}
+
+.database-form .database-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.database-form .database-checkbox > span {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: none;
+}
+
+.database-form-actions {
+  justify-content: flex-end;
+}
+
+.database-form-actions .primary-button {
+  flex: 0 0 auto;
+  padding: 0 14px;
 }

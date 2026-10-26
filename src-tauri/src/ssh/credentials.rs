@@ -1,3 +1,4 @@
+use crate::ssh::biometric::{self, BiometricKeyStore, BiometricStatus, VaultKey};
 use crate::ssh::session::config_dir;
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -96,20 +97,38 @@ pub struct SecureCredentialStore {
     runtime: Arc<Mutex<VaultRuntime>>,
     vault_path: Arc<PathBuf>,
     index_path: Arc<PathBuf>,
+    /// Holds a copy of the vault key for Touch ID / Windows Hello unlock.
+    biometrics: Arc<dyn BiometricKeyStore>,
 }
 
 impl Default for SecureCredentialStore {
     fn default() -> Self {
         let base = config_dir();
-        Self::with_paths(
+        Self::with_paths_and_biometrics(
             base.join("credentials.enc"),
             base.join("credential_index.json"),
+            biometric::platform_store(),
         )
     }
 }
 
 impl SecureCredentialStore {
+    /// A store without biometric unlock, so tests never reach the real
+    /// Keychain or DPAPI.
+    #[cfg(test)]
     fn with_paths(vault_path: PathBuf, index_path: PathBuf) -> Self {
+        Self::with_paths_and_biometrics(
+            vault_path,
+            index_path,
+            Arc::new(biometric::UnsupportedBiometrics),
+        )
+    }
+
+    fn with_paths_and_biometrics(
+        vault_path: PathBuf,
+        index_path: PathBuf,
+        biometrics: Arc<dyn BiometricKeyStore>,
+    ) -> Self {
         let known_present = read_credential_index(&index_path);
         Self {
             runtime: Arc::new(Mutex::new(VaultRuntime {
@@ -118,6 +137,7 @@ impl SecureCredentialStore {
             })),
             vault_path: Arc::new(vault_path),
             index_path: Arc::new(index_path),
+            biometrics,
         }
     }
 
@@ -160,6 +180,8 @@ impl SecureCredentialStore {
         let key = derive_key(master_password.as_bytes(), &kdf)?;
         let payload = VaultPayload::default();
         write_encrypted_vault(&self.vault_path, &key, &kdf, &payload)?;
+        // A key stored for an earlier vault can never open this one.
+        let _ = self.biometrics.delete_key();
 
         runtime.known_present.clear();
         self.sync_index(&runtime);
@@ -177,13 +199,21 @@ impl SecureCredentialStore {
         let envelope = read_vault_envelope(&self.vault_path)?;
         validate_envelope(&envelope)?;
         let key = derive_key(master_password.as_bytes(), &envelope.kdf)?;
-        let payload = decrypt_payload(&key, &envelope).map_err(|_| {
+        self.unlock_with_key(key, &envelope).map_err(|_| {
             "Incorrect master password or the credential vault is corrupted".to_string()
-        })?;
+        })
+    }
+
+    /// Opens the vault with an already derived key, which is accepted only
+    /// if it decrypts and authenticates `credentials.enc`.
+    fn unlock_with_key(
+        &self,
+        key: VaultKey,
+        envelope: &VaultEnvelope,
+    ) -> Result<CredentialVaultStatus, String> {
+        let payload = decrypt_payload(&key, envelope)?;
         if payload.magic != VAULT_MAGIC {
-            return Err(
-                "Incorrect master password or the credential vault is corrupted".to_string(),
-            );
+            return Err("Credential vault plaintext is invalid".to_string());
         }
 
         let mut runtime = self
@@ -212,10 +242,60 @@ impl SecureCredentialStore {
         runtime.known_present.clear();
         remove_file_if_present(&self.vault_path, "credential vault")?;
         remove_file_if_present(&self.index_path, "credential metadata")?;
+        self.biometrics.delete_key()?;
         Ok(CredentialVaultStatus {
             exists: false,
             unlocked: false,
             has_credentials: false,
+        })
+    }
+
+    pub fn biometric_status(&self) -> BiometricStatus {
+        let kind = self.biometrics.kind();
+        BiometricStatus {
+            available: kind.is_some(),
+            enabled: self.biometrics.is_enabled() && self.vault_path.exists(),
+            kind: kind.map(str::to_string),
+        }
+    }
+
+    /// Stores a copy of the vault key behind Touch ID / Windows Hello. The
+    /// key only exists while the vault is unlocked.
+    pub fn enable_biometric_unlock(&self) -> Result<(), String> {
+        let kind = self.biometrics.kind().ok_or_else(|| {
+            "Touch ID or Windows Hello is not available or not set up on this computer".to_string()
+        })?;
+        let runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| "Credential vault state is unavailable".to_string())?;
+        let key = runtime
+            .key
+            .as_ref()
+            .filter(|_| runtime.payload.is_some())
+            .ok_or_else(|| format!("Unlock the credential vault before turning on {kind}"))?;
+        self.biometrics.save_key(key)
+    }
+
+    pub fn disable_biometric_unlock(&self) -> Result<(), String> {
+        self.biometrics.delete_key()
+    }
+
+    /// Asks for Touch ID / Windows Hello and opens the vault with the stored
+    /// key. A key that no longer opens the vault (it was replaced) is
+    /// removed, so the next start goes straight to the master password.
+    pub fn unlock_with_biometrics(&self) -> Result<CredentialVaultStatus, String> {
+        if !self.biometrics.is_enabled() {
+            return Err("Biometric unlock is not turned on".to_string());
+        }
+        let envelope = read_vault_envelope(&self.vault_path)?;
+        validate_envelope(&envelope)?;
+        let key = self.biometrics.unlock_key(biometric::UNLOCK_REASON)?;
+        self.unlock_with_key(key, &envelope).map_err(|_| {
+            let _ = self.biometrics.delete_key();
+            "The saved key no longer opens the vault; unlock with the master password and \
+             turn biometric unlock on again"
+                .to_string()
         })
     }
 
@@ -564,6 +644,13 @@ pub struct MemoryCredentialStore {
 }
 
 #[cfg(test)]
+impl MemoryCredentialStore {
+    pub fn is_empty(&self) -> bool {
+        self.passwords.lock().map(|map| map.is_empty()).unwrap_or(true)
+    }
+}
+
+#[cfg(test)]
 impl CredentialStore for MemoryCredentialStore {
     fn set_password(&self, session_id: &str, password: String) -> Result<(), String> {
         self.passwords
@@ -717,6 +804,180 @@ mod tests {
         let (store, vault, index) = test_store();
         assert!(store.initialize("short".to_string()).is_err());
         assert!(!vault.exists());
+        cleanup(&vault, &index);
+    }
+
+    /// Stands in for the Keychain / DPAPI and the platform prompt.
+    struct FakeBiometrics {
+        available: bool,
+        key: Mutex<Option<[u8; KEY_BYTES]>>,
+        user_verifies: Mutex<bool>,
+    }
+
+    impl FakeBiometrics {
+        fn new(available: bool) -> Arc<Self> {
+            Arc::new(Self {
+                available,
+                key: Mutex::new(None),
+                user_verifies: Mutex::new(true),
+            })
+        }
+
+        fn stored(&self) -> Option<[u8; KEY_BYTES]> {
+            *self.key.lock().unwrap()
+        }
+    }
+
+    impl BiometricKeyStore for FakeBiometrics {
+        fn kind(&self) -> Option<&'static str> {
+            self.available.then_some("Touch ID")
+        }
+
+        fn is_enabled(&self) -> bool {
+            self.key.lock().unwrap().is_some()
+        }
+
+        fn save_key(&self, key: &[u8; KEY_BYTES]) -> Result<(), String> {
+            *self.key.lock().unwrap() = Some(*key);
+            Ok(())
+        }
+
+        fn delete_key(&self) -> Result<(), String> {
+            *self.key.lock().unwrap() = None;
+            Ok(())
+        }
+
+        fn unlock_key(&self, reason: &str) -> Result<VaultKey, String> {
+            assert_eq!(reason, biometric::UNLOCK_REASON);
+            if !*self.user_verifies.lock().unwrap() {
+                return Err("Touch ID was cancelled".to_string());
+            }
+            let key = self.stored().ok_or_else(|| "no key".to_string())?;
+            Ok(Zeroizing::new(key))
+        }
+    }
+
+    fn biometric_store(
+        biometrics: &Arc<FakeBiometrics>,
+    ) -> (SecureCredentialStore, PathBuf, PathBuf) {
+        let (_, vault, index) = test_store();
+        let store = SecureCredentialStore::with_paths_and_biometrics(
+            vault.clone(),
+            index.clone(),
+            Arc::clone(biometrics) as Arc<dyn BiometricKeyStore>,
+        );
+        (store, vault, index)
+    }
+
+    #[test]
+    fn biometric_unlock_opens_the_vault_with_the_stored_key() {
+        let biometrics = FakeBiometrics::new(true);
+        let (store, vault, index) = biometric_store(&biometrics);
+        // Nothing to store while there is no unlocked vault.
+        assert!(store
+            .enable_biometric_unlock()
+            .unwrap_err()
+            .contains("Unlock the credential vault"));
+        store
+            .initialize("correct horse battery staple".to_string())
+            .unwrap();
+        store
+            .set_password("session-a", "ssh-super-secret".to_string())
+            .unwrap();
+        store.enable_biometric_unlock().unwrap();
+        assert_eq!(
+            store.biometric_status(),
+            BiometricStatus {
+                available: true,
+                enabled: true,
+                kind: Some("Touch ID".to_string()),
+            }
+        );
+
+        let restarted = SecureCredentialStore::with_paths_and_biometrics(
+            vault.clone(),
+            index.clone(),
+            Arc::clone(&biometrics) as Arc<dyn BiometricKeyStore>,
+        );
+        *biometrics.user_verifies.lock().unwrap() = false;
+        assert!(restarted.unlock_with_biometrics().is_err());
+        assert!(!restarted.status().unlocked);
+        // A cancelled prompt keeps the feature on.
+        assert!(biometrics.stored().is_some());
+
+        *biometrics.user_verifies.lock().unwrap() = true;
+        let status = restarted.unlock_with_biometrics().unwrap();
+        assert!(status.unlocked && status.has_credentials);
+        assert_eq!(
+            restarted.get_password("session-a").unwrap().as_deref(),
+            Some("ssh-super-secret")
+        );
+        cleanup(&vault, &index);
+    }
+
+    #[test]
+    fn a_key_that_no_longer_opens_the_vault_is_discarded() {
+        let biometrics = FakeBiometrics::new(true);
+        let (store, vault, index) = biometric_store(&biometrics);
+        store
+            .initialize("correct horse battery staple".to_string())
+            .unwrap();
+        biometrics.save_key(&[7_u8; KEY_BYTES]).unwrap();
+        let restarted = SecureCredentialStore::with_paths_and_biometrics(
+            vault.clone(),
+            index.clone(),
+            Arc::clone(&biometrics) as Arc<dyn BiometricKeyStore>,
+        );
+        assert!(restarted
+            .unlock_with_biometrics()
+            .unwrap_err()
+            .contains("master password"));
+        assert!(!restarted.status().unlocked);
+        assert!(biometrics.stored().is_none());
+        assert!(restarted
+            .unlock_with_biometrics()
+            .unwrap_err()
+            .contains("not turned on"));
+        cleanup(&vault, &index);
+    }
+
+    #[test]
+    fn disabling_resetting_or_recreating_the_vault_removes_the_key() {
+        let biometrics = FakeBiometrics::new(true);
+        let (store, vault, index) = biometric_store(&biometrics);
+        // A key left from an earlier vault.
+        biometrics.save_key(&[1_u8; KEY_BYTES]).unwrap();
+        store
+            .initialize("correct horse battery staple".to_string())
+            .unwrap();
+        assert!(biometrics.stored().is_none());
+
+        store.enable_biometric_unlock().unwrap();
+        store.disable_biometric_unlock().unwrap();
+        assert!(!store.biometric_status().enabled);
+
+        store.enable_biometric_unlock().unwrap();
+        store.reset().unwrap();
+        assert!(biometrics.stored().is_none());
+        cleanup(&vault, &index);
+    }
+
+    #[test]
+    fn biometric_unlock_needs_a_supported_computer() {
+        let biometrics = FakeBiometrics::new(false);
+        let (store, vault, index) = biometric_store(&biometrics);
+        store
+            .initialize("correct horse battery staple".to_string())
+            .unwrap();
+        assert!(store.enable_biometric_unlock().is_err());
+        assert_eq!(
+            store.biometric_status(),
+            BiometricStatus {
+                available: false,
+                enabled: false,
+                kind: None,
+            }
+        );
         cleanup(&vault, &index);
     }
 

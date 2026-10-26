@@ -6,6 +6,7 @@ import {
   Bot,
   Boxes,
   Cpu,
+  Database,
   Gauge,
   HardDrive,
   MemoryStick,
@@ -27,7 +28,9 @@ import { AgentUsagePopover } from "./AgentUsagePopover";
 import { AlertSettingsPopover } from "./AlertSettingsPopover";
 import { activeAlertCount, useAlertStore } from "../stores/alertStore";
 import { LlmRuntimePopover } from "./LlmRuntimePopover";
+import { ContainersPopover } from "./ContainersPopover";
 import { CpuUsagePopover } from "./CpuUsagePopover";
+import { DatabasesPopover } from "./DatabasesPopover";
 import { DiskUsagePopover } from "./DiskUsagePopover";
 import { GpuUsagePopover } from "./GpuUsagePopover";
 import { MemoryUsagePopover } from "./MemoryUsagePopover";
@@ -43,6 +46,7 @@ import type {
   AgentMetric,
   AgentRateLimitMetric,
   GpuMetric,
+  RemoteTelemetry,
   TelemetryDisplayMode,
   TelemetrySettings,
 } from "../types/gpu";
@@ -65,6 +69,15 @@ import {
 } from "../utils/format";
 import { useTelemetryHistory } from "../hooks/useTelemetryHistory";
 import { useProcessKill } from "../hooks/useProcessKill";
+import { useContainerOverview } from "../hooks/useContainerOverview";
+import { useDatabaseMonitor } from "../hooks/useDatabaseMonitor";
+import {
+  busiestContainer,
+  containerSummary,
+  isOverviewEmpty,
+  kubeSummary,
+} from "../utils/containerFormat";
+import { dbCardLine } from "../utils/dbFormat";
 
 type OpenResource =
   | ResourceDetailType
@@ -72,6 +85,8 @@ type OpenResource =
   | "users"
   | "agents"
   | "llm"
+  | "containers"
+  | "databases"
   | null;
 
 const DETAIL_TITLES: Record<Exclude<OpenResource, null>, string> = {
@@ -82,7 +97,16 @@ const DETAIL_TITLES: Record<Exclude<OpenResource, null>, string> = {
   users: "Logged-in users",
   agents: "AI DASH",
   llm: "LLM runtimes",
+  containers: "Containers",
+  databases: "Databases",
 };
+
+/** Pop-out window title host part: `gpu01 (Fedora Linux 41)`. */
+export function hostLabel(telemetry: RemoteTelemetry | null | undefined): string {
+  const host = telemetry?.hostname ?? "GpuTerm";
+  const distro = telemetry?.osRelease?.prettyName;
+  return distro ? `${host} (${distro})` : host;
+}
 
 type RemoteTelemetryBarProps = {
   onClose?: () => void;
@@ -102,6 +126,19 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
   const llmInstances = useLlmStore((state) => state.instances);
   const setLlmInstances = useLlmStore((state) => state.setInstances);
   const [openResource, setOpenResource] = useState<OpenResource>(null);
+  const sessions = useSessionStore((state) => state.sessions);
+  const connectedSessionIds = useSessionStore((state) => state.connectedSessionIds);
+  const activeIsLocal =
+    sessions.find((session) => session.id === activeSessionId)?.isLocal === true;
+  // Databases are read through connected remote profiles, whichever is shown.
+  const connectedRemoteIds = useMemo(
+    () =>
+      connectedSessionIds.filter(
+        (id) => sessions.find((session) => session.id === id)?.isLocal !== true,
+      ),
+    [connectedSessionIds, sessions],
+  );
+  const databases = useDatabaseMonitor(connectedRemoteIds);
   const [alertsOpen, setAlertsOpen] = useState(false);
   // The detail poll's loader, so ending a process can refresh the table now.
   const reloadDetailsRef = useRef<(() => void) | null>(null);
@@ -130,6 +167,8 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
   const usersButtonRef = useRef<HTMLButtonElement | null>(null);
   const agentsButtonRef = useRef<HTMLButtonElement | null>(null);
   const llmButtonRef = useRef<HTMLButtonElement | null>(null);
+  const containersButtonRef = useRef<HTMLButtonElement | null>(null);
+  const databasesButtonRef = useRef<HTMLButtonElement | null>(null);
   const [ignoreDraft, setIgnoreDraft] = useState(settings.diskIgnoreFsTypes.join(", "));
 
   useEffect(() => {
@@ -154,6 +193,16 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
     [telemetry?.users],
   );
   const llmSummary = llmTelemetry?.summary ?? null;
+  const containersEnabled = connected && !!telemetry && showSystem && !activeIsLocal;
+  const containers = useContainerOverview(
+    activeSessionId,
+    containersEnabled,
+    openResource === "containers",
+  );
+  // Hidden on a server with neither a container runtime nor kubectl.
+  const showContainers =
+    containersEnabled && containers.overview != null && !isOverviewEmpty(containers.overview);
+  const busiest = showContainers && containers.overview ? busiestContainer(containers.overview) : null;
   const agentQuotaRows = useMemo(
     () => createAgentQuotaSummary(telemetry?.agents ?? []),
     [telemetry?.agents],
@@ -161,11 +210,13 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
 
   useEffect(() => {
     if (!connected) {
-      // The LLM card does not depend on a session, so it stays open.
-      setOpenResource((current) => (current === "llm" ? current : null));
+      // The LLM and database cards do not depend on the shown session.
+      setOpenResource((current) =>
+        current === "llm" || current === "databases" ? current : null,
+      );
     } else if (
       !showSystem &&
-      ["cpu", "memory", "disk", "users", "agents"].includes(openResource ?? "")
+      ["cpu", "memory", "disk", "users", "agents", "containers"].includes(openResource ?? "")
     ) {
       setOpenResource(null);
     } else if (!showGpu && openResource === "gpu") {
@@ -181,7 +232,9 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
       openResource === "disk" ||
       openResource === "users" ||
       openResource === "agents" ||
-      openResource === "llm"
+      openResource === "llm" ||
+      openResource === "containers" ||
+      openResource === "databases"
     ) {
       setResourceDetails(null);
       setDetailsLoading(false);
@@ -281,7 +334,7 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
         url: sessionScoped
           ? `/?window=detail&session=${encodeURIComponent(activeSessionId ?? "")}&resource=${resource}`
           : `/?window=detail&resource=llm`,
-        title: `${DETAIL_TITLES[resource]} — ${telemetry?.hostname ?? "GpuTerm"}`,
+        title: `${DETAIL_TITLES[resource]} — ${hostLabel(telemetry)}`,
         width: 780,
         height: 600,
         minWidth: 420,
@@ -315,7 +368,14 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
       <div className="telemetry-settings">
         <div className="telemetry-status-label">
           <Activity size={16} />
-          <span>{telemetry?.hostname ?? "Telemetry"}</span>
+          <span title={telemetry?.osRelease?.prettyName}>
+            {telemetry?.hostname ?? "Telemetry"}
+          </span>
+          {telemetry?.osRelease?.prettyName && (
+            <span className="telemetry-os-label" data-testid="telemetry-os-label">
+              {telemetry.osRelease.prettyName}
+            </span>
+          )}
           {onClose && (
             <button
               className="icon-button ghost telemetry-close-button"
@@ -546,6 +606,55 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
         </TelemetryButton>
       )}
 
+      {showContainers && containers.overview && (
+        <TelemetryButton
+          buttonRef={containersButtonRef}
+          title="Containers"
+          icon={<Boxes size={16} />}
+          className="containers-summary-section"
+          expanded={openResource === "containers"}
+          onClick={() => openDetail("containers")}
+        >
+          {containerSummary(containers.overview) && (
+            <strong className={containers.overview.runtimeError ? "telemetry-warn" : undefined}>
+              {containerSummary(containers.overview)}
+            </strong>
+          )}
+          {kubeSummary(containers.overview) && <span>{kubeSummary(containers.overview)}</span>}
+          {busiest?.cpuPercent != null && (
+            <span title={busiest.name}>
+              Busiest: {busiest.name} {busiest.cpuPercent.toFixed(1)}% CPU
+            </span>
+          )}
+        </TelemetryButton>
+      )}
+
+      <TelemetryButton
+        buttonRef={databasesButtonRef}
+        title="Databases"
+        icon={<Database size={16} />}
+        titleAccessory={
+          databases.instances.length > 0 ? (
+            <span className="agent-summary-session-count">{databases.instances.length}</span>
+          ) : null
+        }
+        className="databases-summary-section"
+        expanded={openResource === "databases"}
+        onClick={() => openDetail("databases")}
+      >
+        {databases.instances.length === 0 ? (
+          <span>{databases.loadError ?? "No database added"}</span>
+        ) : databases.reachable.length === 0 ? (
+          <span>Connect to a database's server to read it</span>
+        ) : (
+          databases.reachable.slice(0, 3).map((instance) => (
+            <span key={instance.id} title={instance.name}>
+              {dbCardLine(instance.name, instance.kind, databases.readings[instance.id])}
+            </span>
+          ))
+        )}
+      </TelemetryButton>
+
       <TelemetryButton
         buttonRef={llmButtonRef}
         title="LLM RUNTIME"
@@ -600,6 +709,29 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
         />
       )}
 
+      {openResource === "containers" && activeSessionId && (
+        <ContainersPopover
+          sessionId={activeSessionId}
+          overview={containers.overview}
+          error={containers.error}
+          loading={containers.loading}
+          onRefresh={containers.refresh}
+          anchorRef={containersButtonRef}
+          onClose={() => setOpenResource(null)}
+        />
+      )}
+      {openResource === "databases" && (
+        <DatabasesPopover
+          instances={databases.instances}
+          readings={databases.readings}
+          profiles={sessions}
+          connectedProfileIds={connectedRemoteIds}
+          onInstancesChange={databases.replaceInstances}
+          onRefresh={databases.poll}
+          anchorRef={databasesButtonRef}
+          onClose={() => setOpenResource(null)}
+        />
+      )}
       {openResource === "cpu" && (
         <CpuUsagePopover
           metric={resourceDetails?.cpu ?? null}

@@ -15,11 +15,18 @@ import {
   useState,
   type ClipboardEvent,
   type DragEvent,
+  type KeyboardEvent,
   type PointerEvent,
   type Ref,
 } from "react";
 import type { SftpEntry } from "../types/session";
 import { formatFileSize } from "../utils/formatBytes";
+import {
+  isTextEditingTarget,
+  selectAllState,
+  type SelectionGesture,
+} from "../utils/fileSelection";
+import { SelectAllCheckbox } from "./SelectionCheckbox";
 
 type RemoteSortKey = "name" | "type" | "size" | "modifiedTime";
 type SortDirection = "ascending" | "descending";
@@ -50,7 +57,16 @@ type RemoteFilePanelProps = {
   onOpenPath: (path: string) => void;
   onRefresh: () => void;
   onGoUp: () => void;
-  onSelectEntry: (entry: SftpEntry, additive: boolean) => void;
+  /** `orderedPaths` is the current sorted display order, for Shift ranges. */
+  onSelectEntry: (
+    entry: SftpEntry,
+    gesture: SelectionGesture,
+    orderedPaths: string[],
+  ) => void;
+  /** Header checkbox: select every entry, or clear when all are selected. */
+  onToggleAll: (orderedPaths: string[]) => void;
+  /** Ctrl/Cmd+A while the panel has focus. */
+  onSelectAll: (orderedPaths: string[]) => void;
   onOpenDirectory: (path: string) => void;
   onPointerDragStart: (
     entry: SftpEntry,
@@ -94,6 +110,8 @@ export function RemoteFilePanel({
   onRefresh,
   onGoUp,
   onSelectEntry,
+  onToggleAll,
+  onSelectAll,
   onOpenDirectory,
   onPointerDragStart,
   onConsumePointerDragClick,
@@ -117,6 +135,23 @@ export function RemoteFilePanel({
     () => sortRemoteEntries(entries, sort),
     [entries, sort],
   );
+  const orderedPaths = useMemo(
+    () => sortedEntries.map((entry) => entry.path),
+    [sortedEntries],
+  );
+  const headerState = selectAllState(selectedPaths, orderedPaths);
+
+  const selectAllFromKeyboard = (event: KeyboardEvent<HTMLElement>) => {
+    if (
+      (event.ctrlKey || event.metaKey) &&
+      !event.altKey &&
+      event.key.toLowerCase() === "a" &&
+      !isTextEditingTarget(event.target)
+    ) {
+      event.preventDefault();
+      onSelectAll(orderedPaths);
+    }
+  };
 
   const chooseSort = (key: RemoteSortKey) => {
     setSort((current) => {
@@ -148,6 +183,7 @@ export function RemoteFilePanel({
       onDragOver={onDragOverLocalFiles}
       onDragLeave={onDragLeaveLocalFiles}
       onPaste={onPasteLocalFiles}
+      onKeyDown={selectAllFromKeyboard}
     >
       <div className="panel-title-row">
         <div>
@@ -265,33 +301,43 @@ export function RemoteFilePanel({
       )}
 
       <div className="file-table">
-        <div className="file-row file-head">
-          <SortHeader
-            label="Name"
-            sortKey="name"
-            activeSort={sort}
-            onClick={chooseSort}
-          />
-          <SortHeader
-            label="Type"
-            sortKey="type"
-            activeSort={sort}
-            onClick={chooseSort}
-          />
-          <SortHeader
-            label="Size"
-            sortKey="size"
-            activeSort={sort}
-            onClick={chooseSort}
-          />
-          <SortHeader
-            label="Modified"
-            sortKey="modifiedTime"
-            activeSort={sort}
-            onClick={chooseSort}
-          />
+        <div className="file-select-row file-select-head">
+          <span className="file-select-cell">
+            <SelectAllCheckbox
+              state={headerState}
+              disabled={!connected || sortedEntries.length === 0}
+              label="Select all remote items"
+              onToggle={() => onToggleAll(orderedPaths)}
+            />
+          </span>
+          <div className="file-row file-head">
+            <SortHeader
+              label="Name"
+              sortKey="name"
+              activeSort={sort}
+              onClick={chooseSort}
+            />
+            <SortHeader
+              label="Type"
+              sortKey="type"
+              activeSort={sort}
+              onClick={chooseSort}
+            />
+            <SortHeader
+              label="Size"
+              sortKey="size"
+              activeSort={sort}
+              onClick={chooseSort}
+            />
+            <SortHeader
+              label="Modified"
+              sortKey="modifiedTime"
+              activeSort={sort}
+              onClick={chooseSort}
+            />
+          </div>
         </div>
-        <div className="file-list">
+        <div className="file-list" aria-label="Remote files" aria-multiselectable="true">
           {sortedEntries.map((entry) =>
             entry.path === renamingPath ? (
               <form
@@ -342,48 +388,78 @@ export function RemoteFilePanel({
                 </button>
               </form>
             ) : (
-            <button
-              data-remote-directory={entry.type === "directory" ? entry.path : undefined}
+            <div
               key={entry.path}
-              type="button"
-              className={`file-row ${selectedPaths.includes(entry.path) ? "selected" : ""}`}
-              draggable={false}
-              onClick={(event) => {
-                if (onConsumePointerDragClick()) {
-                  event.preventDefault();
-                  return;
-                }
-                onSelectEntry(entry, event.ctrlKey || event.metaKey);
-              }}
-              onDoubleClick={() => {
-                if (entry.type === "directory") {
-                  onOpenDirectory(entry.path);
-                }
-              }}
-              onPointerDown={(event) => onPointerDragStart(entry, event)}
-              onDrop={(event) => {
-                if (entry.type === "directory") {
-                  onDropRemoteOnDirectory(entry, event);
-                }
-              }}
-              onDragOver={(event) => {
-                if (entry.type === "directory") {
-                  event.preventDefault();
-                }
-              }}
+              className={`file-select-row ${selectedPaths.includes(entry.path) ? "selected" : ""}`}
+              role="row"
+              aria-selected={selectedPaths.includes(entry.path)}
             >
-              <span className="file-name">
-                {entry.type === "directory" ? (
-                  <Folder size={15} />
-                ) : (
-                  <span className="file-dot" />
-                )}
-                {entry.name}
+              <span className="file-select-cell">
+                <input
+                  className="file-select-checkbox"
+                  type="checkbox"
+                  aria-label={`Select ${entry.name}`}
+                  checked={selectedPaths.includes(entry.path)}
+                  onChange={(event) => {
+                    const native = event.nativeEvent as MouseEvent;
+                    onSelectEntry(
+                      entry,
+                      {
+                        shift: Boolean(native.shiftKey),
+                        additive: Boolean(native.ctrlKey || native.metaKey),
+                        checkbox: true,
+                      },
+                      orderedPaths,
+                    );
+                  }}
+                />
               </span>
-              <span>{entry.type}</span>
-              <span>{formatFileSize(entry.size)}</span>
-              <span>{formatModified(entry.modifiedTime)}</span>
-            </button>
+              <button
+                data-remote-directory={entry.type === "directory" ? entry.path : undefined}
+                type="button"
+                className={`file-row ${selectedPaths.includes(entry.path) ? "selected" : ""}`}
+                draggable={false}
+                onClick={(event) => {
+                  if (onConsumePointerDragClick()) {
+                    event.preventDefault();
+                    return;
+                  }
+                  onSelectEntry(
+                    entry,
+                    { shift: event.shiftKey, additive: event.ctrlKey || event.metaKey },
+                    orderedPaths,
+                  );
+                }}
+                onDoubleClick={() => {
+                  if (entry.type === "directory") {
+                    onOpenDirectory(entry.path);
+                  }
+                }}
+                onPointerDown={(event) => onPointerDragStart(entry, event)}
+                onDrop={(event) => {
+                  if (entry.type === "directory") {
+                    onDropRemoteOnDirectory(entry, event);
+                  }
+                }}
+                onDragOver={(event) => {
+                  if (entry.type === "directory") {
+                    event.preventDefault();
+                  }
+                }}
+              >
+                <span className="file-name">
+                  {entry.type === "directory" ? (
+                    <Folder size={15} />
+                  ) : (
+                    <span className="file-dot" />
+                  )}
+                  {entry.name}
+                </span>
+                <span>{entry.type}</span>
+                <span>{formatFileSize(entry.size)}</span>
+                <span>{formatModified(entry.modifiedTime)}</span>
+              </button>
+            </div>
             ),
           )}
           {connected && entries.length === 0 && (

@@ -19,6 +19,9 @@ import { withHostKeyPrompt } from "../utils/hostKeyPrompt";
 import { describeImport, SshConfigImport } from "./SshConfigImport";
 import { PortForwards } from "./PortForwards";
 import { ManagedKeyPanel } from "./ManagedKeyPanel";
+import { KeyManagerDialog } from "./KeyManagerDialog";
+import { BiometricUnlockToggle } from "./BiometricUnlockToggle";
+import { ProfileKeyRow } from "./ProfileKeyRow";
 import gtLogo from "../assets/gt-logo.png";
 import type {
   SessionConnectRequest,
@@ -69,6 +72,7 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
   const [formMode, setFormMode] = useState<FormMode>("closed");
   const formOpen = formMode !== "closed";
   const [showImport, setShowImport] = useState(false);
+  const [showKeyManager, setShowKeyManager] = useState(false);
   const selectedProfile = form.id
     ? sessions.find((session) => session.id === form.id) ?? null
     : null;
@@ -517,6 +521,15 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
           </button>
           <button
             className="secondary-button compact"
+            type="button"
+            title="Generate and manage SSH key pairs"
+            onClick={() => setShowKeyManager(true)}
+          >
+            <KeyRound size={15} />
+            SSH keys
+          </button>
+          <button
+            className="secondary-button compact"
             disabled={busy}
             type="button"
             onClick={() => {
@@ -880,6 +893,10 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
       {!formOpen && !showImport && selectedProfile && !selectedProfile.isLocal && (
         <>
           <ManagedKeyPanel profile={selectedProfile} />
+          <ProfileKeyRow
+            profile={selectedProfile}
+            onManageKeys={() => setShowKeyManager(true)}
+          />
           <PortForwards
             profile={selectedProfile}
             connected={connectedSessionIds.includes(selectedProfile.id)}
@@ -887,6 +904,7 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
         </>
       )}
 
+      <BiometricUnlockToggle />
       <button
         className="disconnect-button"
         type="button"
@@ -896,6 +914,7 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
         <Unplug size={16} />
         Disconnect
       </button>
+      {showKeyManager && <KeyManagerDialog onClose={() => setShowKeyManager(false)} />}
     </aside>
   );
 }

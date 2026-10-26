@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import { RemoteTelemetryBar } from "./RemoteTelemetryBar";
+import { RemoteTelemetryBar, hostLabel } from "./RemoteTelemetryBar";
 import { useLlmStore } from "../stores/llmStore";
 import { useSessionStore } from "../stores/sessionStore";
 import type { AgentMetric, DiskMetric, GpuMetric, RemoteTelemetry } from "../types/gpu";
@@ -664,6 +664,29 @@ describe("RemoteTelemetryBar disk summary", () => {
     expect(screen.queryByRole("tablist", { name: "GPU selector" })).not.toBeInTheDocument();
   });
 
+  it("names the Linux distribution next to the host and in pop-out titles", () => {
+    const fedora: RemoteTelemetry = {
+      ...telemetry([]),
+      osRelease: { id: "fedora", prettyName: "Fedora Linux 41 (Server Edition)", versionId: "41" },
+    };
+    setTelemetry(fedora);
+
+    render(<RemoteTelemetryBar />);
+
+    expect(screen.getByTestId("telemetry-os-label")).toHaveTextContent(
+      "Fedora Linux 41 (Server Edition)",
+    );
+    expect(screen.getByText("lab")).toHaveAttribute("title", "Fedora Linux 41 (Server Edition)");
+    expect(hostLabel(fedora)).toBe("lab (Fedora Linux 41 (Server Edition))");
+    expect(hostLabel(telemetry([]))).toBe("lab");
+    expect(hostLabel(null)).toBe("GpuTerm");
+  });
+
+  it("omits the distribution label when the host reports none", () => {
+    render(<RemoteTelemetryBar />);
+    expect(screen.queryByTestId("telemetry-os-label")).not.toBeInTheDocument();
+  });
+
   it("exposes the monitoring panel close control", () => {
     const onClose = vi.fn();
 
@@ -1124,5 +1147,165 @@ describe("RemoteTelemetryBar LLM runtime card", () => {
 
     const dialog = screen.getByRole("dialog", { name: "LLM runtime details" });
     expect(within(dialog).getByText("Not polled yet")).toBeInTheDocument();
+  });
+});
+
+describe("RemoteTelemetryBar containers and databases cards", () => {
+  const overview = {
+    runtime: "docker",
+    containers: [
+      {
+        id: "4f1c0d2e9b8a",
+        name: "vllm",
+        image: "vllm/vllm-openai",
+        state: "running",
+        status: "Up 3 hours",
+        cpuPercent: 182.3,
+        memoryUsage: "31GiB / 251GiB",
+        memoryPercent: 12.4,
+      },
+      {
+        id: "0123456789ab",
+        name: "backup",
+        image: "alpine",
+        state: "exited",
+        status: "Exited (0)",
+        cpuPercent: null,
+        memoryUsage: null,
+        memoryPercent: null,
+      },
+    ],
+    kubectl: null,
+  };
+
+  beforeEach(() => {
+    mockInvoke.mockReset();
+    useLlmStore.setState({ instances: [], telemetry: null });
+    useSessionStore.setState({
+      sessions: [
+        { id: "session-1", name: "Lab", host: "lab", port: 22, username: "me" },
+      ],
+      activeSessionId: "session-1",
+      connectedSessionIds: ["session-1"],
+      telemetryBySession: { "session-1": telemetry([]) },
+      telemetrySettings: {
+        telemetryIntervalSecs: 2,
+        displayMode: "gpu-system",
+        diskIgnoreFsTypes: [],
+      },
+      message: null,
+    });
+  });
+
+  it("shows a containers summary for a server with Docker", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "container_overview") return Promise.resolve(overview);
+      if (command === "list_db_instances") return Promise.resolve([]);
+      return Promise.resolve(undefined);
+    });
+    render(<RemoteTelemetryBar />);
+
+    expect(await screen.findByText("Docker: 1 running / 2 total")).toBeInTheDocument();
+    expect(screen.getByText("Busiest: vllm 182.3% CPU")).toBeInTheDocument();
+    expect(mockInvoke).toHaveBeenCalledWith("container_overview", { sessionId: "session-1" });
+
+    fireEvent.click(screen.getByText("Containers"));
+    const dialog = await screen.findByRole("dialog", { name: "Containers" });
+    expect(within(dialog).getByRole("button", { name: "Start backup" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Kill vllm" })).toBeInTheDocument();
+  });
+
+  it("hides the containers card on a server without runtimes or kubectl", async () => {
+    mockInvoke.mockImplementation((command) => {
+      if (command === "container_overview") {
+        return Promise.resolve({ runtime: null, containers: [], kubectl: null });
+      }
+      if (command === "list_db_instances") return Promise.resolve([]);
+      return Promise.resolve(undefined);
+    });
+    render(<RemoteTelemetryBar />);
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("container_overview", { sessionId: "session-1" }),
+    );
+    expect(screen.queryByText("Containers")).not.toBeInTheDocument();
+  });
+
+  it("does not ask a local terminal for containers", async () => {
+    useSessionStore.setState({
+      sessions: [
+        { id: "local-1", name: "Mine", host: "localhost", port: 0, username: "me", isLocal: true },
+      ],
+      activeSessionId: "local-1",
+      connectedSessionIds: ["local-1"],
+      telemetryBySession: { "local-1": telemetry([], "local-1") },
+    });
+    mockInvoke.mockImplementation((command) => {
+      if (command === "list_db_instances") return Promise.resolve([]);
+      return Promise.resolve(undefined);
+    });
+    render(<RemoteTelemetryBar />);
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith("list_db_instances"));
+    expect(mockInvoke).not.toHaveBeenCalledWith("container_overview", expect.anything());
+  });
+
+  it("reads databases whose server is connected and shows their summary", async () => {
+    const instances = [
+      {
+        id: "db1",
+        name: "main",
+        kind: "postgres",
+        profileId: "session-1",
+        host: "127.0.0.1",
+        port: 5432,
+        user: "monitor",
+        database: "",
+        hasPassword: false,
+      },
+      {
+        id: "db2",
+        name: "elsewhere",
+        kind: "mysql",
+        profileId: "session-9",
+        host: "",
+        port: 3306,
+        user: "root",
+        database: "",
+        hasPassword: false,
+      },
+    ];
+    mockInvoke.mockImplementation((command, args) => {
+      if (command === "list_db_instances") return Promise.resolve(instances);
+      if (command === "db_status") {
+        return Promise.resolve({
+          instanceId: (args as { id: string }).id,
+          version: "16.4",
+          connections: 42,
+          maxConnections: 200,
+          active: 3,
+          idleInTransaction: 0,
+          waitingOnLocks: 0,
+          longestQuerySecs: 1,
+          commits: 1000,
+          rollbacks: 0,
+          queries: null,
+          slowQueries: null,
+          cacheHitPercent: 99.5,
+          deadlocks: 0,
+          sizeBytes: 1024,
+          uptimeSecs: 60,
+          replicationLagSecs: null,
+          isReplica: false,
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+    render(<RemoteTelemetryBar />);
+
+    expect(await screen.findByText("main: 42/200 connections")).toBeInTheDocument();
+    expect(mockInvoke).toHaveBeenCalledWith("db_status", { id: "db1" });
+    // Its server is not connected, so it is not read.
+    expect(mockInvoke).not.toHaveBeenCalledWith("db_status", { id: "db2" });
+    expect(screen.getByText("Databases")).toBeInTheDocument();
   });
 });
