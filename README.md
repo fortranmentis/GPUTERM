@@ -66,6 +66,7 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 - IPv4 and IPv6 literals are accepted, every resolved address is tried with a timeout, and remote PTY resize plus SSH keepalive also cover ProxyJump tunnels
 
 ### 📁 SFTP Browser
+- **Checkbox multi-selection** — per-row and tri-state header checkboxes, Shift-click ranges in displayed sort order, and Ctrl/Cmd+A in the focused file panel. Upload, Download and Delete show selected counts `(N)`
 - Side-by-side remote/local panels with a draggable divider for adjusting their vertical ratio
 - **Sortable remote columns** — click Name, Type, Size, or Modified; click again to reverse direction while folders stay first and missing metadata stays last
 - **Decimal file sizes** — remote/local listings and transfer progress use consistent SI `B / KB / MB / GB / TB` units
@@ -100,6 +101,14 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 - **Quiet Windows local monitoring** — PowerShell collectors run without allocating console windows and emit UTF-8 text, so localized device and volume names remain parseable
 - Hosts without any GPU gracefully fall back to system-only metrics
 
+### 📦 Containers and SQL monitoring
+
+- **Containers** appears for connected remote Linux hosts in a system-inclusive monitoring mode when Docker, Podman, nerdctl, kubectl, k3s or microk8s is detected. It reads the first available container runtime and Kubernetes client on PATH, including container CPU/memory and node/deployment/pod state.
+- Start, restart, stop or kill a container, or roll out a deployment restart, only after confirmation. Commands use the SSH user's socket permissions and Kubernetes context/RBAC; GpuTerm never adds sudo. The pod view is bounded to 300 entries; absent runtimes hide the card.
+- **SQL** reads PostgreSQL and MySQL/MariaDB through `psql` or `mysql`/`mariadb` on a connected Linux/macOS SSH server. Register an SSH profile and a DB address as seen from that server. Connections and commit/query rates, lock waits, longest queries, cache hit and replication lag depend on engine and privileges. Eligible instances are polled every 10 seconds; monitoring does not execute application queries or change DB configuration.
+- DB passwords stay in the local encrypted vault. A single-line password reaches the collector on stdin and is written to a mode-600 temporary `PGPASSFILE`/client-options file with exit cleanup. It is not embedded in command arguments or exported as an environment value. Abrupt termination can prevent cleanup.
+- Linux host labels and detached-window titles use `/etc/os-release` (or `/usr/lib/os-release`), including Fedora, openSUSE, Arch and Gentoo. Hosts without readable utmp data use `loginctl` when available. These additions concern monitored servers; release installers remain EXE, Apple Silicon DMG and DEB.
+
 ### 🤖 LLM runtime monitoring
 - Register any number of **Ollama, vLLM, SGLang, Hugging Face TGI, llama.cpp, OpenAI-compatible, and NVIDIA Triton** servers by URL; each is polled independently of your SSH sessions, so the card works with no terminal connected
 - **Poll directly, or through an SSH tunnel** — pick a saved SSH profile as the instance's *Reach through* and the address is resolved on that host, so a runtime bound to its own `127.0.0.1` needs nothing exposed on the network
@@ -113,15 +122,18 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 - Per-instance poll interval and timeout, enable/disable, a connection test that saves nothing, exponential backoff on repeated failure, and an in-memory trend chart that switches between the last 15 minutes and the last hour
 
 ### 🔐 Security by default
+- **SSH key manager** — open **SSH keys** to generate Ed25519, RSA 3072/4096, or ECDSA P-256/P-384/P-521 keys. Copy/save public keys, rename/delete local keys, and export private keys with a passphrase or by explicitly choosing **Save without a passphrase**. Private keys live in the vault; `keys.json` contains public metadata and profile assignments only.
+- Choose **Sign in with key** on a profile and **Install on server** to install and verify it before assignment. Normal sign-in tries the profile's own managed key, then the selected manager key, then the existing key-file/password/agent flow. Deleting a manager key locally does not revoke it on servers.
 - **GpuTerm-managed SSH keys** — **SSH key → Set up key** on a saved profile creates an Ed25519 key, installs it in `authorized_keys` (700/600 permissions, or `administrators_authorized_keys` for Windows administrators), and verifies a new-key-only sign-in before saving it. The private key stays in the encrypted vault and goes to libssh2 from memory. **Export…** writes passphrase-encrypted OpenSSH files (8+ characters); **Replace** / **Remove** request old-key revocation, subject to server access and permissions
 - Passwords, key passphrases, and managed private keys are stored only in the local `credentials.enc` vault: Argon2id derives a 256-bit key from your GpuTerm master password, and AES-256-GCM encrypts and authenticates the complete credential payload
-- The master password and derived key are kept in memory only for the current app run; secrets are never written in plaintext or included in `sessions.json`
+- By default the master password and derived key stay in memory for the current run. Optional **Touch ID / Windows Hello** persists a copy of the derived vault key using OS account protection: macOS login Keychain or a Windows DPAPI-protected file. The master password is not stored and `sessions.json` contains no private keys/passwords
+- **Biometric unlock is opt-in.** Enable its sidebar toggle after opening the vault. The app tries once at startup; cancellation/failure leaves master-password unlock available. Linux stays password-only. GpuTerm verifies the user before reading/unprotecting the saved key; this ad-hoc build does not cryptographically bind it to biometric hardware or exclude access by other authorized processes under the same OS account
 - Saved-session password fields show a secure mask while keeping the actual secret out of the webview; leaving the field blank reuses the vault entry
 - Trust-on-first-use host key prompt with SHA-256 fingerprint; a changed key shows the old and new fingerprints and is replaced only after explicit confirmation
 - Profiles referenced by ProxyJump or an LLM tunnel cannot be deleted; successful deletion tears down terminals, forwards, monitoring connections, and in-memory credentials before local UI removal
 - Restrictive Tauri Content Security Policy in production and development
 
-> **Upgrading to 1.1.2-beta:** GpuTerm no longer accesses macOS Keychain, Windows Credential Manager, or Linux Secret Service/libsecret. Existing OS-vault entries are left untouched but are not imported; create a GpuTerm master password and enter each SSH password again after upgrading.
+> **Credential storage:** since 1.1.2-beta, passwords use the Argon2id/AES-256-GCM vault rather than old OS credential entries, which are not imported. 1.3.6-beta biometric unlock is an explicit opt-in exception: Keychain/DPAPI stores a derived vault-unlock key, not individual SSH/DB passwords. Leave it off for master-password-only unlock.
 
 ## What you can monitor
 
@@ -132,6 +144,8 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 | Memory + swap | ✅ | ✅ (Activity Monitor semantics) | ✅ (page file as swap) |
 | Disks / mounts | ✅ | ✅ | ✅ (fixed drives) |
 | Logged-in users | ✅ `who` | ✅ `who` | ✅ `quser` (absent on Home editions) |
+| Containers / Kubernetes | ✅ remote hosts | — | — |
+| PostgreSQL / MySQL / MariaDB | ✅ remote CLI | ✅ remote CLI | — |
 | NVIDIA GPU (util · VRAM · power · temp · processes) | ✅ `nvidia-smi` | — | ✅ `nvidia-smi` |
 | AMD GPU | ✅ `rocm-smi` or `amd-smi` (util · VRAM · power · temp · processes, where exposed) | — | ◐ WDDM counters (util + VRAM) |
 | Intel GPU | ◐ `xpu-smi` / `intel_gpu_top` | — | ◐ WDDM counters (util + VRAM) |
@@ -427,8 +441,12 @@ Long-running work is isolated: blocking SSH I/O runs on `spawn_blocking` threads
 | `credential_index.json` | Non-secret session ids used only to show which profiles have a saved vault entry |
 | `snippets.json` | Saved command names, text, return behavior, and optional profile ids. Never credentials |
 | `llm_instances.json` | Registered LLM runtime instances — name, adapter, URL, poll interval, optional SSH tunnel profile id. Never the API key |
+| `keys.json` | Key names, algorithms, public keys/fingerprints and profile assignments; private keys use separate vault entries |
+| `db_instances.json` | DB names, engine/address/user and SSH profile; passwords use `db:<id>` vault entries |
+| `vault_key.touchid` / login Keychain | Optional non-secret marker and OS-protected derived vault key, read after Touch ID verification |
+| `vault_key.dpapi` | Optional Windows-account DPAPI-protected derived vault key, read after Windows Hello verification |
 
-Passwords, key passphrases, and managed private keys are **never written in plaintext**. The contents of a key *file* you point a profile at are never copied; a GpuTerm-managed key exists only inside `credentials.enc` until you export it.
+Normal vault storage encrypts private keys/passwords at rest. Explicit **unencrypted private-key export** writes plaintext by user choice; SQL monitoring creates the private temporary password file described above on the remote host. Key-file contents are not copied into profile JSON. Optional biometric unlock also persists a derived key under OS account protection.
 
 ## Development
 
@@ -486,7 +504,7 @@ Almost never, and never without you asking. Every metric comes from one-shot, re
 <details>
 <summary><b>Where are my passwords stored?</b></summary>
 
-Passwords and key passphrases are stored in `credentials.enc`. GpuTerm derives a 256-bit key from your master password with Argon2id (64 MiB, 3 iterations) and encrypts the complete payload with AES-256-GCM and a fresh random nonce on every write. The master password and key are kept only in memory for the current run; `sessions.json` contains host metadata, the *path* to a private key, and a managed key's public half and fingerprint, never a secret. Deleting a profile also deletes its vault entries (the managed key stays in the server's `authorized_keys`; use **Remove** first to take it off).
+Passwords and key passphrases are stored in `credentials.enc`. Argon2id (64 MiB, 3 iterations) derives a 256-bit key and AES-256-GCM encrypts/authenticates the payload with a fresh nonce per write. The master password stays in memory; a derived key persists under OS protection only when biometric unlock is enabled. `sessions.json` has host metadata, key paths and managed public-key metadata, never secrets. Profile deletion removes its own local vault entries; server-side public keys require separate revocation.
 
 Older Keychain/Credential Manager/Secret Service entries are not imported or accessed. After upgrading, enter each SSH password again. If you forget the master password, reset the vault; profiles remain, but saved passwords must be entered again and GpuTerm-managed keys are lost (export them beforehand, or set them up again). See the [data locations](#architecture) table.
 
@@ -548,6 +566,9 @@ GpuTerm is free for personal and noncommercial use under [PolyForm Noncommercial
 
 ## Roadmap / Known limitations
 
+- Biometric verification and Keychain/DPAPI access are application-gated, not hardware-bound. Real prompts and ad-hoc upgrade authorization need installed-device validation; Keychain may separately request access. Disabling the feature removes its stored unlock key and restores master-password-only operation.
+- Containers depend on server tools, socket permissions and kubeconfig/RBAC; no local/macOS/Windows container collector or native RPM/Arch/Gentoo installer is added. Distribution parsing is fixture-tested, not validation of every distribution/version.
+- SQL is a read-only statistics view. Missing/permission-restricted metrics stay unavailable; PostgreSQL activity/replication views need suitable privileges. Live runtime/cluster/DB checks remain environment-dependent. Password stdin is single-line and cleanup cannot cover an abruptly killed collector.
 - Managed SSH key setup needs an unlocked vault, write access to the server's authorized-key file, and a server accepting the new key without a second factor. Verification never falls back to an agent or password. Key installation/revocation is a remote configuration change; rollback and old-key cleanup can fail on network or permission errors, so confirm server-side revocation when replacing/removing keys. Deleting a profile or resetting the vault alone does not revoke its server-side public key.
 - `amd-smi` JSON support is covered by fixtures for several layouts; real AMD hardware validation remains pending. Missing fields stay unavailable, and fan speed/clock are not collected.
 - Reply-based SSH liveness checks run after 15 seconds of inactivity and allow 8 seconds for a reply (roughly 23 seconds total). Servers that do not answer the initial probe fall back to keepalives/TCP detection; the detection time is therefore not a guarantee for every server. Live OTP and disconnect detection tests remain pending.

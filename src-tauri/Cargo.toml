@@ -1,6 +1,6 @@
 [package]
 name = "gputerm"
-version = "1.3.5-beta"
+version = "1.3.6-beta"
 description = "GpuTerm desktop SSH/SFTP client with GPU monitoring"
 authors = ["GpuTerm"]
 license = "PolyForm-Noncommercial-1.0.0"
@@ -74,4 +74,5 @@ security-framework = "3"
 # Windows Hello unlock of the credential vault: the vault key is protected
 # with DPAPI for the current user and released after Windows Hello verifies.
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61", features = ["Foundation", "Security_Credentials_UI", "Win32_Foundation", "Win32_Security_Cryptography"] }
+windows = { version = "0.61", features = ["Foundation", "Security_Credentials_UI", "Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_WinRT"] }
+windows-future = "0.2"

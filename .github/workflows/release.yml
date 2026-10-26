@@ -85,11 +85,12 @@ jobs:
 
       - run: npm ci
 
-      - name: Verify Windows local telemetry and Claude quota helper
+      - name: Verify Windows telemetry, quota helper and biometric guard
         if: matrix.platform == 'windows-latest'
         run: |
           cargo test --manifest-path src-tauri/Cargo.toml --lib ssh::system_monitor::tests::executes_windows_local_collector_with_utf8_output
           cargo test --manifest-path src-tauri/Cargo.toml --lib ssh::agent_monitor::tests::executes_windows_claude_status_line_and_writes_a_quota_snapshot
+          cargo test --manifest-path src-tauri/Cargo.toml --lib ssh::biometric::windows_hello::tests::windows_hello_refuses_a_missing_owner_without_prompting
 
       - name: Build and upload Windows/Linux installer
         if: matrix.platform != 'macos-latest'

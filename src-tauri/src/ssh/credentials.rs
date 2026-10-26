@@ -284,13 +284,16 @@ impl SecureCredentialStore {
     /// Asks for Touch ID / Windows Hello and opens the vault with the stored
     /// key. A key that no longer opens the vault (it was replaced) is
     /// removed, so the next start goes straight to the master password.
-    pub fn unlock_with_biometrics(&self) -> Result<CredentialVaultStatus, String> {
+    pub fn unlock_with_biometrics(
+        &self,
+        owner_window: Option<isize>,
+    ) -> Result<CredentialVaultStatus, String> {
         if !self.biometrics.is_enabled() {
             return Err("Biometric unlock is not turned on".to_string());
         }
         let envelope = read_vault_envelope(&self.vault_path)?;
         validate_envelope(&envelope)?;
-        let key = self.biometrics.unlock_key(biometric::UNLOCK_REASON)?;
+        let key = self.biometrics.unlock_key(biometric::UNLOCK_REASON, owner_window)?;
         self.unlock_with_key(key, &envelope).map_err(|_| {
             let _ = self.biometrics.delete_key();
             "The saved key no longer opens the vault; unlock with the master password and \
@@ -812,6 +815,7 @@ mod tests {
         available: bool,
         key: Mutex<Option<[u8; KEY_BYTES]>>,
         user_verifies: Mutex<bool>,
+        owner_window: Mutex<Option<isize>>,
     }
 
     impl FakeBiometrics {
@@ -820,6 +824,7 @@ mod tests {
                 available,
                 key: Mutex::new(None),
                 user_verifies: Mutex::new(true),
+                owner_window: Mutex::new(None),
             })
         }
 
@@ -847,8 +852,9 @@ mod tests {
             Ok(())
         }
 
-        fn unlock_key(&self, reason: &str) -> Result<VaultKey, String> {
+        fn unlock_key(&self, reason: &str, owner_window: Option<isize>) -> Result<VaultKey, String> {
             assert_eq!(reason, biometric::UNLOCK_REASON);
+            *self.owner_window.lock().unwrap() = owner_window;
             if !*self.user_verifies.lock().unwrap() {
                 return Err("Touch ID was cancelled".to_string());
             }
@@ -900,13 +906,14 @@ mod tests {
             Arc::clone(&biometrics) as Arc<dyn BiometricKeyStore>,
         );
         *biometrics.user_verifies.lock().unwrap() = false;
-        assert!(restarted.unlock_with_biometrics().is_err());
+        assert!(restarted.unlock_with_biometrics(None).is_err());
         assert!(!restarted.status().unlocked);
         // A cancelled prompt keeps the feature on.
         assert!(biometrics.stored().is_some());
 
         *biometrics.user_verifies.lock().unwrap() = true;
-        let status = restarted.unlock_with_biometrics().unwrap();
+        let status = restarted.unlock_with_biometrics(Some(42)).unwrap();
+        assert_eq!(*biometrics.owner_window.lock().unwrap(), Some(42));
         assert!(status.unlocked && status.has_credentials);
         assert_eq!(
             restarted.get_password("session-a").unwrap().as_deref(),
@@ -929,13 +936,13 @@ mod tests {
             Arc::clone(&biometrics) as Arc<dyn BiometricKeyStore>,
         );
         assert!(restarted
-            .unlock_with_biometrics()
+            .unlock_with_biometrics(None)
             .unwrap_err()
             .contains("master password"));
         assert!(!restarted.status().unlocked);
         assert!(biometrics.stored().is_none());
         assert!(restarted
-            .unlock_with_biometrics()
+            .unlock_with_biometrics(None)
             .unwrap_err()
             .contains("not turned on"));
         cleanup(&vault, &index);

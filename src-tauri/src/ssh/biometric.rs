@@ -38,7 +38,7 @@ pub trait BiometricKeyStore: Send + Sync {
     /// Removing a key that is not there succeeds.
     fn delete_key(&self) -> Result<(), String>;
     /// Asks the user to verify, then returns the stored key.
-    fn unlock_key(&self, reason: &str) -> Result<VaultKey, String>;
+    fn unlock_key(&self, reason: &str, owner_window: Option<isize>) -> Result<VaultKey, String>;
 }
 
 /// For platforms without a supported method, and for tests that must not
@@ -63,7 +63,7 @@ impl BiometricKeyStore for UnsupportedBiometrics {
         Ok(())
     }
 
-    fn unlock_key(&self, _reason: &str) -> Result<VaultKey, String> {
+    fn unlock_key(&self, _reason: &str, _owner_window: Option<isize>) -> Result<VaultKey, String> {
         Err(unavailable_error())
     }
 }
@@ -142,11 +142,27 @@ pub async fn disable_biometric_unlock(
 
 #[tauri::command]
 pub async fn unlock_credential_vault_biometric(
+    _app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<CredentialVaultStatus, String> {
     let credentials = state.credentials.clone();
+    #[cfg(windows)]
+    let owner_window = {
+        use tauri::Manager;
+        let window = _app
+            .get_webview_window("main")
+            .ok_or_else(|| "The main window is unavailable for Windows Hello".to_string())?;
+        Some(
+            window
+                .hwnd()
+                .map_err(|error| format!("Could not identify the Windows Hello owner: {error}"))?
+                .0 as isize,
+        )
+    };
+    #[cfg(not(windows))]
+    let owner_window = None;
     // The platform prompt blocks this thread until the user answers.
-    tauri::async_runtime::spawn_blocking(move || credentials.unlock_with_biometrics())
+    tauri::async_runtime::spawn_blocking(move || credentials.unlock_with_biometrics(owner_window))
         .await
         .map_err(|error| format!("Biometric unlock task failed: {error}"))?
 }
@@ -288,7 +304,11 @@ mod macos {
             keychain
         }
 
-        fn unlock_key(&self, reason: &str) -> Result<VaultKey, String> {
+        fn unlock_key(
+            &self,
+            reason: &str,
+            _owner_window: Option<isize>,
+        ) -> Result<VaultKey, String> {
             evaluate(reason)?;
             let bytes =
                 Zeroizing::new(get_generic_password(SERVICE, ACCOUNT).map_err(|error| {
@@ -333,10 +353,12 @@ mod windows_hello {
     use windows::Security::Credentials::UI::{
         UserConsentVerificationResult, UserConsentVerifier, UserConsentVerifierAvailability,
     };
-    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::Foundation::{LocalFree, HLOCAL, HWND};
     use windows::Win32::Security::Cryptography::{
         CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
     };
+    use windows::Win32::System::WinRT::IUserConsentVerifierInterop;
+    use windows_future::IAsyncOperation;
     use zeroize::Zeroizing;
 
     use super::{key_from_bytes, BiometricKeyStore, VaultKey, VAULT_KEY_BYTES};
@@ -417,9 +439,23 @@ mod windows_hello {
         Ok(take_blob(output))
     }
 
-    fn verify(reason: &str) -> Result<(), String> {
-        let result = UserConsentVerifier::RequestVerificationAsync(&HSTRING::from(reason))
-            .and_then(|operation| operation.get())
+    fn verify(reason: &str, owner_window: Option<isize>) -> Result<(), String> {
+        let owner = owner_window
+            .filter(|handle| *handle != 0)
+            .ok_or_else(|| "Windows Hello requires the GpuTerm main window".to_string())?;
+        let interop = windows::core::factory::<UserConsentVerifier, IUserConsentVerifierInterop>()
+            .map_err(|error| {
+                format!("Windows Hello desktop verification is unavailable: {error}")
+            })?;
+        // SAFETY: the Tauri command supplies the main window's HWND. Use the
+        // desktop interop API, since RequestVerificationAsync requires UWP's
+        // CoreWindow and cannot own this desktop app's verification dialog.
+        let operation: IAsyncOperation<UserConsentVerificationResult> = unsafe {
+            interop.RequestVerificationForWindowAsync(HWND(owner as *mut _), &HSTRING::from(reason))
+        }
+        .map_err(|error| format!("Windows Hello is unavailable: {error}"))?;
+        let result = operation
+            .get()
             .map_err(|error| format!("Windows Hello is unavailable: {error}"))?;
         if result == UserConsentVerificationResult::Verified {
             Ok(())
@@ -432,6 +468,7 @@ mod windows_hello {
 
     impl BiometricKeyStore for WindowsHelloStore {
         fn kind(&self) -> Option<&'static str> {
+            windows::core::factory::<UserConsentVerifier, IUserConsentVerifierInterop>().ok()?;
             UserConsentVerifier::CheckAvailabilityAsync()
                 .and_then(|operation| operation.get())
                 .ok()
@@ -456,8 +493,12 @@ mod windows_hello {
             }
         }
 
-        fn unlock_key(&self, reason: &str) -> Result<VaultKey, String> {
-            verify(reason)?;
+        fn unlock_key(
+            &self,
+            reason: &str,
+            owner_window: Option<isize>,
+        ) -> Result<VaultKey, String> {
+            verify(reason, owner_window)?;
             let protected = std::fs::read(&self.path).map_err(|error| {
                 if error.kind() == std::io::ErrorKind::NotFound {
                     "The Windows Hello key is missing".to_string()
@@ -467,6 +508,18 @@ mod windows_hello {
             })?;
             let key = unprotect(&protected)?;
             key_from_bytes(&key)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn windows_hello_refuses_a_missing_owner_without_prompting() {
+            for owner in [None, Some(0)] {
+                assert!(verify("test", owner).unwrap_err().contains("main window"));
+            }
         }
     }
 }
