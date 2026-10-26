@@ -506,10 +506,13 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
       <div className="sidebar-section-heading">
         <div className="sidebar-section-title">Sessions</div>
         <div className="sidebar-section-actions">
+          {/* Icon-only: with labels the three buttons overflow the fixed
+              sidebar width and clip New. Names stay in aria-label/title. */}
           <button
-            className="secondary-button compact"
+            className="secondary-button compact icon-only"
             disabled={busy || showImport}
             type="button"
+            aria-label="Import"
             title="Import hosts from ~/.ssh/config"
             onClick={() => {
               setFormMode("closed");
@@ -517,16 +520,15 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
             }}
           >
             <FileInput size={15} />
-            Import
           </button>
           <button
-            className="secondary-button compact"
+            className="secondary-button compact icon-only"
             type="button"
+            aria-label="SSH keys"
             title="Generate and manage SSH key pairs"
             onClick={() => setShowKeyManager(true)}
           >
             <KeyRound size={15} />
-            SSH keys
           </button>
           <button
             className="secondary-button compact"

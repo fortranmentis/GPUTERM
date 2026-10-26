@@ -4705,7 +4705,14 @@ button.agent-summary-section {
 
 .sidebar-section-actions {
   display: flex;
+  min-width: 0;
   gap: 6px;
+}
+
+.secondary-button.compact.icon-only {
+  justify-content: center;
+  width: 34px;
+  padding: 0;
 }
 
 .ssh-config-import {
