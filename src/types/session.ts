@@ -87,6 +87,8 @@ export type AppMessage = {
   /** `warning` is a toast that stays longer, used for alerts. */
   kind: "info" | "success" | "warning" | "error";
   text: string;
+  /** A button on a toast, e.g. "Open" for a newly started web service. */
+  action?: { label: string; run: () => void };
 };
 
 export type SftpEntry = {

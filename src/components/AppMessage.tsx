@@ -3,7 +3,8 @@ import { AlertCircle, AlertTriangle, CheckCircle2, Info, X } from "lucide-react"
 import { useSessionStore } from "../stores/sessionStore";
 
 const TOAST_DISMISS_MS = 3_000;
-/** Alerts stay up longer: they may arrive while the user looks elsewhere. */
+/** Alerts and toasts with a button stay up longer: they may arrive while the
+ * user looks elsewhere. */
 const WARNING_DISMISS_MS = 8_000;
 
 /**
@@ -21,7 +22,7 @@ export function AppMessageOverlay() {
     }
     const timer = window.setTimeout(
       () => setMessage(null),
-      message.kind === "warning" ? WARNING_DISMISS_MS : TOAST_DISMISS_MS,
+      message.kind === "warning" || message.action ? WARNING_DISMISS_MS : TOAST_DISMISS_MS,
     );
     return () => window.clearTimeout(timer);
   }, [message, setMessage]);
@@ -77,7 +78,10 @@ export function AppMessageOverlay() {
   }
 
   return (
-    <div className={`app-message app-toast ${message.kind}`} role="status">
+    <div
+      className={`app-message app-toast ${message.kind}${message.action ? " has-action" : ""}`}
+      role="status"
+    >
       {message.kind === "success" ? (
         <CheckCircle2 size={16} />
       ) : message.kind === "warning" ? (
@@ -86,6 +90,18 @@ export function AppMessageOverlay() {
         <Info size={16} />
       )}
       <span>{message.text}</span>
+      {message.action && (
+        <button
+          className="secondary-button app-toast-action"
+          type="button"
+          onClick={() => {
+            message.action?.run();
+            setMessage(null);
+          }}
+        >
+          {message.action.label}
+        </button>
+      )}
       <button
         className="icon-button ghost"
         type="button"

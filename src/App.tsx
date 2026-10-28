@@ -12,6 +12,7 @@ import { SessionSidebar } from "./components/SessionSidebar";
 import { SftpBrowser } from "./components/SftpBrowser";
 import { TerminalPane } from "./components/TerminalPane";
 import { UpdateDialog, useUpdateChecks } from "./components/UpdateDialog";
+import { useWebServiceWatch } from "./hooks/useWebServiceWatch";
 import { McpApprovalDialog } from "./components/McpApprovalDialog";
 import { useLlmStore } from "./stores/llmStore";
 import { useSessionStore } from "./stores/sessionStore";
@@ -53,6 +54,7 @@ function App() {
   const loadSettings = useSettingsStore((state) => state.loadSettings);
   useAutoReconnect();
   useUpdateChecks();
+  useWebServiceWatch();
   const removeTerminalPane = useSessionStore((state) => state.removeTerminalPane);
   const showSession = useSessionStore((state) => state.showSession);
   const setSessionTelemetry = useSessionStore((state) => state.setSessionTelemetry);

@@ -21,6 +21,7 @@ use crate::ssh::session::{
 use crate::ssh::sftp::sftp_list_dir;
 use crate::ssh::system_monitor::{now_epoch_seconds, shell_quote, RemoteOs};
 use crate::ssh::tmux::list_tmux_sessions;
+use crate::ssh::web_services::{scan_web_services, without_token};
 
 /// Returned (and audited as "denied") when the user says no or does not answer.
 const DENIED: &str = "The user denied this request in GpuTerm (or did not answer within two minutes). Do not retry it unless the user asks you to.";
@@ -77,6 +78,7 @@ fn dispatch(app: &AppHandle, client: &str, tool: &str, args: &Value) -> ToolOutc
                 profile.id.clone(),
             ))
         }
+        "list_web_services" => list_web_services(app, args),
         "list_directory" => list_directory(app, args),
         "get_llm_runtimes" => Ok(app
             .state::<AppState>()
@@ -105,6 +107,33 @@ fn block<T: serde::Serialize>(
 ) -> ToolOutcome {
     let value = tauri::async_runtime::block_on(future)?;
     serde_json::to_value(value).map_err(|error| format!("Could not encode the result: {error}"))
+}
+
+/// The host's web services, without Jupyter login tokens: an assistant only
+/// needs to know what runs where, and opening one stays in GpuTerm.
+fn list_web_services(app: &AppHandle, args: &Value) -> ToolOutcome {
+    let profile = connected_host(app, args)?;
+    remote_only(&profile)?;
+    let scan = tauri::async_runtime::block_on(scan_web_services(
+        app.state::<AppState>(),
+        profile.id.clone(),
+    ))?;
+    let services: Vec<Value> = scan
+        .services
+        .iter()
+        .map(|service| {
+            json!({
+                "kind": service.kind,
+                "port": service.port,
+                "host": service.host,
+                "path": without_token(&service.path),
+                "pid": service.pid,
+                "detail": service.detail,
+                "container": service.container,
+            })
+        })
+        .collect();
+    Ok(json!({ "supported": scan.supported, "services": services }))
 }
 
 // ---- arguments ----

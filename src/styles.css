@@ -237,7 +237,7 @@ label span,
   font-size: 12px;
 }
 
-input {
+input:not([type="checkbox"]):not([type="radio"]) {
   width: 100%;
   min-width: 0;
   height: 34px;
@@ -247,6 +247,30 @@ input {
   outline: none;
   background-color: #090e15;
   color: var(--text);
+}
+
+/* Checkboxes keep their native look at one size everywhere; the text-field
+   rules above would otherwise stretch them into 34px boxes. */
+input[type="checkbox"],
+input[type="radio"] {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--cyan-strong);
+  cursor: pointer;
+}
+
+input[type="checkbox"]:disabled,
+input[type="radio"]:disabled {
+  cursor: not-allowed;
+}
+
+input[type="checkbox"]:focus-visible,
+input[type="radio"]:focus-visible {
+  outline: 2px solid rgba(34, 211, 238, 0.5);
+  outline-offset: 2px;
 }
 
 select {
@@ -278,7 +302,7 @@ select option {
   color: var(--text);
 }
 
-input:focus,
+input:not([type="checkbox"]):not([type="radio"]):focus,
 select:focus {
   border-color: var(--cyan-strong);
   box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.12);
@@ -3673,6 +3697,7 @@ button.agent-summary-section {
 
 .biometric-unlock-toggle {
   display: flex;
+  flex-direction: row;
   align-items: center;
   gap: 7px;
   margin-top: 10px;
@@ -5035,6 +5060,7 @@ button.agent-summary-section {
 
 .alert-toggle {
   display: flex;
+  flex-direction: row;
   align-items: center;
   gap: 6px;
   color: #cbd5e1;
@@ -5621,6 +5647,7 @@ button.agent-summary-section {
 
 .database-form .database-checkbox {
   display: flex;
+  flex-direction: row;
   align-items: center;
   gap: 7px;
 }
@@ -6026,4 +6053,126 @@ button.agent-summary-section {
 
 .web-service-icon.jupyter {
   color: #f59e0b;
+}
+
+.web-service-icon.mlflow {
+  color: #38bdf8;
+}
+
+.web-service-icon.ray {
+  color: #60a5fa;
+}
+
+.web-service-icon.streamlit {
+  color: #f87171;
+}
+
+.web-service-icon.gradio {
+  color: #fbbf24;
+}
+
+.web-service-icon.code-server {
+  color: #a78bfa;
+}
+
+.web-service-icon.other {
+  color: var(--muted);
+}
+
+.web-service-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.web-service-container {
+  display: inline-flex;
+  align-self: flex-start;
+  max-width: 100%;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  overflow: hidden;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(96, 165, 250, 0.12);
+  color: var(--blue);
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.web-service-row .icon-button.active {
+  color: var(--cyan);
+}
+
+.web-services-other-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.web-services-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.web-services-notify {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+
+.web-services-notify span {
+  font-size: 11px;
+}
+
+.app-message.has-action {
+  grid-template-columns: 18px minmax(0, 1fr) auto 34px;
+}
+
+.app-toast-action {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.web-service-open {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.web-service-open:hover:not(:disabled) {
+  border-color: var(--cyan-strong);
+  color: var(--cyan);
+}
+
+.web-service-open:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.web-service-row .port-forward-actions {
+  align-items: center;
 }
