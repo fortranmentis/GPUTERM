@@ -121,6 +121,11 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 - API keys go straight into the encrypted `credentials.enc` vault. They are never returned to the webview, never written to `llm_instances.json`, and masked out of error text
 - Per-instance poll interval and timeout, enable/disable, a connection test that saves nothing, exponential backoff on repeated failure, and an in-memory trend chart that switches between the last 15 minutes and the last hour
 
+### 🔌 AI assistants (MCP) and in-app updates
+- **Built-in MCP server** — turn on **MCP** at the bottom of the sidebar and Claude Code, Claude Desktop, Codex or Cursor can read the hosts you have connected: live telemetry, the last hour of history, free GPUs across hosts, GPU/top processes, containers, tmux sessions, directory listings, LLM runtimes and firing alerts. See [MCP server for AI assistants](#mcp-server-for-ai-assistants)
+- **Actions only with your approval** — with **Allow actions** on, `run_command`, `read_file` and `kill_process` each open a confirmation in GpuTerm (Deny by default). Loopback only, a per-start token, per-host hiding and an audit log
+- **In-app updates** — GpuTerm checks GitHub for a newer release and installs it from a signed update bundle after you press **Update**. See [Updates](#updates)
+
 ### 🔐 Security by default
 - **SSH key manager** — open **SSH keys** to generate Ed25519, RSA 3072/4096, or ECDSA P-256/P-384/P-521 keys. Copy/save public keys, rename/delete local keys, and export private keys with a passphrase or by explicitly choosing **Save without a passphrase**. Private keys live in the vault; `keys.json` contains public metadata and profile assignments only.
 - Choose **Sign in with key** on a profile and **Install on server** to install and verify it before assignment. Normal sign-in tries the profile's own managed key, then the selected manager key, then the existing key-file/password/agent flow. Deleting a manager key locally does not revoke it on servers.
