@@ -106,6 +106,15 @@
 - DB 비밀번호는 로컬 암호화 금고에 보관합니다. 한 줄 비밀번호를 표준 입력으로 받아 권한 0600의 임시 `PGPASSFILE`·클라이언트 옵션 파일에 쓰고 종료 시 정리합니다. 명령 인자나 환경변수 값에는 넣지 않으며 강제 종료 시 임시 파일 정리가 남을 수 있습니다.
 - `/etc/os-release`(없으면 `/usr/lib/os-release`)를 읽어 Fedora·openSUSE·Arch·Gentoo 등의 이름을 상태바와 분리 창 제목에 표시합니다. utmp를 읽을 수 없으면 `loginctl`을 사용할 수 있는 경우 로그인 사용자를 수집합니다. 이는 모니터링 대상 서버 지원이며 설치 파일은 기존 EXE·Apple Silicon DMG·DEB입니다.
 
+### 🌐 원격 웹 서비스
+
+- 세션 사이드바의 **Web services**에서 연결된 SSH 호스트의 TensorBoard, Jupyter, MLflow, Ray Dashboard, Streamlit, Gradio, code-server를 찾습니다. Linux는 `ss`(`/proc/net/tcp` 대체 경로 포함), macOS는 `lsof`, Windows는 PowerShell 연결·프로세스 정보를 이용합니다. Linux에서는 접근 가능한 Docker 컨테이너 최대 50개의 노출 TCP 포트도 검사합니다.
+- 연결된 모든 원격 호스트를 20초마다 검사합니다. 최초 검사 이후 새로 감지된 알려진 서비스는 **Open** 알림을 표시할 수 있으며, **Notify when one starts**로 기기별 알림을 설정합니다. 미분류 포트는 **Other listening ports**에 표시하고 알림은 띄우지 않습니다.
+- **Open**은 로컬 루프백에만 바인딩된 임시 SSH 포워드를 만들거나 재사용합니다. 같은 로컬 포트를 우선 사용하고 불가능하면 빈 포트를 선택합니다. 핀 버튼은 다음 연결에 사용할 포워드를 저장하며 Jupyter 로그인 토큰은 저장하지 않습니다. 런타임 파일에서 토큰을 읽을 수 있으면 해당 base URL로 함께 전달합니다.
+- 줄바꿈된 URL을 포함한 터미널 HTTP(S) 링크를 **Cmd/Ctrl+클릭**하면 기본 브라우저로 엽니다. localhost·와일드카드 주소·SSH 호스트 자체 이름으로 된 일반 HTTP 링크는 SSH 포워드를 사용하며, HTTPS 등 나머지 링크는 원래 주소로 엽니다.
+- 탐지는 권한, 런타임 경로, 프로세스 소유권, Docker 네트워크 및 포트 기반 분류에 영향을 받습니다. 컨테이너 노출 포트나 미분류 포트가 정상 HTTP 서비스를 보장하지 않으며 별도 로그인이 필요할 수 있습니다. 로컬 터미널 자동 탐지는 제공하지 않고, 원격 에이전트 설치나 서버 시작도 하지 않습니다.
+- MCP 클라이언트는 읽기 전용 `list_web_services`를 사용할 수 있습니다. 반환 경로에서는 Jupyter 로그인 토큰을 제외하며, 앱의 브라우저 열기에서는 사용 가능한 토큰을 유지합니다.
+
 ### 🤖 LLM 런타임 모니터링
 - **Ollama, vLLM, SGLang, Hugging Face TGI, llama.cpp, OpenAI 호환 서버, NVIDIA Triton**을 URL로 여러 개 등록합니다. SSH 세션과 무관하게 폴링하므로 터미널을 연결하지 않아도 카드가 동작합니다
 - **직접 접속 또는 SSH 터널** — 인스턴스의 *Reach through*로 저장된 SSH 프로필을 고르면 주소가 그 호스트에서 해석되므로, 자기 `127.0.0.1`에만 붙은 런타임도 네트워크에 아무것도 노출하지 않고 모니터링됩니다

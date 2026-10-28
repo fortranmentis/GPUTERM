@@ -109,6 +109,15 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 - DB passwords stay in the local encrypted vault. A single-line password reaches the collector on stdin and is written to a mode-600 temporary `PGPASSFILE`/client-options file with exit cleanup. It is not embedded in command arguments or exported as an environment value. Abrupt termination can prevent cleanup.
 - Linux host labels and detached-window titles use `/etc/os-release` (or `/usr/lib/os-release`), including Fedora, openSUSE, Arch and Gentoo. Hosts without readable utmp data use `loginctl` when available. These additions concern monitored servers; release installers remain EXE, Apple Silicon DMG and DEB.
 
+### 🌐 Remote web services
+
+- **Web services** in the session sidebar finds TensorBoard, Jupyter, MLflow, Ray Dashboard, Streamlit, Gradio and code-server on connected SSH hosts. Linux uses `ss` (with a `/proc/net/tcp` fallback), macOS uses `lsof`, and Windows uses PowerShell connection/process information. Linux also inspects up to 50 accessible Docker containers for exposed TCP ports.
+- All connected remote hosts are scanned every 20 seconds. After the initial scan, newly detected known services can show an **Open** toast; **Notify when one starts** toggles this per-device preference. Unknown listeners stay under **Other listening ports** and are not announced.
+- **Open** creates or reuses a temporary loopback-only SSH forward, preferring the same local port or choosing a free one. The pin button saves a forward for future connections; it does not save the Jupyter login token. Runtime-file tokens are included when available so Jupyter opens at its base URL.
+- **Cmd/Ctrl-click terminal HTTP(S) links**, including wrapped URLs, to open the default browser. Plain HTTP links to localhost, wildcard addresses or the SSH host's own name use a local SSH forward; other links, including HTTPS, open unchanged.
+- Discovery is best-effort: permissions, runtime paths, process ownership, Docker networking and port-based classification limit what is found. An exposed container port or an unknown listener does not prove a healthy HTTP service; login may still be needed. Local-terminal automatic discovery is not provided, and GpuTerm does not start servers or install remote agents.
+- MCP clients can use the read-only `list_web_services` tool. Its returned paths omit Jupyter login tokens; the in-app browser-opening flow retains them when available.
+
 ### 🤖 LLM runtime monitoring
 - Register any number of **Ollama, vLLM, SGLang, Hugging Face TGI, llama.cpp, OpenAI-compatible, and NVIDIA Triton** servers by URL; each is polled independently of your SSH sessions, so the card works with no terminal connected
 - **Poll directly, or through an SSH tunnel** — pick a saved SSH profile as the instance's *Reach through* and the address is resolved on that host, so a runtime bound to its own `127.0.0.1` needs nothing exposed on the network
