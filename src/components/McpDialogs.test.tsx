@@ -99,7 +99,7 @@ describe("McpSettingsDialog", () => {
     render(<McpSettingsDialog onClose={() => undefined} />);
     expect(await screen.findByText("Off")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("checkbox", { name: "Allow MCP clients" }));
+    fireEvent.click(screen.getByRole("switch", { name: /Allow MCP clients/ }));
     await waitFor(() =>
       expect(invoke).toHaveBeenCalledWith("update_mcp_settings", {
         settings: { enabled: true, allowActions: false, hiddenProfiles: [] },

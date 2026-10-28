@@ -5834,38 +5834,138 @@ button.agent-summary-section {
   color: var(--muted);
 }
 
-.mcp-toggle {
+.mcp-switches {
+  display: grid;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.mcp-switch {
   display: flex;
   flex-direction: row;
-  align-items: flex-start;
-  gap: 8px;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.mcp-switch + .mcp-switch {
+  border-top: 1px solid var(--line);
+}
+
+.mcp-switch-text {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+
+.mcp-switch-text strong {
   color: #e2e8f0;
   font-size: 13px;
+  font-weight: 600;
 }
 
-.mcp-toggle input {
-  margin-top: 3px;
-}
-
-.mcp-toggle small {
+.mcp-switch-text small {
   color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.mcp-switch input[type="checkbox"] {
+  position: relative;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: #334155;
+  cursor: pointer;
+  transition: background 0.15s;
+  appearance: none;
+}
+
+.mcp-switch input[type="checkbox"]::after {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #f8fafc;
+  content: "";
+  transition: transform 0.15s;
+}
+
+.mcp-switch input[type="checkbox"]:checked {
+  background: #0ea5e9;
+}
+
+.mcp-switch input[type="checkbox"]:checked::after {
+  transform: translateX(14px);
+}
+
+.mcp-switch input[type="checkbox"]:focus-visible {
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.45);
 }
 
 .mcp-hosts {
   display: grid;
-  gap: 6px;
+  gap: 2px;
   max-height: 160px;
   margin: 0;
-  padding: 8px 10px;
+  padding: 6px 8px;
   overflow-y: auto;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 8px;
 }
 
 .mcp-hosts legend {
   padding: 0 4px;
   color: var(--muted);
   font-size: 11px;
+}
+
+.mcp-host {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 4px;
+  border-radius: 5px;
+  color: #e2e8f0;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.mcp-host:hover {
+  background: rgba(148, 163, 184, 0.08);
+}
+
+.mcp-host input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  padding: 0;
+  accent-color: #0ea5e9;
+}
+
+.mcp-host-name {
+  flex: 0 0 auto;
+  font-weight: 600;
+}
+
+.mcp-host small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mcp-clients {

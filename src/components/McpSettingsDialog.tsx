@@ -137,45 +137,49 @@ export function McpSettingsDialog({ onClose }: { onClose: () => void }) {
           <p className="app-modal-text">Loading…</p>
         ) : (
           <>
-            <label className="mcp-toggle">
-              <input
-                type="checkbox"
-                checked={settings.enabled}
-                disabled={saving}
-                onChange={(event) => void save({ enabled: event.target.checked })}
-              />
-              <span>Allow MCP clients</span>
-            </label>
-            <label className="mcp-toggle">
-              <input
-                type="checkbox"
-                checked={settings.allowActions}
-                disabled={saving}
-                onChange={(event) => void save({ allowActions: event.target.checked })}
-              />
-              <span>
-                Allow actions: run commands, read files and end processes.
-                <small> Each one still asks you here first.</small>
-              </span>
-            </label>
+            <div className="mcp-switches">
+              <label className="mcp-switch">
+                <span className="mcp-switch-text">
+                  <strong>Allow MCP clients</strong>
+                  <small>Start the local server so assistants on this computer can connect.</small>
+                </span>
+                <input
+                  type="checkbox"
+                  role="switch"
+                  checked={settings.enabled}
+                  disabled={saving}
+                  onChange={(event) => void save({ enabled: event.target.checked })}
+                />
+              </label>
+              <label className="mcp-switch">
+                <span className="mcp-switch-text">
+                  <strong>Allow actions</strong>
+                  <small>Run commands, read files and end processes. Each one still asks you here first.</small>
+                </span>
+                <input
+                  type="checkbox"
+                  role="switch"
+                  checked={settings.allowActions}
+                  disabled={saving}
+                  onChange={(event) => void save({ allowActions: event.target.checked })}
+                />
+              </label>
+            </div>
             {remoteSessions.length > 0 && (
               <fieldset className="mcp-hosts">
                 <legend>Hosts clients can see</legend>
                 {remoteSessions.map((profile) => (
-                  <label key={profile.id} className="mcp-toggle">
+                  <label key={profile.id} className="mcp-host">
                     <input
                       type="checkbox"
                       checked={!settings.hiddenProfiles.includes(profile.id)}
                       disabled={saving}
                       onChange={(event) => toggleHost(profile.id, event.target.checked)}
                     />
-                    <span>
-                      {profile.name}
-                      <small>
-                        {" "}
-                        {profile.username}@{profile.host}
-                      </small>
-                    </span>
+                    <span className="mcp-host-name">{profile.name}</span>
+                    <small>
+                      {profile.username}@{profile.host}
+                    </small>
                   </label>
                 ))}
               </fieldset>
