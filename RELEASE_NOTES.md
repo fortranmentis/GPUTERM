@@ -12,6 +12,7 @@
 
 - Stop global text-field styles from stretching checkbox and radio controls to text-input dimensions; restore horizontal checkbox labels across the app.
 - Declare the landing-page JavaScript's browser environment in ESLint so its DOM APIs are checked without false undefined-global errors.
+- Withhold MLflow backend-store and artifact-root URIs from service metadata: these command-line values can embed DB/storage credentials and must not reach the service panel or MCP responses. A regression test checks serialized metadata with synthetic secrets.
 - Handle wrapped terminal URLs and surrounding punctuation, retain Jupyter base paths/token queries when opening, and reuse live forwards or choose another free local port when needed.
 - Keep unrelated kernels/editor backends/agents out of named-service classification; expose unknown listening ports separately rather than labelling every port a recognized web UI.
 - Report scan/open failures in the service panel and browser-opening failures as in-app messages. Keep the first discovery scan quiet instead of announcing already-running services.
@@ -19,8 +20,9 @@
 
 ## Validation
 
-- **348 frontend tests pass across 51 files**, including the two updater-manifest tests (also rerun separately). **497 macOS Rust tests pass; 6 are ignored.** Platform-specific counts can differ.
+- **348 frontend tests pass across 51 files**, including the two updater-manifest tests (also rerun separately). **498 macOS Rust tests pass; 6 are ignored.** Platform-specific counts can differ.
 - TypeScript, ESLint (0 errors, 14 existing React Hook warnings), the Vite production build and `git diff --check` pass. Strict Clippy checks all targets/features with warnings denied. Existing React test `act` and Vite chunk-size warnings are non-fatal.
+- Repository-wide `cargo fmt --check` reports pre-existing formatting differences across multiple modules; no unrelated bulk formatting was applied.
 - New automated coverage includes Linux/macOS/Windows listener fixtures, Docker port parsing, Jupyter token/base-path handling, forward-target/path validation, terminal URL wrapping, service-panel opening/pinning/errors and actionable notifications.
 - GitHub CI checks the declared Rust 1.88 minimum. Native release jobs build Windows NSIS EXE, Debian DEB, Linux AppImage and Apple Silicon DMG; signed update bundles, signatures, SHA-256 checksums and `latest.json` are published through the existing updater channel.
 - macOS packaging signs every nested code object inside-out and the final app ad-hoc, verifies with `codesign --verify --deep --strict`, then verifies the app again from the mounted DMG. Published assets are downloaded again for checksum, package-version and manifest checks.

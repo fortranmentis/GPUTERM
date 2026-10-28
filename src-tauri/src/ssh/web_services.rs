@@ -502,11 +502,9 @@ fn parse_scan(output: &str) -> Vec<WebService> {
                     jupyter_path(runtime),
                     runtime.and_then(|runtime| runtime.root_dir.clone()),
                 ),
-                WebServiceKind::Mlflow => (
-                    "/".to_string(),
-                    flag_value(args, "--backend-store-uri")
-                        .or_else(|| flag_value(args, "--default-artifact-root")),
-                ),
+                // Backend/artifact URIs may embed DB or storage credentials.
+                // Never turn these command-line options into UI/MCP metadata.
+                WebServiceKind::Mlflow => ("/".to_string(), None),
                 WebServiceKind::Streamlit => ("/".to_string(), streamlit_script(args)),
                 _ => ("/".to_string(), None),
             };
@@ -829,6 +827,26 @@ D /hostnet|nginx||80/tcp
         assert!(!services
             .iter()
             .any(|service| [41003, 39811, 22].contains(&service.port)));
+    }
+
+    #[test]
+    fn mlflow_connection_strings_never_become_service_metadata() {
+        for args in [
+            "mlflow server --backend-store-uri postgresql://user:db-secret@db/private",
+            "mlflow server --default-artifact-root https://user:storage-secret@store/private?token=secret",
+        ] {
+            let output = format!(
+                "L LISTEN 0 128 127.0.0.1:5000 0.0.0.0:* users:((\"mlflow\",pid=42,fd=3))\nP 42 {args}\n"
+            );
+            let services = parse_scan(&output);
+            let service = find(&services, 5000, "localhost");
+            assert_eq!(service.kind, WebServiceKind::Mlflow);
+            assert_eq!(service.detail, None);
+            let metadata = serde_json::to_string(&services).unwrap();
+            for sensitive in ["db-secret", "storage-secret", "private", "token="] {
+                assert!(!metadata.contains(sensitive), "leaked {sensitive}");
+            }
+        }
     }
 
     #[test]
