@@ -53,3 +53,24 @@
     }
   }
 })();
+
+// Fade sections in as they scroll into view.
+(function () {
+  if (!("IntersectionObserver" in window)) return;
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  var targets = document.querySelectorAll(".shot, section h2, .section-lead, .card, .phone-gallery figure, .terminal, .table-wrap");
+  var observer = new IntersectionObserver(
+    function (entries) {
+      entries.forEach(function (entry) {
+        if (!entry.isIntersecting) return;
+        entry.target.classList.add("is-visible");
+        observer.unobserve(entry.target);
+      });
+    },
+    { rootMargin: "0px 0px -8% 0px" }
+  );
+  targets.forEach(function (node) {
+    node.classList.add("reveal");
+    observer.observe(node);
+  });
+})();
