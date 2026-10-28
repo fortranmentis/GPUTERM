@@ -583,3 +583,5 @@ th, td { border-bottom-color: #e8e8ed; }
 body { word-break: keep-all; overflow-wrap: break-word; }
 h1, h2, h3, .eyebrow, .kicker { text-wrap: balance; }
 .section-lead, .hero p.lead { text-wrap: pretty; }
+section:not(#workflow):not(#mobile):not(#platforms):not(.faq) .table-wrap { background: var(--panel); }
+td code { white-space: nowrap; }
