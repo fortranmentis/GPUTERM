@@ -3,6 +3,13 @@ name: Release Build
 # Creates/updates the prerelease, builds the native installers, and attaches
 # them to the tag. The macOS path signs every nested code object before the
 # final app bundle and creates the DMG only from that verified app.
+#
+# Every release also carries signed update bundles (NSIS setup, AppImage,
+# macOS .app.tar.gz, each with a minisign `.sig`) and a `latest.json`
+# manifest. The manifest is copied to the fixed `updater` release, which is
+# what the in-app updater polls: GitHub's `releases/latest` URL skips
+# pre-releases, and every GpuTerm release is one. Signing needs the
+# TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD secrets.
 on:
   workflow_dispatch:
     inputs:
@@ -51,8 +58,10 @@ jobs:
         include:
           - platform: windows-latest
             bundles: nsis
+          # The updater can replace only an AppImage; the .deb stays for
+          # package-manager installs, which update by hand.
           - platform: ubuntu-22.04
-            bundles: deb
+            bundles: deb,appimage
           - platform: macos-latest
             bundles: app
     runs-on: ${{ matrix.platform }}
@@ -97,11 +106,16 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ inputs.tag || github.ref_name }}
           releaseName: "GpuTerm __VERSION__"
           prerelease: true
-          args: --bundles ${{ matrix.bundles }}
+          # latest.json is assembled once every platform is up, in the
+          # updater-manifest job below.
+          includeUpdaterJson: false
+          args: --bundles ${{ matrix.bundles }} --config src-tauri/tauri.release.conf.json
 
       - name: Build macOS application bundle
         if: matrix.platform == 'macos-latest'
@@ -154,6 +168,25 @@ jobs:
           DMG_PATH: ${{ steps.mac_dmg.outputs.dmg_path }}
         run: gh release upload "$RELEASE_TAG" "$DMG_PATH#macOS Apple Silicon (fully ad-hoc signed)" --clobber
 
+      # Packed from the ad-hoc signed app rather than taken from Tauri's own
+      # bundle step, which runs before that signing.
+      - name: Create and upload signed macOS update bundle
+        if: matrix.platform == 'macos-latest'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          APP_PATH: ${{ steps.mac_app.outputs.app_path }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          BUNDLE="$RUNNER_TEMP/GpuTerm_${VERSION}_aarch64.app.tar.gz"
+          COPYFILE_DISABLE=1 tar -czf "$BUNDLE" -C "$(dirname "$APP_PATH")" "$(basename "$APP_PATH")"
+          npx tauri signer sign "$BUNDLE"
+          test -s "$BUNDLE.sig"
+          gh release upload "$RELEASE_TAG" "$BUNDLE#macOS Apple Silicon update bundle" "$BUNDLE.sig" --clobber
+
   checksums:
     needs: build
     runs-on: ubuntu-22.04
@@ -173,6 +206,8 @@ jobs:
           test "$(find assets -maxdepth 1 -name '*.exe' | wc -l)" -eq 1
           test "$(find assets -maxdepth 1 -name '*.dmg' | wc -l)" -eq 1
           test "$(find assets -maxdepth 1 -name '*.deb' | wc -l)" -eq 1
+          test "$(find assets -maxdepth 1 -name '*.AppImage' | wc -l)" -eq 1
+          test "$(find assets -maxdepth 1 -name '*.app.tar.gz' | wc -l)" -eq 1
 
       - name: Generate and upload SHA-256 checksums
         env:
@@ -180,8 +215,53 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         working-directory: assets
         run: |
-          shasum -a 256 GpuTerm_* > SHA256SUMS.txt
+          find . -maxdepth 1 -name 'GpuTerm_*' ! -name '*.sig' -printf '%f\n' | sort \
+            | xargs shasum -a 256 > SHA256SUMS.txt
           cat SHA256SUMS.txt
           gh release upload "$RELEASE_TAG" SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
+
+  updater-manifest:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build latest.json from the signed update bundles
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          mkdir signatures
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir signatures \
+            --pattern 'GpuTerm_*.sig'
+          node scripts/make-updater-manifest.mjs \
+            "$RELEASE_TAG" signatures RELEASE_NOTES.md "$GITHUB_REPOSITORY" > latest.json
+          cat latest.json
+
+      - name: Publish latest.json to the release and the updater channel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          gh release upload "$RELEASE_TAG" latest.json --repo "$GITHUB_REPOSITORY" --clobber
+          if ! gh release view updater --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create updater \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Updater channel" \
+              --notes "Holds latest.json for GpuTerm's in-app updater. Download installers from the versioned releases." \
+              --prerelease
+          fi
+          gh release upload updater latest.json --repo "$GITHUB_REPOSITORY" --clobber

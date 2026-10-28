@@ -11,6 +11,7 @@ import { RemoteTelemetryBar } from "./components/RemoteTelemetryBar";
 import { SessionSidebar } from "./components/SessionSidebar";
 import { SftpBrowser } from "./components/SftpBrowser";
 import { TerminalPane } from "./components/TerminalPane";
+import { UpdateDialog, useUpdateChecks } from "./components/UpdateDialog";
 import { useLlmStore } from "./stores/llmStore";
 import { useSessionStore } from "./stores/sessionStore";
 import { useSettingsStore } from "./stores/settingsStore";
@@ -50,6 +51,7 @@ function App() {
   const setMessage = useSessionStore((state) => state.setMessage);
   const loadSettings = useSettingsStore((state) => state.loadSettings);
   useAutoReconnect();
+  useUpdateChecks();
   const removeTerminalPane = useSessionStore((state) => state.removeTerminalPane);
   const showSession = useSessionStore((state) => state.showSession);
   const setSessionTelemetry = useSessionStore((state) => state.setSessionTelemetry);
@@ -342,6 +344,7 @@ function App() {
         )}
         <AppMessageOverlay />
         <AuthPromptDialog />
+        <UpdateDialog />
         <div
           className="workspace-grid"
           ref={workspaceGridRef}

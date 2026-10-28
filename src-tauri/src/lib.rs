@@ -2,12 +2,14 @@ mod alerts;
 mod llm;
 mod native_drag;
 mod ssh;
+mod updates;
 
 use llm::{
     delete_llm_instance, get_llm_telemetry, list_llm_instances, refresh_llm_telemetry,
     save_llm_instance, set_llm_instance_enabled, test_llm_instance,
 };
 use native_drag::start_native_file_drag;
+use updates::{open_release_page, update_install_mode};
 use tauri::Manager;
 
 use ssh::agent_monitor::{configure_claude_quota_monitor, refresh_agent_quota};
@@ -43,8 +45,12 @@ pub fn run() {
         .manage(AppState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             start_native_file_drag,
+            update_install_mode,
+            open_release_page,
             load_sessions,
             save_session,
             delete_session,

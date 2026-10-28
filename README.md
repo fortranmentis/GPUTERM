@@ -170,6 +170,7 @@ Download from the [latest release](https://github.com/fortranmentis/GPUTERM/rele
 | Windows 10/11 (x64) | `GpuTerm_x.y.z_x64-setup.exe` | NSIS installer |
 | macOS (Apple Silicon) | `GpuTerm_x.y.z_aarch64.dmg` | Intel Macs: build from source for now |
 | Debian / Ubuntu (x64) | `GpuTerm_x.y.z_amd64.deb` | `sudo apt install ./GpuTerm_*.deb` |
+| Linux (x64, portable) | `GpuTerm_x.y.z_amd64.AppImage` | `chmod +x` and run; updates itself in-app |
 
 <details>
 <summary>“Unknown publisher” / Gatekeeper warnings</summary>
@@ -188,6 +189,14 @@ codesign --verify --deep --strict --verbose=2 /Applications/GpuTerm.app
 ```
 
 </details>
+
+### Updates
+
+From 1.3.8-beta on, GpuTerm checks GitHub for a newer release shortly after launch and every six hours. When one is out, a dialog shows its release notes with **Update**, **Later** and **Skip this version**. **Update** downloads the new build, checks its signature against the public key built into the app, installs it, and offers **Restart now**. **Check for updates** at the bottom of the sidebar runs the same check by hand and also shows the installed version.
+
+- The first build that includes the updater has to be installed by hand once; every later release can then be installed from inside the app.
+- **Debian/Ubuntu `.deb` installs** belong to the package manager, so the dialog opens the release page instead of installing. The AppImage updates itself.
+- Updates are signed with GpuTerm's own update key, separately from the OS code signing described above; an update whose signature does not match is refused.
 
 ### Build from source
 
@@ -486,7 +495,9 @@ src-tauri/src/ssh/      Rust backend
 
 ### Releases & CI
 
-Pushing a `v*` tag runs the [Release Build workflow](.github/workflows/release.yml), which creates the prerelease from [RELEASE_NOTES.md](./RELEASE_NOTES.md), builds the Windows `.exe` (NSIS), Debian `.deb`, and macOS `.dmg` on GitHub-hosted runners, and attaches them to the tag. The macOS job signs every nested code object inside-out, deep-signs and verifies the final app, builds the DMG from that verified bundle, mounts it, and verifies the enclosed app again. A `SHA256SUMS.txt` file is published after all three installers succeed. The workflow can also be dispatched manually for an existing tag from the Actions page.
+Pushing a `v*` tag runs the [Release Build workflow](.github/workflows/release.yml), which creates the prerelease from [RELEASE_NOTES.md](./RELEASE_NOTES.md), builds the Windows `.exe` (NSIS), Debian `.deb`, and macOS `.dmg` on GitHub-hosted runners, and attaches them to the tag. The macOS job signs every nested code object inside-out, deep-signs and verifies the final app, builds the DMG from that verified bundle, mounts it, and verifies the enclosed app again. A `SHA256SUMS.txt` file is published after all installers succeed. The workflow can also be dispatched manually for an existing tag from the Actions page.
+
+Each release also gets signed update bundles (the NSIS setup, the AppImage and a macOS `.app.tar.gz` packed from the ad-hoc signed app, each with a `.sig`) and a `latest.json` manifest built by [`scripts/make-updater-manifest.mjs`](scripts/make-updater-manifest.mjs). The manifest is copied to the fixed [`updater`](https://github.com/fortranmentis/GPUTERM/releases/tag/updater) release, which is the URL the app polls, because GitHub's “latest release” link skips pre-releases. Signing reads the `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` repository secrets; [`src-tauri/tauri.release.conf.json`](src-tauri/tauri.release.conf.json) turns on the update bundles only for release builds, so local `tauri build` runs need no key.
 
 ## FAQ
 

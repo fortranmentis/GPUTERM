@@ -18,6 +18,7 @@ import { useDisconnectSession } from "../hooks/useDisconnectSession";
 import { withHostKeyPrompt } from "../utils/hostKeyPrompt";
 import { describeImport, SshConfigImport } from "./SshConfigImport";
 import { PortForwards } from "./PortForwards";
+import { SidebarFooter } from "./SidebarFooter";
 import { ManagedKeyPanel } from "./ManagedKeyPanel";
 import { KeyManagerDialog } from "./KeyManagerDialog";
 import { BiometricUnlockToggle } from "./BiometricUnlockToggle";
@@ -916,6 +917,7 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
         <Unplug size={16} />
         Disconnect
       </button>
+      <SidebarFooter />
       {showKeyManager && <KeyManagerDialog onClose={() => setShowKeyManager(false)} />}
     </aside>
   );

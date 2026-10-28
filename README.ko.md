@@ -167,6 +167,7 @@
 | Windows 10/11 (x64) | `GpuTerm_x.y.z_x64-setup.exe` | NSIS 설치 프로그램 |
 | macOS (Apple Silicon) | `GpuTerm_x.y.z_aarch64.dmg` | Intel Mac은 현재 소스 빌드 필요 |
 | Debian / Ubuntu (x64) | `GpuTerm_x.y.z_amd64.deb` | `sudo apt install ./GpuTerm_*.deb` |
+| Linux (x64, 포터블) | `GpuTerm_x.y.z_amd64.AppImage` | `chmod +x` 후 실행. 앱 안에서 업데이트됨 |
 
 <details>
 <summary>"알 수 없는 게시자" / Gatekeeper 경고 안내</summary>
@@ -185,6 +186,14 @@ codesign --verify --deep --strict --verbose=2 /Applications/GpuTerm.app
 ```
 
 </details>
+
+### 업데이트
+
+1.3.8-beta부터 GpuTerm은 실행 직후와 6시간마다 GitHub에 새 릴리스가 있는지 확인합니다. 새 버전이 있으면 릴리스 노트와 함께 **Update**, **Later**, **Skip this version** 버튼이 있는 창을 띄웁니다. **Update**를 누르면 새 빌드를 내려받아 앱에 들어 있는 공개키로 서명을 확인한 뒤 설치하고, **Restart now**로 다시 시작할 수 있습니다. 사이드바 맨 아래의 **Check for updates**는 같은 확인을 직접 실행하며, 설치된 버전도 보여 줍니다.
+
+- 업데이터가 들어간 첫 빌드는 한 번 직접 설치해야 합니다. 그다음 릴리스부터는 앱 안에서 설치할 수 있습니다.
+- **Debian/Ubuntu `.deb` 설치**는 패키지 관리자가 관리하므로, 설치 대신 릴리스 페이지를 엽니다. AppImage는 스스로 업데이트됩니다.
+- 업데이트는 위의 OS 코드 서명과 별도로 GpuTerm 전용 업데이트 키로 서명됩니다. 서명이 맞지 않는 업데이트는 설치하지 않습니다.
 
 ### 소스에서 빌드
 
@@ -479,7 +488,9 @@ src-tauri/src/ssh/      Rust 백엔드
 
 ### 릴리스 & CI
 
-`v*` 태그를 푸시하면 [Release Build 워크플로](.github/workflows/release.yml)가 [RELEASE_NOTES.md](./RELEASE_NOTES.md)로 프리릴리스를 만들고, GitHub 호스트 러너에서 Windows `.exe`(NSIS), Debian `.deb`, macOS `.dmg`를 빌드해 태그에 첨부합니다. macOS 작업은 모든 내부 코드 객체를 안쪽부터 서명하고 최종 앱을 deep 서명·검증한 뒤 DMG를 만들며, 생성된 DMG를 다시 마운트해 내부 앱 서명을 재검증합니다. 세 설치 파일이 모두 성공하면 `SHA256SUMS.txt`도 게시합니다. Actions 페이지에서 기존 태그를 지정해 수동 실행할 수도 있습니다.
+`v*` 태그를 푸시하면 [Release Build 워크플로](.github/workflows/release.yml)가 [RELEASE_NOTES.md](./RELEASE_NOTES.md)로 프리릴리스를 만들고, GitHub 호스트 러너에서 Windows `.exe`(NSIS), Debian `.deb`, macOS `.dmg`를 빌드해 태그에 첨부합니다. macOS 작업은 모든 내부 코드 객체를 안쪽부터 서명하고 최종 앱을 deep 서명·검증한 뒤 DMG를 만들며, 생성된 DMG를 다시 마운트해 내부 앱 서명을 재검증합니다. 모든 설치 파일이 성공하면 `SHA256SUMS.txt`도 게시합니다. Actions 페이지에서 기존 태그를 지정해 수동 실행할 수도 있습니다.
+
+릴리스마다 서명된 업데이트 번들(NSIS 설치 파일, AppImage, ad-hoc 서명된 앱으로 만든 macOS `.app.tar.gz`, 각각의 `.sig`)과 [`scripts/make-updater-manifest.mjs`](scripts/make-updater-manifest.mjs)가 만드는 `latest.json`도 함께 올라갑니다. GitHub의 "최신 릴리스" 링크는 프리릴리스를 건너뛰기 때문에, 이 manifest는 앱이 확인하는 고정 [`updater`](https://github.com/fortranmentis/GPUTERM/releases/tag/updater) 릴리스에도 복사됩니다. 서명에는 저장소 secret `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`가 필요합니다. 업데이트 번들은 [`src-tauri/tauri.release.conf.json`](src-tauri/tauri.release.conf.json)으로 릴리스 빌드에서만 켜지므로, 로컬 `tauri build`에는 키가 필요 없습니다.
 
 ## FAQ
 
