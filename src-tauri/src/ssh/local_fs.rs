@@ -30,6 +30,9 @@ pub struct AppSettings {
     /// Alert rules and notification preferences.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alerts: Option<crate::alerts::AlertSettings>,
+    /// The MCP server's on/off switch and what it may expose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<crate::mcp::McpSettings>,
 }
 
 const MIN_TERMINAL_FONT_SIZE: u8 = 8;

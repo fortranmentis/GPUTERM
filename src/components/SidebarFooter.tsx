@@ -1,7 +1,11 @@
-import { RefreshCw } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { Plug, RefreshCw } from "lucide-react";
 import { useUpdateStore } from "../stores/updateStore";
+import { McpSettingsDialog } from "./McpSettingsDialog";
+import type { McpStatus } from "../types/mcp";
 
-/** The app version and the update check, at the bottom of the sidebar. */
+/** The app version, the update check and the MCP switch, at the bottom of the sidebar. */
 export function SidebarFooter() {
   const currentVersion = useUpdateStore((state) => state.currentVersion);
   const phase = useUpdateStore((state) => state.phase);
@@ -9,10 +13,28 @@ export function SidebarFooter() {
   const checkForUpdates = useUpdateStore((state) => state.checkForUpdates);
   const openDialog = useUpdateStore((state) => state.openDialog);
   const pending = update != null && (phase === "available" || phase === "ready");
+  const [mcpOpen, setMcpOpen] = useState(false);
+  const [mcpRunning, setMcpRunning] = useState(false);
+
+  const refreshMcp = useCallback(() => {
+    invoke<McpStatus>("get_mcp_status")
+      .then((status) => setMcpRunning(Boolean(status?.running)))
+      .catch(() => undefined);
+  }, []);
+  useEffect(refreshMcp, [refreshMcp]);
 
   return (
     <div className="sidebar-footer">
       <span className="sidebar-version">{currentVersion ? `v${currentVersion}` : "GpuTerm"}</span>
+      <button
+        className={`sidebar-update-button${mcpRunning ? " mcp-on" : ""}`}
+        type="button"
+        title={mcpRunning ? "MCP server is on" : "MCP server is off"}
+        onClick={() => setMcpOpen(true)}
+      >
+        <Plug size={12} />
+        MCP
+      </button>
       {pending ? (
         <button
           className="sidebar-update-button available"
@@ -33,6 +55,14 @@ export function SidebarFooter() {
           <RefreshCw size={12} className={phase === "checking" ? "spin" : undefined} />
           Check for updates
         </button>
+      )}
+      {mcpOpen && (
+        <McpSettingsDialog
+          onClose={() => {
+            setMcpOpen(false);
+            refreshMcp();
+          }}
+        />
       )}
     </div>
   );

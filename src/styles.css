@@ -5761,3 +5761,152 @@ button.agent-summary-section {
 .update-progress span.indeterminate {
   opacity: 0.5;
 }
+
+.sidebar-version {
+  margin-right: auto;
+}
+
+.sidebar-update-button.mcp-on {
+  color: #86efac;
+}
+
+.mcp-approval-backdrop {
+  /* Above the vault gate (70) and the update dialog (80): the MCP client is
+     waiting on this answer. */
+  z-index: 90;
+}
+
+.mcp-approval-dialog .app-modal-header {
+  color: #fcd34d;
+}
+
+.mcp-approval-dialog .app-modal-actions,
+.mcp-settings-dialog .app-modal-actions {
+  gap: 8px;
+}
+
+.mcp-approval-detail,
+.mcp-snippet pre {
+  max-height: 200px;
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #070b10;
+  color: #e2e8f0;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.mcp-approval-hint,
+.mcp-audit {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.mcp-settings-dialog {
+  width: min(560px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+}
+
+.mcp-settings-dialog .app-modal-header {
+  color: #7dd3fc;
+}
+
+.mcp-status {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.mcp-status.on {
+  color: #86efac;
+}
+
+.mcp-status.off {
+  color: var(--muted);
+}
+
+.mcp-toggle {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 8px;
+  color: #e2e8f0;
+  font-size: 13px;
+}
+
+.mcp-toggle input {
+  margin-top: 3px;
+}
+
+.mcp-toggle small {
+  color: var(--muted);
+}
+
+.mcp-hosts {
+  display: grid;
+  gap: 6px;
+  max-height: 160px;
+  margin: 0;
+  padding: 8px 10px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.mcp-hosts legend {
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.mcp-clients {
+  display: grid;
+  gap: 6px;
+}
+
+.mcp-clients > small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.mcp-client-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.mcp-client-tabs button {
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.mcp-client-tabs button.selected {
+  border-color: #38bdf8;
+  color: #e2e8f0;
+}
+
+.mcp-snippet {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.mcp-snippet pre {
+  flex: 1;
+  min-width: 0;
+}

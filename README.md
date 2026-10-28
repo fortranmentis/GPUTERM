@@ -386,6 +386,26 @@ AI DASH monitoring is read-only except when the user explicitly presses Claude's
 
 </details>
 
+### MCP server for AI assistants
+
+GpuTerm can act as an [MCP](https://modelcontextprotocol.io) server, so Claude Code, Claude Desktop, Codex, Cursor and other MCP clients can look at the hosts you have connected. Click **MCP** at the bottom of the sidebar, turn on **Allow MCP clients**, then copy the setup for your client from the same dialog. Claude Code, for example:
+
+```bash
+claude mcp add --scope user gputerm -- "/Applications/GpuTerm.app/Contents/MacOS/gputerm" --mcp-stdio
+```
+
+| Tools | What they do |
+| --- | --- |
+| `list_hosts`, `get_host_status`, `get_usage_history`, `find_free_gpus` | Hosts, the latest CPU/memory/disk/GPU reading, the last 15 or 60 minutes, idle GPUs across hosts |
+| `list_gpu_processes`, `list_top_processes`, `list_containers`, `list_tmux_sessions`, `list_directory` | The same detail views as the telemetry popovers and SFTP browser |
+| `get_llm_runtimes`, `get_active_alerts` | LLM runtime status and alerts that are currently firing |
+| `run_command`, `read_file`, `kill_process` | Offered only with **Allow actions** on; every call opens a confirmation in GpuTerm (Deny is the default; no answer in two minutes is a denial) |
+
+- Clients start `gputerm --mcp-stdio`, which relays to the running app over `127.0.0.1` with a random token that is regenerated each time the server starts and stored in a file only your user can read. Nothing listens on the network, and when GpuTerm is closed the tools just say so.
+- Tools only see hosts that are **connected** in GpuTerm, and you can hide hosts from MCP in the same dialog. Saved passwords and keys are never exposed.
+- Command output, file contents and file names are returned marked as untrusted data, because a remote file can contain text written to steer an AI assistant.
+- Every call is recorded in `mcp-audit.log` in the GpuTerm data folder (rotated at 1 MiB).
+
 ### Claude Code usage limits
 
 Claude Code never writes its 5-hour and 7-day usage limits to a session transcript — the status-line hook is the only place it publishes them. GpuTerm ships a status line that republishes that data for AI DASH and prints a usable status line of its own:

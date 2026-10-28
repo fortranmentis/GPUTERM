@@ -255,6 +255,8 @@ pub struct AlertEngine {
     settings: Mutex<AlertSettings>,
     phases: Mutex<HashMap<AlertKey, Phase>>,
     last_notified: Mutex<HashMap<AlertKey, u64>>,
+    /// The latest "fired" event of every rule that has not resolved yet.
+    active: Mutex<HashMap<AlertKey, AlertEvent>>,
 }
 
 /// One rule application, before it becomes an event.
@@ -480,10 +482,42 @@ impl AlertEngine {
                 *percent,
             ));
         }
-        checks
+        let events: Vec<AlertEvent> = checks
             .into_iter()
             .filter_map(|check| self.apply(scope, host_label, check, now, settings.cooldown_secs))
-            .collect()
+            .collect();
+        self.track(&events);
+        events
+    }
+
+    /// Keeps `active` in step with the events just produced.
+    fn track(&self, events: &[AlertEvent]) {
+        let Ok(mut active) = self.active.lock() else {
+            return;
+        };
+        for event in events {
+            let key = AlertKey {
+                scope: event.scope.clone(),
+                kind: event.kind,
+                subject: event.subject.clone(),
+            };
+            if event.state == "fired" {
+                active.insert(key, event.clone());
+            } else {
+                active.remove(&key);
+            }
+        }
+    }
+
+    /// Alerts that fired and have not resolved, oldest first.
+    pub fn active_alerts(&self) -> Vec<AlertEvent> {
+        let mut alerts: Vec<AlertEvent> = self
+            .active
+            .lock()
+            .map(|active| active.values().cloned().collect())
+            .unwrap_or_default();
+        alerts.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
+        alerts
     }
 
     /// An LLM instance's severity changed. Only a move into Critical from a
@@ -539,6 +573,7 @@ impl AlertEngine {
         } else {
             event.title = format!("{name} recovered");
         }
+        self.track(std::slice::from_ref(&event));
         Some(event)
     }
 
@@ -546,6 +581,9 @@ impl AlertEngine {
     pub fn forget_scope(&self, scope: &str) {
         if let Ok(mut phases) = self.phases.lock() {
             phases.retain(|key, _| key.scope != scope);
+        }
+        if let Ok(mut active) = self.active.lock() {
+            active.retain(|key, _| key.scope != scope);
         }
     }
 }
@@ -679,6 +717,35 @@ mod tests {
         let resolved = engine.evaluate_telemetry("s", "lab", &input(84.0), T0 + 10);
         assert_eq!(resolved[0].state, "resolved");
         assert!(!resolved[0].notify);
+    }
+
+    #[test]
+    fn active_alerts_follow_fire_resolve_and_session_end() {
+        let engine = AlertEngine::default();
+        engine.set_settings(AlertSettings {
+            memory: ThresholdRule::new(true, 90.0, 5.0, 0),
+            disk: ThresholdRule::new(true, 90.0, 2.0, 0),
+            ..AlertSettings::default()
+        });
+        let input = |memory: f64, disk: f64| AlertInput {
+            memory_percent: Some(memory),
+            disks: vec![("/data".to_string(), Some(disk))],
+            ..AlertInput::default()
+        };
+        engine.evaluate_telemetry("s", "lab", &input(95.0, 95.0), T0);
+        engine.evaluate_telemetry("t", "box", &input(95.0, 10.0), T0 + 1);
+        assert_eq!(engine.active_alerts().len(), 3);
+
+        engine.evaluate_telemetry("s", "lab", &input(50.0, 95.0), T0 + 5);
+        let active = engine.active_alerts();
+        assert_eq!(active.len(), 2);
+        assert!(active.iter().all(|alert| alert.state == "fired"));
+        assert!(active.iter().any(|alert| alert.scope == "s" && alert.subject == "/data"));
+
+        engine.forget_scope("t");
+        let active = engine.active_alerts();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].scope, "s");
     }
 
     #[test]

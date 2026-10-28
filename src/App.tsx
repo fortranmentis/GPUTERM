@@ -12,6 +12,7 @@ import { SessionSidebar } from "./components/SessionSidebar";
 import { SftpBrowser } from "./components/SftpBrowser";
 import { TerminalPane } from "./components/TerminalPane";
 import { UpdateDialog, useUpdateChecks } from "./components/UpdateDialog";
+import { McpApprovalDialog } from "./components/McpApprovalDialog";
 import { useLlmStore } from "./stores/llmStore";
 import { useSessionStore } from "./stores/sessionStore";
 import { useSettingsStore } from "./stores/settingsStore";
@@ -345,6 +346,7 @@ function App() {
         <AppMessageOverlay />
         <AuthPromptDialog />
         <UpdateDialog />
+        <McpApprovalDialog />
         <div
           className="workspace-grid"
           ref={workspaceGridRef}

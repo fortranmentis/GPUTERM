@@ -26,6 +26,11 @@ pub fn observe(app: &AppHandle, state: &AppState, telemetry: &RemoteTelemetry) {
         .lock()
         .map(|settings| settings.disk_ignore_fs_types.clone())
         .unwrap_or_default();
+    if let (Ok(value), Ok(mut latest)) =
+        (serde_json::to_value(telemetry), state.latest_telemetry.lock())
+    {
+        latest.insert(session_id.to_string(), value);
+    }
     let now = now_epoch_seconds();
     if let Some(sample) = telemetry.history_sample(&ignored_fs) {
         state.telemetry_history.record(session_id, now, sample);

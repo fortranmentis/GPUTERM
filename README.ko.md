@@ -380,6 +380,26 @@ LLM 런타임 모니터링만은 예외로 원격 명령을 전혀 실행하지 
 
 </details>
 
+### AI 도우미용 MCP 서버
+
+GpuTerm은 [MCP](https://modelcontextprotocol.io) 서버로 동작할 수 있어서 Claude Code, Claude Desktop, Codex, Cursor 같은 MCP 클라이언트가 연결된 호스트를 조회할 수 있습니다. 사이드바 맨 아래 **MCP**를 누르고 **Allow MCP clients**를 켠 뒤, 같은 창에서 클라이언트별 설정을 복사하세요. 예를 들어 Claude Code는 다음과 같습니다:
+
+```bash
+claude mcp add --scope user gputerm -- "/Applications/GpuTerm.app/Contents/MacOS/gputerm" --mcp-stdio
+```
+
+| 도구 | 기능 |
+| --- | --- |
+| `list_hosts`, `get_host_status`, `get_usage_history`, `find_free_gpus` | 호스트 목록, 최신 CPU/메모리/디스크/GPU 값, 최근 15분·60분 기록, 여러 호스트에서 비어 있는 GPU 찾기 |
+| `list_gpu_processes`, `list_top_processes`, `list_containers`, `list_tmux_sessions`, `list_directory` | 텔레메트리 상세 창과 SFTP 브라우저와 같은 정보 |
+| `get_llm_runtimes`, `get_active_alerts` | LLM 런타임 상태와 현재 켜져 있는 알림 |
+| `run_command`, `read_file`, `kill_process` | **Allow actions**를 켰을 때만 제공. 호출할 때마다 GpuTerm에 확인 창이 뜸(기본은 거부, 2분 안에 답이 없으면 거부) |
+
+- 클라이언트는 `gputerm --mcp-stdio`를 실행하고, 이 프로세스가 `127.0.0.1`로 실행 중인 앱에 중계합니다. 토큰은 서버가 켜질 때마다 새로 만들어지며 현재 사용자만 읽을 수 있는 파일에 저장됩니다. 네트워크에서 접속을 받지 않고, GpuTerm이 꺼져 있으면 도구가 그렇다고 알려 줍니다.
+- 도구는 GpuTerm에서 **연결된** 호스트만 볼 수 있고, 같은 창에서 특정 호스트를 MCP에서 숨길 수 있습니다. 저장된 비밀번호와 키는 절대 노출되지 않습니다.
+- 원격 파일에 AI 도우미를 조종하려는 문장이 들어 있을 수 있으므로, 명령 출력과 파일 내용, 파일 이름은 신뢰할 수 없는 데이터로 표시해 돌려줍니다.
+- 모든 호출은 GpuTerm 데이터 폴더의 `mcp-audit.log`에 기록됩니다(1 MiB마다 교체).
+
 ### Claude Code 사용 한도
 
 Claude Code는 5시간·7일 사용 한도를 세션 트랜스크립트에 기록하지 않습니다. 이 값을 공개하는 곳은 status-line hook뿐입니다. GpuTerm은 그 데이터를 AI DASH용으로 다시 게시하면서 자체 상태줄도 출력하는 스크립트를 함께 제공합니다.

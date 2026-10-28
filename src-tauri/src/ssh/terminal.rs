@@ -64,6 +64,7 @@ struct TerminalReaderState {
     remote_os_cache: Arc<Mutex<HashMap<String, system_monitor::RemoteOs>>>,
     gpu_probe_cache: Arc<Mutex<HashMap<String, crate::ssh::gpu_monitor::GpuProbe>>>,
     telemetry_history: Arc<crate::ssh::telemetry_history::TelemetryHistory>,
+    latest_telemetry: Arc<Mutex<HashMap<String, serde_json::Value>>>,
     alerts: Arc<crate::alerts::AlertEngine>,
 }
 
@@ -78,6 +79,7 @@ impl TerminalReaderState {
             remote_os_cache: Arc::clone(&state.remote_os_cache),
             gpu_probe_cache: Arc::clone(&state.gpu_probe_cache),
             telemetry_history: Arc::clone(&state.telemetry_history),
+            latest_telemetry: Arc::clone(&state.latest_telemetry),
             alerts: Arc::clone(&state.alerts),
         }
     }
@@ -923,6 +925,9 @@ fn finish_terminal_reader(
             cache.remove(&session_id);
         }
         reader_state.telemetry_history.remove(&session_id);
+        if let Ok(mut latest) = reader_state.latest_telemetry.lock() {
+            latest.remove(&session_id);
+        }
         reader_state.alerts.forget_scope(&session_id);
     }
     let _ = app.emit(
@@ -1005,6 +1010,9 @@ fn stop_existing_session(state: &AppState, session_id: &str) {
         cache.remove(session_id);
     }
     state.telemetry_history.remove(session_id);
+    if let Ok(mut latest) = state.latest_telemetry.lock() {
+        latest.remove(session_id);
+    }
     state.alerts.forget_scope(session_id);
     if let Ok(mut refreshes) = state.agent_quota_refreshes.lock() {
         refreshes.remove(session_id);

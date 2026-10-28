@@ -1,5 +1,6 @@
 mod alerts;
 mod llm;
+mod mcp;
 mod native_drag;
 mod ssh;
 mod updates;
@@ -39,10 +40,17 @@ use ssh::terminal::{
     terminal_resize, terminal_write,
 };
 
+/// `gputerm --mcp-stdio`: the stdio side of the MCP server, started by MCP
+/// clients rather than by the user. Returns the process exit code.
+pub fn run_mcp_relay() -> i32 {
+    mcp::relay::run()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
+        .manage(mcp::McpState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -50,6 +58,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             start_native_file_drag,
             update_install_mode,
+            mcp::get_mcp_status,
+            mcp::update_mcp_settings,
+            mcp::approval::answer_mcp_approval,
             open_release_page,
             load_sessions,
             save_session,
@@ -148,6 +159,7 @@ pub fn run() {
             state.alerts.set_settings(alerts::load_persisted_settings());
             llm::load_into_state(&state);
             llm::monitor::start(app.handle().clone(), llm::monitor_context(&state));
+            mcp::restore(app.handle());
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -155,6 +167,7 @@ pub fn run() {
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
                 app.state::<AppState>().llm_monitor.stop();
+                mcp::stop(app);
             }
         });
 }

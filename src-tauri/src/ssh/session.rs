@@ -74,6 +74,9 @@ pub struct AppState {
     pub gpu_probe_cache: Arc<Mutex<HashMap<String, crate::ssh::gpu_monitor::GpuProbe>>>,
     /// The last hour of usage per session, for the history charts.
     pub telemetry_history: Arc<crate::ssh::telemetry_history::TelemetryHistory>,
+    /// The most recent telemetry reading per session, as sent to the UI; the
+    /// MCP server reads it, since the backend otherwise keeps only history.
+    pub latest_telemetry: Arc<Mutex<HashMap<String, serde_json::Value>>>,
     /// Threshold alerts and their per-rule state.
     pub alerts: Arc<crate::alerts::AlertEngine>,
     /// Sign-in questions waiting for the user's answers.
