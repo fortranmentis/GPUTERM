@@ -18,6 +18,7 @@ import { useDisconnectSession } from "../hooks/useDisconnectSession";
 import { withHostKeyPrompt } from "../utils/hostKeyPrompt";
 import { describeImport, SshConfigImport } from "./SshConfigImport";
 import { PortForwards } from "./PortForwards";
+import { WebServices } from "./WebServices";
 import { SidebarFooter } from "./SidebarFooter";
 import { ManagedKeyPanel } from "./ManagedKeyPanel";
 import { KeyManagerDialog } from "./KeyManagerDialog";
@@ -901,6 +902,10 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
             onManageKeys={() => setShowKeyManager(true)}
           />
           <PortForwards
+            profile={selectedProfile}
+            connected={connectedSessionIds.includes(selectedProfile.id)}
+          />
+          <WebServices
             profile={selectedProfile}
             connected={connectedSessionIds.includes(selectedProfile.id)}
           />

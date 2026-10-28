@@ -53,7 +53,8 @@ import {
   searchDecorations,
   type TerminalAppearance,
 } from "../utils/terminalAppearance";
-import { matchTerminalShortcut } from "../utils/terminalShortcuts";
+import { isMacPlatform, matchTerminalShortcut } from "../utils/terminalShortcuts";
+import { createUrlLinkProvider, tunnelTarget } from "../utils/terminalLinks";
 import type { Snippet } from "../types/snippet";
 import { shellQuote } from "../utils/shellQuote";
 import { attachWebKitHangulImeWorkaround } from "../utils/xtermHangulIme";
@@ -90,6 +91,7 @@ type TermEntry = {
   onSearchResults: IDisposable;
   onData: IDisposable;
   imeWorkaround: { dispose(): void };
+  linkProvider: IDisposable;
   inputQueue: string;
   writing: boolean;
   writable: boolean;
@@ -321,6 +323,8 @@ export function TerminalPane() {
     }
     return result;
   }, [terminalIdsBySession]);
+  const sessionIdByTerminalIdRef = useRef(sessionIdByTerminalId);
+  sessionIdByTerminalIdRef.current = sessionIdByTerminalId;
   const visibleSessionIds = useMemo(
     () =>
       new Set(
@@ -522,6 +526,28 @@ export function TerminalPane() {
     entry.terminal.focus();
   };
 
+  // ⌘-click (Ctrl-click elsewhere) opens a link. A link to a web server on
+  // the session's host (localhost, 0.0.0.0 or its own name) goes through a
+  // temporary SSH forward, so TensorBoard and Jupyter open as printed.
+  const openTerminalLink = (terminalId: string, event: MouseEvent, url: string) => {
+    if (!(isMacPlatform() ? event.metaKey : event.ctrlKey)) {
+      return;
+    }
+    const sessionId = sessionIdByTerminalIdRef.current.get(terminalId);
+    const { sessions, telemetryBySession } = useSessionStore.getState();
+    const profile = sessions.find((session) => session.id === sessionId);
+    const hostNames = profile?.isLocal
+      ? []
+      : [profile?.host ?? "", (sessionId && telemetryBySession[sessionId]?.hostname) || ""];
+    const target = tunnelTarget(url, hostNames);
+    const request =
+      target && sessionId
+        ? invoke<string>("open_web_service", { sessionId, ...target })
+        : invoke("open_link", { url });
+    request.catch((error) => setMessage({ kind: "error", text: String(error) }));
+  };
+  const linkHint = isMacPlatform() ? "⌘-click to open" : "Ctrl-click to open";
+
   // Create an xterm instance for every live backend pane and preserve
   // background sessions' scrollback while another host is active.
   useEffect(() => {
@@ -541,6 +567,11 @@ export function TerminalPane() {
       terminal.loadAddon(searchAddon);
       terminal.open(host);
       const imeWorkaround = attachWebKitHangulImeWorkaround(terminal);
+      const linkProvider = terminal.registerLinkProvider(
+        createUrlLinkProvider(terminal, linkHint, (event, url) =>
+          openTerminalLink(terminalId, event, url),
+        ),
+      );
       const entry: TermEntry = {
         terminal,
         fitAddon,
@@ -556,6 +587,7 @@ export function TerminalPane() {
         ),
         onData: { dispose() {} },
         imeWorkaround,
+        linkProvider,
         inputQueue: "",
         writing: false,
         writable: true,
@@ -581,6 +613,7 @@ export function TerminalPane() {
       entry.onData.dispose();
       entry.onSearchResults.dispose();
       entry.imeWorkaround.dispose();
+      entry.linkProvider.dispose();
       entry.searchAddon.dispose();
       entry.terminal.dispose();
       instancesRef.current.delete(terminalId);

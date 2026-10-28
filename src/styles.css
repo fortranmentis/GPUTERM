@@ -6010,3 +6010,20 @@ button.agent-summary-section {
   flex: 1;
   min-width: 0;
 }
+
+/* Web services (TensorBoard, Jupyter) under the port forwards. */
+.web-service-row {
+  align-items: center;
+}
+
+.web-service-icon {
+  flex: none;
+}
+
+.web-service-icon.tensorboard {
+  color: #fb923c;
+}
+
+.web-service-icon.jupyter {
+  color: #f59e0b;
+}

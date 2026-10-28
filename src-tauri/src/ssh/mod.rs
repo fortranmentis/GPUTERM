@@ -24,4 +24,5 @@ pub mod telemetry_hub;
 pub mod terminal;
 pub mod thermal_monitor;
 pub mod tmux;
+pub mod web_services;
 pub mod windows_monitor;

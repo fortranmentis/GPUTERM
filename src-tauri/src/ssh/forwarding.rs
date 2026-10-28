@@ -209,7 +209,7 @@ impl ForwardManager {
         }
     }
 
-    fn statuses(&self, profile_id: Option<&str>) -> Vec<ForwardStatus> {
+    pub(crate) fn statuses(&self, profile_id: Option<&str>) -> Vec<ForwardStatus> {
         let Ok(sets) = self.sets.lock() else {
             return Vec::new();
         };
@@ -321,7 +321,7 @@ pub fn start_profile_forwards(
 
 /// Starts one rule while connected. A rule with the id of a saved one
 /// restarts it; any other is temporary.
-fn start_one_forward(
+pub(crate) fn start_one_forward(
     manager: &ForwardManager,
     target: &SshTarget,
     spec: ForwardSpec,

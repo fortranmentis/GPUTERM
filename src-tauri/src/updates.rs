@@ -2,8 +2,6 @@
 //! frontend): which builds can update themselves, and opening the release
 //! page for the ones that cannot.
 
-use std::process::Command;
-
 const RELEASES_URL: &str = "https://github.com/fortranmentis/GPUTERM/releases";
 
 /// "in_app" when this build can install an update itself, "manual" when the
@@ -44,29 +42,7 @@ fn release_url(version: Option<&str>) -> String {
 /// general-purpose launcher.
 #[tauri::command]
 pub fn open_release_page(version: Option<String>) -> Result<(), String> {
-    let url = release_url(version.as_deref());
-    #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut command = Command::new("open");
-        command.arg(&url);
-        command
-    };
-    #[cfg(windows)]
-    let mut command = {
-        let mut command = Command::new("rundll32");
-        command.args(["url.dll,FileProtocolHandler", &url]);
-        command
-    };
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let mut command = {
-        let mut command = Command::new("xdg-open");
-        command.arg(&url);
-        command
-    };
-    command
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("Could not open {url}: {error}"))
+    crate::browser::open_in_browser(&release_url(version.as_deref()))
 }
 
 #[cfg(test)]

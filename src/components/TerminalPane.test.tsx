@@ -67,6 +67,9 @@ vi.mock("@xterm/xterm", () => ({
     textarea = null;
 
     loadAddon() {}
+    registerLinkProvider() {
+      return { dispose() {} };
+    }
     open(host: HTMLElement) {
       this.element = document.createElement("div");
       host.appendChild(this.element);
