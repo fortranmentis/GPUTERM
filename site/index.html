@@ -42,7 +42,7 @@
     "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
   }
   </script>
-  <link rel="stylesheet" href="assets/site.css?v=20261028">
+  <link rel="stylesheet" href="assets/site.css?v=20261028-display">
 </head>
 <body>
   <header class="site-header">
@@ -50,7 +50,7 @@
       <a class="brand" href="./"><img src="assets/logo.svg" alt="" width="30" height="30">GpuTerm</a>
       <nav class="site-nav" aria-label="Main">
         <a class="optional" href="#features">Features</a>
-        <a href="#mobile">Mobile</a><a class="optional" href="#mcp">MCP</a>
+        <a href="#mobile">Mobile</a><a class="optional" href="#external-display">Displays</a><a class="optional" href="#mcp">MCP</a>
         <a class="optional" href="#download">Download</a>
         <a href="ko/" hreflang="ko" lang="ko">한국어</a>
         <a href="https://github.com/fortranmentis/GPUTERM">GitHub</a>
@@ -64,7 +64,7 @@
         <span class="eyebrow">Desktop · iPhone · iPad · Android</span>
         <h1>At your desk. In your hand. <span>Your GPU servers, connected.</span></h1>
         <p class="lead">GpuTerm puts a terminal, a drag-and-drop file browser and live CPU, RAM, disk and GPU telemetry for every remote host into one desktop workspace. Native iPhone, iPad and Android clients bring terminal work and server visibility to mobile, too.</p>
-        <p class="platform-jump"><a href="#features">Desktop</a> <span>·</span> <a href="#mobile">iOS &amp; iPadOS</a> <span>·</span> <a href="#android">Android</a>
+        <p class="platform-jump"><a href="#features">Desktop</a> <span>·</span> <a href="#mobile">iOS &amp; iPadOS</a> <span>·</span> <a href="#android">Android</a> <span>·</span> <a href="#external-display">External displays</a>
         </p>
         <div class="downloads" id="download">
           <a class="button primary" data-download="windows" href="https://github.com/fortranmentis/GPUTERM/releases">Windows <small>.exe</small></a>
@@ -131,6 +131,27 @@
         <p>Inspect resource history, threshold alerts, GPU processes, container and Kubernetes status, SQL database metrics and LLM runtime health. Available readings depend on the host, drivers, tools and account permissions.</p>
         </article></div>
         <p class="note">Desktop also includes a local terminal, SSH config import, jump hosts and local/remote/SOCKS forwarding. Container and database views require the corresponding tools and permissions on the connected host.</p></div></section>
+    <section id="external-display" class="display-feature">
+      <div class="wrap">
+        <p class="kicker">MOBILE → EXTERNAL DISPLAY</p>
+        <h2>Small device. Bigger possibilities.</h2>
+        <p class="section-lead">Extend GpuTerm beyond your phone or tablet. Put the terminal and server metrics on a larger display while keeping your mobile device at the center of your workflow.</p>
+        <div class="grid display-cards">
+          <article class="card">
+            <span class="status">iOS · iPadOS</span>
+            <h3>A dedicated server view on the big screen</h3>
+            <p>On supported USB-C or AirPlay displays, choose Terminal, Dashboard or Monitor in a separate display scene. Dashboard brings the focused terminal together with CPU, memory, disk and GPU readings. Your iPhone or iPad remains the keyboard and control pad.</p>
+            <p class="note">External-display text sizing is independent. Stage Manager extended windows use the regular app layout. Display support depends on the device, OS and connection; the dedicated display is covered when the app locks or enters the background.</p>
+          </article>
+          <article class="card">
+            <span class="status">ANDROID</span>
+            <h3>Expand into a desktop-style workspace</h3>
+            <p>On devices that support apps on secondary displays, open a full GpuTerm workspace—for example, in a supported desktop mode such as DeX. The main and external windows share connections, with terminal, SFTP and telemetry arranged for a wider screen.</p>
+            <p class="note">Where a full secondary workspace is unavailable, a terminal presentation can use the phone as its keyboard/controller. Auto, Tablet and Desktop layouts adapt to window size. Device-specific desktop modes, input and display behavior still require hardware verification.</p>
+          </article>
+        </div>
+      </div>
+    </section>
     <section id="mobile" class="mobile-section"><div class="wrap">
         <p class="kicker">iOS &amp; iPadOS</p>
         <h2>Your servers. Now within reach.</h2>

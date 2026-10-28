@@ -43,7 +43,7 @@
     "offers": { "@type": "Offer", "price": "0", "priceCurrency": "KRW" }
   }
   </script>
-  <link rel="stylesheet" href="../assets/site.css?v=20261028">
+  <link rel="stylesheet" href="../assets/site.css?v=20261028-display">
 </head>
 <body>
   <header class="site-header">
@@ -51,7 +51,7 @@
       <a class="brand" href="./"><img src="../assets/logo.svg" alt="" width="30" height="30">GpuTerm</a>
       <nav class="site-nav" aria-label="주 메뉴">
         <a class="optional" href="#features">기능</a>
-        <a href="#mobile">모바일</a><a class="optional" href="#mcp">MCP</a>
+        <a href="#mobile">모바일</a><a class="optional" href="#external-display">외부 화면</a><a class="optional" href="#mcp">MCP</a>
         <a class="optional" href="#download">다운로드</a>
         <a href="../" hreflang="en" lang="en">English</a>
         <a href="https://github.com/fortranmentis/GPUTERM">GitHub</a>
@@ -65,7 +65,7 @@
         <span class="eyebrow">데스크톱 · iPhone · iPad · Android</span>
         <h1>책상에서도, 손안에서도. <span>GPU 서버를 위한 GpuTerm.</span></h1>
         <p class="lead">GpuTerm은 터미널, 드래그 앤 드롭 파일 브라우저, 원격 호스트의 CPU·메모리·디스크·GPU 실시간 모니터링을 하나의 데스크톱 작업 공간에 담았습니다. iPhone·iPad와 Android용 네이티브 앱으로 모바일에서도 서버 작업을 이어갈 수 있습니다. SSH 클라이언트, SFTP 도구, <code>watch nvidia-smi</code>를 따로 띄울 필요가 없습니다.</p>
-        <p class="platform-jump"><a href="#features">Desktop</a> <span>·</span> <a href="#mobile">iOS &amp; iPadOS</a> <span>·</span> <a href="#android">Android</a>
+        <p class="platform-jump"><a href="#features">Desktop</a> <span>·</span> <a href="#mobile">iOS &amp; iPadOS</a> <span>·</span> <a href="#android">Android</a> <span>·</span> <a href="#external-display">외부 디스플레이</a>
         </p>
         <div class="downloads" id="download">
           <a class="button primary" data-download="windows" href="https://github.com/fortranmentis/GPUTERM/releases">Windows <small>.exe</small></a>
@@ -132,6 +132,27 @@
         <p>리소스 이력·임계값 알림·GPU 프로세스와 컨테이너·Kubernetes 상태, SQL 데이터베이스 지표, LLM 런타임 상태를 확인하세요. 표시 가능한 정보는 호스트·드라이버·도구·계정 권한에 따라 달라집니다.</p>
         </article></div>
         <p class="note">데스크톱은 로컬 터미널, SSH 설정 가져오기, 점프 호스트, 로컬·원격·SOCKS 포워딩도 제공합니다. 컨테이너·데이터베이스 보기는 연결 호스트에 해당 도구와 권한이 필요합니다.</p></div></section>
+    <section id="external-display" class="display-feature">
+      <div class="wrap">
+        <p class="kicker">MOBILE → EXTERNAL DISPLAY</p>
+        <h2>모바일을 연결하면, 작업 공간이 넓어집니다.</h2>
+        <p class="section-lead">휴대전화·태블릿의 GpuTerm을 외부 디스플레이로 확장하세요. 더 큰 화면에서 터미널과 서버 지표를 살펴보고, 모바일 기기에서 작업을 이어갈 수 있습니다.</p>
+        <div class="grid display-cards">
+          <article class="card">
+            <span class="status">iOS · iPadOS</span>
+            <h3>큰 화면에는 서버 현황, 손안에는 제어</h3>
+            <p>지원되는 USB-C·AirPlay 디스플레이에 터미널·Dashboard·Monitor를 별도 화면으로 표시할 수 있습니다. Dashboard는 선택한 터미널과 CPU·메모리·디스크·GPU 지표를 함께 보여줍니다. iPhone·iPad는 키보드와 제어 패드로 사용할 수 있습니다.</p>
+            <p class="note">외부 화면의 글자 크기는 별도로 조절합니다. Stage Manager 확장 창에서는 일반 앱 레이아웃을 사용합니다. 지원 범위는 기기·OS·연결 방식에 따라 달라지며, 앱 잠금·백그라운드 전환 시 전용 외부 화면을 가립니다.</p>
+          </article>
+          <article class="card">
+            <span class="status">ANDROID</span>
+            <h3>외부 화면에서 데스크톱형 작업 공간으로</h3>
+            <p>보조 디스플레이에서 앱 실행을 지원하는 기기는 외부 화면에 전체 GpuTerm 작업 공간을 열 수 있습니다. DeX 등 지원되는 데스크톱 모드에서 터미널·SFTP·모니터링을 넓게 배치하며, 기기 화면과 외부 창은 연결을 공유합니다.</p>
+            <p class="note">전체 보조 작업 공간을 사용할 수 없는 환경에서는 선택한 터미널을 외부 화면에 표시하고 휴대전화를 키보드·제어기로 사용할 수 있습니다. Auto·Tablet·Desktop 레이아웃을 지원합니다. 기기별 데스크톱 모드·입력·화면 동작은 실제 하드웨어 검증이 필요합니다.</p>
+          </article>
+        </div>
+      </div>
+    </section>
     <section id="mobile" class="mobile-section"><div class="wrap">
         <p class="kicker">iOS &amp; iPadOS</p>
         <h2>손안에서 이어지는 서버 작업.</h2>
