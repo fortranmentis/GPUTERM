@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>GpuTerm – GPU 서버용 SSH·SFTP 클라이언트와 실시간 GPU 모니터링</title>
-  <meta name="description" content="GpuTerm은 GPU 서버를 위한 무료 데스크톱 SSH/SFTP 클라이언트입니다. 터미널, 파일 전송, CPU·메모리·디스크·NVIDIA/AMD/Intel/Apple GPU 실시간 모니터링을 한 창에서, AI 도우미용 MCP 서버까지. Windows, macOS, Linux 지원.">
+  <title>GpuTerm — SSH·SFTP·GPU 모니터링 | 데스크톱·iPhone·iPad·Android</title>
+  <meta name="description" content="데스크톱과 모바일에서 SSH 터미널, SFTP 파일 전송, GPU·LLM 모니터링을 만나보세요. iPhone·iPad Siri·단축어와 Android 네이티브 앱, 플랫폼별 기능·배포 상태를 소개합니다.">
   <link rel="canonical" href="https://fortranmentis.github.io/GPUTERM/ko/">
   <link rel="alternate" hreflang="en" href="https://fortranmentis.github.io/GPUTERM/">
   <link rel="alternate" hreflang="ko" href="https://fortranmentis.github.io/GPUTERM/ko/">
@@ -14,8 +14,8 @@
 
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="GpuTerm">
-  <meta property="og:title" content="GpuTerm – GPU 서버용 SSH·SFTP 클라이언트">
-  <meta property="og:description" content="원격 GPU 서버의 터미널, SFTP, CPU·메모리·디스크·GPU 실시간 모니터링을 하나의 네이티브 창에서.">
+  <meta property="og:title" content="GpuTerm — SSH·SFTP·GPU 모니터링 | 데스크톱·iPhone·iPad·Android">
+  <meta property="og:description" content="데스크톱과 모바일에서 SSH 터미널, SFTP 파일 전송, GPU·LLM 모니터링을 만나보세요. iPhone·iPad Siri·단축어와 Android 네이티브 앱, 플랫폼별 기능·배포 상태를 소개합니다.">
   <meta property="og:url" content="https://fortranmentis.github.io/GPUTERM/ko/">
   <meta property="og:image" content="https://fortranmentis.github.io/GPUTERM/assets/og.png">
   <meta property="og:image:width" content="1200">
@@ -51,7 +51,7 @@
       <a class="brand" href="./"><img src="../assets/logo.svg" alt="" width="30" height="30">GpuTerm</a>
       <nav class="site-nav" aria-label="주 메뉴">
         <a class="optional" href="#features">기능</a>
-        <a class="optional" href="#mcp">MCP</a>
+        <a href="#mobile">모바일</a><a class="optional" href="#mcp">MCP</a>
         <a class="optional" href="#download">다운로드</a>
         <a href="../" hreflang="en" lang="en">English</a>
         <a href="https://github.com/fortranmentis/GPUTERM">GitHub</a>
@@ -62,16 +62,21 @@
   <main>
     <div class="hero">
       <div class="wrap">
-        <span class="eyebrow">개인·비상업적 사용 무료 · Windows · macOS · Linux</span>
-        <h1>GPU 서버를 위해 만든 <span>SSH·SFTP 클라이언트</span></h1>
-        <p class="lead">GpuTerm은 터미널, 드래그 앤 드롭 파일 브라우저, 원격 호스트의 CPU·메모리·디스크·GPU 실시간 모니터링을 하나의 네이티브 창에 담았습니다. SSH 클라이언트, SFTP 도구, <code>watch nvidia-smi</code>를 따로 띄울 필요가 없습니다.</p>
+        <span class="eyebrow">데스크톱 · iPhone · iPad · Android</span>
+        <h1>책상에서도, 손안에서도. <span>GPU 서버를 위한 GpuTerm.</span></h1>
+        <p class="lead">GpuTerm은 터미널, 드래그 앤 드롭 파일 브라우저, 원격 호스트의 CPU·메모리·디스크·GPU 실시간 모니터링을 하나의 데스크톱 작업 공간에 담았습니다. iPhone·iPad와 Android용 네이티브 앱으로 모바일에서도 서버 작업을 이어갈 수 있습니다. SSH 클라이언트, SFTP 도구, <code>watch nvidia-smi</code>를 따로 띄울 필요가 없습니다.</p>
+        <p class="platform-jump"><a href="#features">Desktop</a> <span>·</span> <a href="#mobile">iOS &amp; iPadOS</a> <span>·</span> <a href="#android">Android</a>
+        </p>
         <div class="downloads" id="download">
           <a class="button primary" data-download="windows" href="https://github.com/fortranmentis/GPUTERM/releases">Windows <small>.exe</small></a>
           <a class="button" data-download="mac" href="https://github.com/fortranmentis/GPUTERM/releases">macOS <small>Apple Silicon .dmg</small></a>
           <a class="button" data-download="deb" href="https://github.com/fortranmentis/GPUTERM/releases">Linux <small>.deb</small></a>
           <a class="button" data-download="appimage" href="https://github.com/fortranmentis/GPUTERM/releases">Linux <small>AppImage</small></a>
         </div>
-        <p class="release-line">최신 버전: <a data-release-link href="https://github.com/fortranmentis/GPUTERM/releases"><span data-release-version>beta</span></a> · <a href="https://github.com/fortranmentis/GPUTERM">GitHub 소스</a></p>
+        <p class="mobile-cta"><a class="button" href="https://apps.apple.com/app/gputerm/id6824499888">iPhone·iPad 앱스토어에서 보기 ↗</a>
+        </p>
+        <p class="release-line">최신 버전: <a data-release-link href="https://github.com/fortranmentis/GPUTERM/releases"><span data-release-version>beta</span></a> · <a href="https://github.com/fortranmentis/GPUTERM">GitHub 소스</a>
+        </p>
         <figure class="shot">
           <img src="../assets/screenshot.png" width="1456" height="939" alt="GpuTerm 창: 세션 사이드바, SSH 터미널, SFTP 브라우저, CPU·메모리·디스크·GPU 실시간 텔레메트리 막대">
         </figure>
@@ -111,6 +116,81 @@
       </div>
     </section>
 
+<section id="workflow"><div class="wrap">
+        <p class="kicker">DESKTOP / WORKFLOW</p>
+        <h2>원격 접속부터 작업 현황까지</h2><div class="grid">
+        <article class="card"><span class="step">01</span>
+        <h3>작업에 맞게 바꾸는 워크스페이스</h3>
+        <p>여러 호스트를 열고 최대 4개의 터미널 셀을 배치하세요. 파일 브라우저·모니터링 바를 접거나 패널 크기를 조정하고, 스크롤백 검색과 저장 명령으로 작업을 이어갈 수 있습니다.</p>
+        </article>
+          <article class="card"><span class="step">02</span>
+        <h3>자료·스크립트·결과물을 한 번에</h3>
+        <p>컴퓨터와 서버 사이에서 파일과 폴더 전체를 옮기세요. 진행률을 확인하고 개별 전송을 취소할 수 있으며, 다운로드는 임시 파일에 기록한 뒤 완료 시 이름을 바꿉니다.</p>
+        </article>
+          <article class="card"><span class="step">03</span>
+        <h3>작업과 서버 상태를 함께 확인</h3>
+        <p>리소스 이력·임계값 알림·GPU 프로세스와 컨테이너·Kubernetes 상태, SQL 데이터베이스 지표, LLM 런타임 상태를 확인하세요. 표시 가능한 정보는 호스트·드라이버·도구·계정 권한에 따라 달라집니다.</p>
+        </article></div>
+        <p class="note">데스크톱은 로컬 터미널, SSH 설정 가져오기, 점프 호스트, 로컬·원격·SOCKS 포워딩도 제공합니다. 컨테이너·데이터베이스 보기는 연결 호스트에 해당 도구와 권한이 필요합니다.</p></div></section>
+    <section id="mobile" class="mobile-section"><div class="wrap">
+        <p class="kicker">iOS &amp; iPadOS</p>
+        <h2>손안에서 이어지는 서버 작업.</h2>
+        <p class="section-lead">Rust SSH·SFTP 코어와 SwiftUI로 만든 iPhone·iPad용 네이티브 앱입니다. 터미널 작업과 파일 전송, GPU·추론 서버 상태 확인을 모바일에서도 이어가세요.</p><a class="button primary" href="https://apps.apple.com/app/gputerm/id6824499888">App Store에서 보기 ↗</a><div class="phone-gallery">
+        <figure><img loading="lazy" src="../assets/ios-terminal.webp" alt="터치에 맞춘 터미널 — GpuTerm iOS App Store screenshot">
+        <figcaption>터치에 맞춘 터미널</figcaption>
+        </figure>
+          <figure><img loading="lazy" src="../assets/ios-monitor.webp" alt="한눈에 보는 리소스 현황 — GpuTerm iOS App Store screenshot">
+        <figcaption>한눈에 보는 리소스 현황</figcaption>
+        </figure>
+          <figure><img loading="lazy" src="../assets/ios-details.webp" alt="카드에서 세부 지표까지 — GpuTerm iOS App Store screenshot">
+        <figcaption>카드에서 세부 지표까지</figcaption>
+        </figure></div><div class="grid">
+        <article class="card">
+        <h3>터미널·파일</h3>
+        <p>분할 터미널, tmux 제어, 특수키 도구 모음과 키보드 단축키를 제공합니다. 로컬·원격 파일 탐색, 폴더 전송, 덮어쓰기 확인과 최대 3개 전송 대기열을 지원합니다.</p>
+        </article>
+          <article class="card">
+        <h3>Siri·단축어 연동</h3>
+        <p>짧은 SSH 연결로 GPU·CPU·메모리 또는 종합 서버 상태를 조회하거나, 앱을 열어 저장된 서버에 연결할 수 있습니다. 한국어 Siri 구문도 지원합니다. 먼저 앱에서 호스트를 신뢰해야 하며 상태 조회에는 기기 인증과 사용 가능한 저장 자격증명이 필요합니다.</p>
+        </article>
+          <article class="card">
+        <h3>iPad에서도 넓게</h3>
+        <p>화면에 맞춰 바뀌는 작업 공간, 하드웨어 키보드 단축키와 외부 디스플레이 대시보드를 활용하세요. 홈·잠금 화면 위젯으로 서버 상태를 확인할 수 있으며 갱신 시점은 iOS가 관리합니다.</p>
+        </article>
+          <article class="card">
+        <h3>직접 관리하는 인증정보</h3>
+        <p>호스트 키 변경을 확인하고 SSH 키를 재사용하며, 개인 키는 기기의 Keychain에 보관합니다. 앱 잠금에는 사용 가능한 기기 인증을 사용합니다. iOS는 무제한 백그라운드 SSH를 허용하지 않으므로 장시간 작업에는 tmux를 활용하세요.</p>
+        </article></div>
+        <p class="note">화면은 앱스토어 제출용 이미지입니다. 이 페이지에는 현재 네이티브 개발 내용도 포함되어 설치한 스토어 버전과 기능·시스템 요구사항이 다를 수 있습니다. 배포 여부와 호환성은 앱스토어에서 확인하세요.</p></div></section>
+    <section id="android"><div class="wrap split"><div>
+        <p class="kicker">ANDROID / NATIVE</p>
+        <h2>모바일에서 시작해 넓은 작업 공간으로.</h2>
+        <p class="section-lead">Kotlin·Jetpack Compose UI와 JNI로 연결한 Rust 코어를 사용합니다. 휴대전화·태블릿·데스크톱 형태의 작업 공간에 맞춰 레이아웃이 바뀝니다.</p><span class="status">Google Play 출시 준비 중</span></div><div>
+        <ul class="checks">
+        <li>분할 터미널, 원격 tmux, 점프 호스트와 SSH 포워딩.</li>
+        <li>로컬·원격 파일 브라우저, 폴더 전송과 최대 3개 동시 전송.</li>
+        <li>GPU·시스템 지표, LLM 상태, 사용 이력과 설정 가능한 리소스 알림.</li>
+        <li>SSH 키 관리, 호스트 키 확인과 Keystore 기반 저장 자격증명 보호.</li>
+        </ul>
+        <p class="note">Android는 출시 준비 단계이며 Google Play 등록·승인·배포가 확인된 상태는 아닙니다.</p></div></div></section>
+    <section id="platforms"><div class="wrap">
+        <p class="kicker">CHOOSE YOUR PLATFORM</p>
+        <h2>핵심 기능은 함께, 사용 경험은 플랫폼에 맞게.</h2><div class="table-wrap">
+        <table><caption>배포 상태와 구현 개요</caption>
+        <thead>
+        <tr><th>플랫폼</th><th>사용 경험</th><th>배포 상태</th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr><th scope="row">Desktop</th><td>Windows · macOS · Linux / Rust + Tauri</td><td>Beta · GitHub Releases</td>
+        </tr>
+        <tr><th scope="row">iPhone / iPad</th><td>SwiftUI · SwiftTerm / Rust + UniFFI</td><td>App Store</td>
+        </tr>
+        <tr><th scope="row">Android</th><td>Jetpack Compose / Rust + JNI</td><td>Google Play 출시 준비 중</td>
+        </tr>
+        </tbody>
+        </table></div>
+        <p class="note">세 플랫폼에서 SSH·SFTP·모니터링을 제공합니다. 아래 MCP 연동은 데스크톱 기능이며 모바일의 모든 기능이 데스크톱과 같다는 의미는 아닙니다. 지표 제공 범위는 원격 운영체제와 설치된 도구에 따라 달라집니다.</p></div></section>
     <section id="mcp">
       <div class="wrap split">
         <div>
@@ -136,15 +216,22 @@
     <section>
       <div class="wrap">
         <h2>다운로드</h2>
-        <p class="section-lead">GpuTerm은 베타입니다. 설치 파일은 태그된 소스로 GitHub Actions에서 빌드되며, 앱은 서명된 릴리스로 스스로 업데이트됩니다.</p>
+        <p class="section-lead">데스크톱 GpuTerm은 베타입니다. 설치 파일은 태그된 소스로 GitHub Actions에서 빌드되며, 앱은 서명된 릴리스로 스스로 업데이트됩니다.</p>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>플랫폼</th><th>파일</th><th>참고</th></tr></thead>
+            <thead>
+        <tr><th>플랫폼</th><th>파일</th><th>참고</th>
+        </tr>
+        </thead>
             <tbody>
-              <tr><td>Windows 10 / 11 (x64)</td><td><a data-download="windows" href="https://github.com/fortranmentis/GPUTERM/releases"><code>…_x64-setup.exe</code></a></td><td>SmartScreen 경고 시 추가 정보 → 실행</td></tr>
-              <tr><td>macOS (Apple Silicon)</td><td><a data-download="mac" href="https://github.com/fortranmentis/GPUTERM/releases"><code>…_aarch64.dmg</code></a></td><td>ad-hoc 서명. 처음엔 우클릭 → 열기</td></tr>
-              <tr><td>Debian / Ubuntu (x64)</td><td><a data-download="deb" href="https://github.com/fortranmentis/GPUTERM/releases"><code>…_amd64.deb</code></a></td><td><code>sudo apt install ./GpuTerm_*.deb</code></td></tr>
-              <tr><td>Linux (x64, 포터블)</td><td><a data-download="appimage" href="https://github.com/fortranmentis/GPUTERM/releases"><code>…_amd64.AppImage</code></a></td><td><code>chmod +x</code> 후 실행. 앱 안에서 업데이트</td></tr>
+              <tr><td>Windows 10 / 11 (x64)</td><td><a data-download="windows" href="https://github.com/fortranmentis/GPUTERM/releases"><code>…_x64-setup.exe</code></a></td><td>SmartScreen 경고 시 추가 정보 → 실행</td>
+        </tr>
+              <tr><td>macOS (Apple Silicon)</td><td><a data-download="mac" href="https://github.com/fortranmentis/GPUTERM/releases"><code>…_aarch64.dmg</code></a></td><td>ad-hoc 서명. 처음엔 우클릭 → 열기</td>
+        </tr>
+              <tr><td>Debian / Ubuntu (x64)</td><td><a data-download="deb" href="https://github.com/fortranmentis/GPUTERM/releases"><code>…_amd64.deb</code></a></td><td><code>sudo apt install ./GpuTerm_*.deb</code></td>
+        </tr>
+              <tr><td>Linux (x64, 포터블)</td><td><a data-download="appimage" href="https://github.com/fortranmentis/GPUTERM/releases"><code>…_amd64.AppImage</code></a></td><td><code>chmod +x</code> 후 실행. 앱 안에서 업데이트</td>
+        </tr>
             </tbody>
           </table>
         </div>
@@ -163,7 +250,7 @@
           <p>Linux, macOS, Windows 호스트의 NVIDIA(nvidia-smi), AMD(amd-smi·rocm-smi), Intel, Apple Silicon GPU를 지원합니다. 표시되는 항목은 호스트의 도구와 드라이버에 따라 다릅니다.</p>
         </details>
         <details>
-          <summary>무료인가요?</summary>
+          <summary>데스크톱은 무료인가요?</summary>
           <p>PolyForm Noncommercial 1.0.0 라이선스로 개인·비상업적 사용은 무료입니다. 상업적 사용은 관리자에게 별도 라이선스를 받아야 합니다.</p>
         </details>
         <details>
@@ -176,7 +263,7 @@
 
   <footer class="site-footer">
     <div class="wrap">
-      <span>© GpuTerm contributors · <a href="https://github.com/fortranmentis/GPUTERM/blob/main/LICENSE">PolyForm Noncommercial 1.0.0</a></span>
+      <span><a href="https://fortranmentis.github.io/GPUTERM_SUPPORT/">지원</a> · <a href="https://fortranmentis.github.io/GPUTERM_SUPPORT/privacy.html">모바일 개인정보처리방침</a> · <a href="https://fortranmentis.github.io/">개발자 포트폴리오</a></span><span>© GpuTerm contributors · <a href="https://github.com/fortranmentis/GPUTERM/blob/main/LICENSE">PolyForm Noncommercial 1.0.0</a></span>
       <span><a href="https://github.com/fortranmentis/GPUTERM">GitHub</a> · <a href="https://github.com/fortranmentis/GPUTERM/releases">릴리스</a> · <a href="../" hreflang="en" lang="en">English</a></span>
     </div>
   </footer>

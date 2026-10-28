@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>GpuTerm – SSH &amp; SFTP client with live GPU monitoring</title>
-  <meta name="description" content="GpuTerm is a free desktop SSH/SFTP client for GPU servers: terminal, file transfers and live CPU, RAM, disk and NVIDIA/AMD/Intel/Apple GPU telemetry in one window, with an MCP server for AI assistants. Windows, macOS, Linux.">
+  <title>GpuTerm — SSH, SFTP &amp; GPU monitoring | Desktop, iPhone, iPad &amp; Android</title>
+  <meta name="description" content="SSH terminals, SFTP file transfers and GPU/LLM monitoring for desktop and mobile. Explore iPhone and iPad with Siri &amp; Shortcuts, native Android, and platform availability.">
   <link rel="canonical" href="https://fortranmentis.github.io/GPUTERM/">
   <link rel="alternate" hreflang="en" href="https://fortranmentis.github.io/GPUTERM/">
   <link rel="alternate" hreflang="ko" href="https://fortranmentis.github.io/GPUTERM/ko/">
@@ -14,8 +14,8 @@
 
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="GpuTerm">
-  <meta property="og:title" content="GpuTerm – SSH & SFTP client with live GPU monitoring">
-  <meta property="og:description" content="Terminal, SFTP and real-time CPU · RAM · disk · GPU telemetry for remote GPU servers, in one native window.">
+  <meta property="og:title" content="GpuTerm — SSH, SFTP &amp; GPU monitoring | Desktop, iPhone, iPad &amp; Android">
+  <meta property="og:description" content="SSH terminals, SFTP file transfers and GPU/LLM monitoring for desktop and mobile. Explore iPhone and iPad with Siri &amp; Shortcuts, native Android, and platform availability.">
   <meta property="og:url" content="https://fortranmentis.github.io/GPUTERM/">
   <meta property="og:image" content="https://fortranmentis.github.io/GPUTERM/assets/og.png">
   <meta property="og:image:width" content="1200">
@@ -50,7 +50,7 @@
       <a class="brand" href="./"><img src="assets/logo.svg" alt="" width="30" height="30">GpuTerm</a>
       <nav class="site-nav" aria-label="Main">
         <a class="optional" href="#features">Features</a>
-        <a class="optional" href="#mcp">MCP</a>
+        <a href="#mobile">Mobile</a><a class="optional" href="#mcp">MCP</a>
         <a class="optional" href="#download">Download</a>
         <a href="ko/" hreflang="ko" lang="ko">한국어</a>
         <a href="https://github.com/fortranmentis/GPUTERM">GitHub</a>
@@ -61,16 +61,21 @@
   <main>
     <div class="hero">
       <div class="wrap">
-        <span class="eyebrow">Free for personal &amp; noncommercial use · Windows · macOS · Linux</span>
-        <h1>The SSH &amp; SFTP client <span>built for GPU servers</span></h1>
-        <p class="lead">GpuTerm puts a terminal, a drag-and-drop file browser and live CPU, RAM, disk and GPU telemetry for every remote host into one native window, so you can stop juggling an SSH client, an SFTP tool and <code>watch nvidia-smi</code>.</p>
+        <span class="eyebrow">Desktop · iPhone · iPad · Android</span>
+        <h1>At your desk. In your hand. <span>Your GPU servers, connected.</span></h1>
+        <p class="lead">GpuTerm puts a terminal, a drag-and-drop file browser and live CPU, RAM, disk and GPU telemetry for every remote host into one desktop workspace. Native iPhone, iPad and Android clients bring terminal work and server visibility to mobile, too.</p>
+        <p class="platform-jump"><a href="#features">Desktop</a> <span>·</span> <a href="#mobile">iOS &amp; iPadOS</a> <span>·</span> <a href="#android">Android</a>
+        </p>
         <div class="downloads" id="download">
           <a class="button primary" data-download="windows" href="https://github.com/fortranmentis/GPUTERM/releases">Windows <small>.exe</small></a>
           <a class="button" data-download="mac" href="https://github.com/fortranmentis/GPUTERM/releases">macOS <small>Apple Silicon .dmg</small></a>
           <a class="button" data-download="deb" href="https://github.com/fortranmentis/GPUTERM/releases">Linux <small>.deb</small></a>
           <a class="button" data-download="appimage" href="https://github.com/fortranmentis/GPUTERM/releases">Linux <small>AppImage</small></a>
         </div>
-        <p class="release-line">Latest: <a data-release-link href="https://github.com/fortranmentis/GPUTERM/releases"><span data-release-version>beta</span></a> · <a href="https://github.com/fortranmentis/GPUTERM">Source on GitHub</a></p>
+        <p class="mobile-cta"><a class="button" href="https://apps.apple.com/app/gputerm/id6824499888">Get GpuTerm for iPhone &amp; iPad ↗</a>
+        </p>
+        <p class="release-line">Latest: <a data-release-link href="https://github.com/fortranmentis/GPUTERM/releases"><span data-release-version>beta</span></a> · <a href="https://github.com/fortranmentis/GPUTERM">Source on GitHub</a>
+        </p>
         <figure class="shot">
           <img src="assets/screenshot.png" width="1456" height="939" alt="GpuTerm window: session sidebar, SSH terminal, SFTP browser and the live CPU, memory, disk and GPU telemetry bar">
         </figure>
@@ -110,6 +115,81 @@
       </div>
     </section>
 
+<section id="workflow"><div class="wrap">
+        <p class="kicker">DESKTOP / WORKFLOW</p>
+        <h2>From a remote shell to the full picture</h2><div class="grid">
+        <article class="card"><span class="step">01</span>
+        <h3>A workspace that adapts to your workflow</h3>
+        <p>Keep several hosts open, arrange up to four terminal cells, resize panes, and collapse the file browser or monitoring bar when you need more room. Search scrollback and reuse saved commands without leaving your session.</p>
+        </article>
+          <article class="card"><span class="step">02</span>
+        <h3>Move datasets, scripts and results</h3>
+        <p>Transfer files and entire folders between your computer and server. Review progress and cancel individual transfers; temporary files are renamed after completion to avoid exposing unfinished downloads.</p>
+        </article>
+          <article class="card"><span class="step">03</span>
+        <h3>Understand the host behind the workload</h3>
+        <p>Inspect resource history, threshold alerts, GPU processes, container and Kubernetes status, SQL database metrics and LLM runtime health. Available readings depend on the host, drivers, tools and account permissions.</p>
+        </article></div>
+        <p class="note">Desktop also includes a local terminal, SSH config import, jump hosts and local/remote/SOCKS forwarding. Container and database views require the corresponding tools and permissions on the connected host.</p></div></section>
+    <section id="mobile" class="mobile-section"><div class="wrap">
+        <p class="kicker">iOS &amp; iPadOS</p>
+        <h2>Your servers. Now within reach.</h2>
+        <p class="section-lead">A native SwiftUI experience for iPhone and iPad, backed by a Rust SSH/SFTP core. Work in the terminal, move files and check GPU or inference-server health wherever you connect.</p><a class="button primary" href="https://apps.apple.com/app/gputerm/id6824499888">View on the App Store ↗</a><div class="phone-gallery">
+        <figure><img loading="lazy" src="assets/ios-terminal.webp" alt="A terminal made for touch — GpuTerm iOS App Store screenshot">
+        <figcaption>A terminal made for touch</figcaption>
+        </figure>
+          <figure><img loading="lazy" src="assets/ios-monitor.webp" alt="See resource use at a glance — GpuTerm iOS App Store screenshot">
+        <figcaption>See resource use at a glance</figcaption>
+        </figure>
+          <figure><img loading="lazy" src="assets/ios-details.webp" alt="Explore the readings behind each card — GpuTerm iOS App Store screenshot">
+        <figcaption>Explore the readings behind each card</figcaption>
+        </figure></div><div class="grid">
+        <article class="card">
+        <h3>Terminal & files</h3>
+        <p>Split terminals, tmux controls, a special-key toolbar and keyboard shortcuts. Browse local/remote files, transfer whole folders and manage a three-transfer queue with overwrite confirmation.</p>
+        </article>
+          <article class="card">
+        <h3>Siri & Shortcuts</h3>
+        <p>Ask for GPU, CPU, memory or combined server status over a short-lived SSH connection, or open GpuTerm and connect to a saved server. Korean Siri phrases are included. Trust the host in-app first; status actions need device authentication and usable saved credentials.</p>
+        </article>
+          <article class="card">
+        <h3>Built for iPad, too</h3>
+        <p>Use an adaptive workspace, hardware keyboard shortcuts and external-display dashboard. Home and Lock Screen widgets offer a server-status overview; refresh timing is managed by iOS.</p>
+        </article>
+          <article class="card">
+        <h3>Credentials under your control</h3>
+        <p>Review host-key changes, reuse SSH keys and keep private keys in the device Keychain. App locking uses available device authentication. Use tmux for long-running jobs: iOS does not allow indefinite background SSH.</p>
+        </article></div>
+        <p class="note">Screenshots are App Store submission images. This page also describes current native development; features and system requirements can differ from the installed store version. Check the App Store listing for availability and compatibility.</p></div></section>
+    <section id="android"><div class="wrap split"><div>
+        <p class="kicker">ANDROID / NATIVE</p>
+        <h2>A mobile client. A wider workspace.</h2>
+        <p class="section-lead">Native Kotlin and Jetpack Compose with a Rust core through JNI. Adaptive layouts support phones, tablets and desktop-style workspaces.</p><span class="status">Google Play release preparation</span></div><div>
+        <ul class="checks">
+        <li>Split terminals, remote tmux, jump hosts and SSH forwarding.</li>
+        <li>Local/remote file browser, folder transfers and up to three concurrent transfers.</li>
+        <li>GPU/system telemetry, LLM health, history and configurable resource alerts.</li>
+        <li>SSH key management, host-key review and Keystore-backed saved credentials.</li>
+        </ul>
+        <p class="note">Android is in release preparation; a Google Play listing or approval is not yet confirmed.</p></div></div></section>
+    <section id="platforms"><div class="wrap">
+        <p class="kicker">CHOOSE YOUR PLATFORM</p>
+        <h2>The same essentials. Platform-native details.</h2><div class="table-wrap">
+        <table><caption>Distribution and implementation overview</caption>
+        <thead>
+        <tr><th>Platform</th><th>Experience</th><th>Availability</th>
+        </tr>
+        </thead>
+        <tbody>
+        <tr><th scope="row">Desktop</th><td>Windows · macOS · Linux / Rust + Tauri</td><td>Beta · GitHub Releases</td>
+        </tr>
+        <tr><th scope="row">iPhone / iPad</th><td>SwiftUI · SwiftTerm / Rust + UniFFI</td><td>App Store</td>
+        </tr>
+        <tr><th scope="row">Android</th><td>Jetpack Compose / Rust + JNI</td><td>Google Play release preparation</td>
+        </tr>
+        </tbody>
+        </table></div>
+        <p class="note">All three native clients provide SSH, SFTP and monitoring. Desktop MCP integration is described below; mobile does not imply desktop feature parity. Telemetry depends on the remote operating system and available tools.</p></div></section>
     <section id="mcp">
       <div class="wrap split">
         <div>
@@ -135,15 +215,22 @@
     <section>
       <div class="wrap">
         <h2>Download</h2>
-        <p class="section-lead">GpuTerm is in beta. Installers are built on GitHub Actions from the tagged source, and the app updates itself from signed releases.</p>
+        <p class="section-lead">GpuTerm for desktop is in beta. Installers are built on GitHub Actions from the tagged source, and the app updates itself from signed releases.</p>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Platform</th><th>File</th><th>Notes</th></tr></thead>
+            <thead>
+        <tr><th>Platform</th><th>File</th><th>Notes</th>
+        </tr>
+        </thead>
             <tbody>
-              <tr><td>Windows 10 / 11 (x64)</td><td><a data-download="windows" href="https://github.com/fortranmentis/GPUTERM/releases"><code>…_x64-setup.exe</code></a></td><td>SmartScreen may warn: More info → Run anyway</td></tr>
-              <tr><td>macOS (Apple Silicon)</td><td><a data-download="mac" href="https://github.com/fortranmentis/GPUTERM/releases"><code>…_aarch64.dmg</code></a></td><td>Ad-hoc signed; right-click → Open on first launch</td></tr>
-              <tr><td>Debian / Ubuntu (x64)</td><td><a data-download="deb" href="https://github.com/fortranmentis/GPUTERM/releases"><code>…_amd64.deb</code></a></td><td><code>sudo apt install ./GpuTerm_*.deb</code></td></tr>
-              <tr><td>Linux (x64, portable)</td><td><a data-download="appimage" href="https://github.com/fortranmentis/GPUTERM/releases"><code>…_amd64.AppImage</code></a></td><td><code>chmod +x</code> and run; updates in-app</td></tr>
+              <tr><td>Windows 10 / 11 (x64)</td><td><a data-download="windows" href="https://github.com/fortranmentis/GPUTERM/releases"><code>…_x64-setup.exe</code></a></td><td>SmartScreen may warn: More info → Run anyway</td>
+        </tr>
+              <tr><td>macOS (Apple Silicon)</td><td><a data-download="mac" href="https://github.com/fortranmentis/GPUTERM/releases"><code>…_aarch64.dmg</code></a></td><td>Ad-hoc signed; right-click → Open on first launch</td>
+        </tr>
+              <tr><td>Debian / Ubuntu (x64)</td><td><a data-download="deb" href="https://github.com/fortranmentis/GPUTERM/releases"><code>…_amd64.deb</code></a></td><td><code>sudo apt install ./GpuTerm_*.deb</code></td>
+        </tr>
+              <tr><td>Linux (x64, portable)</td><td><a data-download="appimage" href="https://github.com/fortranmentis/GPUTERM/releases"><code>…_amd64.AppImage</code></a></td><td><code>chmod +x</code> and run; updates in-app</td>
+        </tr>
             </tbody>
           </table>
         </div>
@@ -162,7 +249,7 @@
           <p>NVIDIA (nvidia-smi), AMD (amd-smi / rocm-smi), Intel and Apple Silicon GPUs, on Linux, macOS and Windows hosts. What each host reports depends on its tools and drivers.</p>
         </details>
         <details>
-          <summary>Is it free?</summary>
+          <summary>Is the desktop app free?</summary>
           <p>Yes for personal and noncommercial use, under the PolyForm Noncommercial 1.0.0 license. Commercial use needs a separate license from the maintainer.</p>
         </details>
         <details>
@@ -175,7 +262,7 @@
 
   <footer class="site-footer">
     <div class="wrap">
-      <span>© GpuTerm contributors · <a href="https://github.com/fortranmentis/GPUTERM/blob/main/LICENSE">PolyForm Noncommercial 1.0.0</a></span>
+      <span><a href="https://fortranmentis.github.io/GPUTERM_SUPPORT/">Support</a> · <a href="https://fortranmentis.github.io/GPUTERM_SUPPORT/privacy.html">Mobile privacy policy</a> · <a href="https://fortranmentis.github.io/">Developer portfolio</a></span><span>© GpuTerm contributors · <a href="https://github.com/fortranmentis/GPUTERM/blob/main/LICENSE">PolyForm Noncommercial 1.0.0</a></span>
       <span><a href="https://github.com/fortranmentis/GPUTERM">GitHub</a> · <a href="https://github.com/fortranmentis/GPUTERM/releases">Releases</a> · <a href="ko/" hreflang="ko" lang="ko">한국어</a></span>
     </div>
   </footer>

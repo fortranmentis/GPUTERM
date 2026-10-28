@@ -40,7 +40,8 @@
   // Suggest the visitor's own OS first.
   var platform = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || "";
   var userAgent = navigator.userAgent || "";
-  var os = /Win/i.test(platform) ? "windows" : /Mac/i.test(platform) ? "mac" : /Linux/i.test(platform + userAgent) ? "deb" : null;
+  var mobile = /Android|iPhone|iPad|iPod/i.test(userAgent) || (/Mac/i.test(platform) && navigator.maxTouchPoints > 1);
+  var os = mobile ? null : /Win/i.test(platform) ? "windows" : /Mac/i.test(platform) ? "mac" : /Linux/i.test(platform + userAgent) ? "deb" : null;
   if (os) {
     var preferred = document.querySelector('[data-download="' + os + '"]');
     if (preferred) {
