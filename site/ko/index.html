@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GpuTerm – GPU 서버용 SSH·SFTP 클라이언트와 실시간 GPU 모니터링</title>
+  <meta name="description" content="GpuTerm은 GPU 서버를 위한 무료 데스크톱 SSH/SFTP 클라이언트입니다. 터미널, 파일 전송, CPU·메모리·디스크·NVIDIA/AMD/Intel/Apple GPU 실시간 모니터링을 한 창에서, AI 도우미용 MCP 서버까지. Windows, macOS, Linux 지원.">
+  <link rel="canonical" href="https://fortranmentis.github.io/GPUTERM/ko/">
+  <link rel="alternate" hreflang="en" href="https://fortranmentis.github.io/GPUTERM/">
+  <link rel="alternate" hreflang="ko" href="https://fortranmentis.github.io/GPUTERM/ko/">
+  <link rel="alternate" hreflang="x-default" href="https://fortranmentis.github.io/GPUTERM/">
+  <link rel="icon" href="../assets/logo.svg" type="image/svg+xml">
+  <meta name="theme-color" content="#070a0f">
+
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="GpuTerm">
+  <meta property="og:title" content="GpuTerm – GPU 서버용 SSH·SFTP 클라이언트">
+  <meta property="og:description" content="원격 GPU 서버의 터미널, SFTP, CPU·메모리·디스크·GPU 실시간 모니터링을 하나의 네이티브 창에서.">
+  <meta property="og:url" content="https://fortranmentis.github.io/GPUTERM/ko/">
+  <meta property="og:image" content="https://fortranmentis.github.io/GPUTERM/assets/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:locale" content="ko_KR">
+  <meta property="og:locale:alternate" content="en_US">
+  <meta name="twitter:card" content="summary_large_image">
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "GpuTerm",
+    "alternateName": "GPUTERM",
+    "inLanguage": "ko",
+    "description": "실시간 CPU·메모리·디스크·GPU 모니터링과 AI 도우미용 MCP 서버를 갖춘 GPU 서버용 데스크톱 SSH/SFTP 클라이언트.",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "Windows 10, Windows 11, macOS (Apple Silicon), Linux",
+    "url": "https://fortranmentis.github.io/GPUTERM/ko/",
+    "downloadUrl": "https://github.com/fortranmentis/GPUTERM/releases",
+    "codeRepository": "https://github.com/fortranmentis/GPUTERM",
+    "image": "https://fortranmentis.github.io/GPUTERM/assets/og.png",
+    "screenshot": "https://fortranmentis.github.io/GPUTERM/assets/screenshot.png",
+    "license": "https://polyformproject.org/licenses/noncommercial/1.0.0/",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "KRW" }
+  }
+  </script>
+  <link rel="stylesheet" href="../assets/site.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="./"><img src="../assets/logo.svg" alt="" width="30" height="30">GpuTerm</a>
+      <nav class="site-nav" aria-label="주 메뉴">
+        <a class="optional" href="#features">기능</a>
+        <a class="optional" href="#mcp">MCP</a>
+        <a class="optional" href="#download">다운로드</a>
+        <a href="../" hreflang="en" lang="en">English</a>
+        <a href="https://github.com/fortranmentis/GPUTERM">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <div class="hero">
+      <div class="wrap">
+        <span class="eyebrow">개인·비상업적 사용 무료 · Windows · macOS · Linux</span>
+        <h1>GPU 서버를 위해 만든 <span>SSH·SFTP 클라이언트</span></h1>
+        <p class="lead">GpuTerm은 터미널, 드래그 앤 드롭 파일 브라우저, 원격 호스트의 CPU·메모리·디스크·GPU 실시간 모니터링을 하나의 네이티브 창에 담았습니다. SSH 클라이언트, SFTP 도구, <code>watch nvidia-smi</code>를 따로 띄울 필요가 없습니다.</p>
+        <div class="downloads" id="download">
+          <a class="button primary" data-download="windows" href="https://github.com/fortranmentis/GPUTERM/releases">Windows <small>.exe</small></a>
+          <a class="button" data-download="mac" href="https://github.com/fortranmentis/GPUTERM/releases">macOS <small>Apple Silicon .dmg</small></a>
+          <a class="button" data-download="deb" href="https://github.com/fortranmentis/GPUTERM/releases">Linux <small>.deb</small></a>
+          <a class="button" data-download="appimage" href="https://github.com/fortranmentis/GPUTERM/releases">Linux <small>AppImage</small></a>
+        </div>
+        <p class="release-line">최신 버전: <a data-release-link href="https://github.com/fortranmentis/GPUTERM/releases"><span data-release-version>beta</span></a> · <a href="https://github.com/fortranmentis/GPUTERM">GitHub 소스</a></p>
+        <figure class="shot">
+          <img src="../assets/screenshot.png" width="1456" height="939" alt="GpuTerm 창: 세션 사이드바, SSH 터미널, SFTP 브라우저, CPU·메모리·디스크·GPU 실시간 텔레메트리 막대">
+        </figure>
+      </div>
+    </div>
+
+    <section id="features">
+      <div class="wrap">
+        <h2>GPU 서버에 필요한 모든 것을 한 곳에</h2>
+        <p class="section-lead">한 번 연결하면 됩니다. 모니터링은 별도 SSH 채널로 동작해 셸을 막지 않고, 기본 지표는 서버에 에이전트나 root 권한 없이 수집합니다.</p>
+        <div class="grid">
+          <div class="card">
+            <h3><span class="icon" aria-hidden="true">🖥️</span>SSH 터미널</h3>
+            <p>xterm.js와 Rust ssh2 기반의 완전한 PTY 터미널. 화면 분할, 검색, tmux 세션, ProxyJump, 포트 포워딩, keyboard-interactive·OTP 로그인, <code>~/.ssh/config</code> 가져오기를 지원합니다.</p>
+          </div>
+          <div class="card">
+            <h3><span class="icon" aria-hidden="true">📊</span>실시간 GPU 모니터링</h3>
+            <p>모든 GPU(NVIDIA, AMD, Intel, Apple Silicon)의 사용률, VRAM, 온도, 전력과 CPU, 메모리, 디스크, 접속 사용자를 기록 그래프와 임계값 알림과 함께 보여 줍니다.</p>
+          </div>
+          <div class="card">
+            <h3><span class="icon" aria-hidden="true">📁</span>SFTP 브라우저</h3>
+            <p>드래그 앤 드롭 업로드·다운로드, 로컬/원격 두 창 보기, 진행률과 취소, 이름 변경, 삭제, 새 폴더.</p>
+          </div>
+          <div class="card">
+            <h3><span class="icon" aria-hidden="true">🧠</span>프로세스와 컨테이너</h3>
+            <p>어떤 프로세스가 어느 GPU를 쓰는지, CPU·메모리 상위 프로세스, Docker/Podman 컨테이너와 Kubernetes 파드, PID를 다시 확인하는 안전한 "프로세스 종료".</p>
+          </div>
+          <div class="card">
+            <h3><span class="icon" aria-hidden="true">🤖</span>LLM 런타임 모니터링</h3>
+            <p>Ollama, vLLM, SGLang, TGI, llama.cpp, Triton, OpenAI 호환 서버의 모델, KV 캐시, 대기열, 초당 토큰, 지연 시간을 직접 또는 SSH 터널로 확인합니다.</p>
+          </div>
+          <div class="card">
+            <h3><span class="icon" aria-hidden="true">🔐</span>기본부터 안전하게</h3>
+            <p>Argon2id + AES-256-GCM 금고에 자격 증명 저장, 선택형 Touch ID·Windows Hello 잠금 해제, 호스트 키 확인, 자동으로 등록·검증하는 GpuTerm 관리 SSH 키.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="mcp">
+      <div class="wrap split">
+        <div>
+          <h2>AI 도우미가 GPU 서버를 보게 하세요</h2>
+          <p class="section-lead">GpuTerm에는 MCP 서버가 들어 있습니다. 켜면 Claude Code, Claude Desktop, Codex, Cursor가 연결된 호스트에 대해 질문하고 답할 수 있습니다.</p>
+          <ul class="checks">
+            <li><strong>"GPU 비어 있는 서버가 어디야?"</strong> — 실시간 텔레메트리, 여러 호스트의 빈 GPU, 최근 1시간 기록, GPU 프로세스, 컨테이너, LLM 런타임.</li>
+            <li><strong>동작은 승인할 때만</strong> — 명령 실행, 파일 읽기, 프로세스 종료는 매번 GpuTerm에 확인 창이 뜨고, 기본값은 거부입니다.</li>
+            <li><strong>로컬 전용, 기록 남김</strong> — 루프백과 실행마다 새로 만드는 토큰, 호스트별 숨기기, 신뢰할 수 없는 출력 표시, 감사 로그.</li>
+          </ul>
+        </div>
+        <pre class="terminal" aria-label="예: Claude Code에 GpuTerm 추가"><span class="dim">$</span> claude mcp add --scope user gputerm -- \
+    "/Applications/GpuTerm.app/Contents/MacOS/gputerm" --mcp-stdio
+
+<span class="dim"># 대화 예시</span>
+<span class="dim">&gt;</span> 20GB 이상 비어 있는 GPU가 있는 서버 찾아줘
+<span class="ok">  ⎿ gputerm · find_free_gpus</span>
+  gpu-02 · GPU 1 (A100 80GB) — 사용률 0%, 79 GB 여유
+  gpu-05 · GPU 0 (RTX 4090)  — 사용률 2%, 23 GB 여유</pre>
+      </div>
+    </section>
+
+    <section>
+      <div class="wrap">
+        <h2>다운로드</h2>
+        <p class="section-lead">GpuTerm은 베타입니다. 설치 파일은 태그된 소스로 GitHub Actions에서 빌드되며, 앱은 서명된 릴리스로 스스로 업데이트됩니다.</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>플랫폼</th><th>파일</th><th>참고</th></tr></thead>
+            <tbody>
+              <tr><td>Windows 10 / 11 (x64)</td><td><a data-download="windows" href="https://github.com/fortranmentis/GPUTERM/releases"><code>…_x64-setup.exe</code></a></td><td>SmartScreen 경고 시 추가 정보 → 실행</td></tr>
+              <tr><td>macOS (Apple Silicon)</td><td><a data-download="mac" href="https://github.com/fortranmentis/GPUTERM/releases"><code>…_aarch64.dmg</code></a></td><td>ad-hoc 서명. 처음엔 우클릭 → 열기</td></tr>
+              <tr><td>Debian / Ubuntu (x64)</td><td><a data-download="deb" href="https://github.com/fortranmentis/GPUTERM/releases"><code>…_amd64.deb</code></a></td><td><code>sudo apt install ./GpuTerm_*.deb</code></td></tr>
+              <tr><td>Linux (x64, 포터블)</td><td><a data-download="appimage" href="https://github.com/fortranmentis/GPUTERM/releases"><code>…_amd64.AppImage</code></a></td><td><code>chmod +x</code> 후 실행. 앱 안에서 업데이트</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="faq">
+      <div class="wrap">
+        <h2>자주 묻는 질문</h2>
+        <details>
+          <summary>서버에 무언가를 설치하나요?</summary>
+          <p>아닙니다. 기본 지표는 에이전트나 root 권한 없이 SSH로 <code>nvidia-smi</code>, <code>/proc</code>, <code>sysctl</code>, PowerShell CIM 같은 표준 명령을 한 번씩 실행해 가져옵니다.</p>
+        </details>
+        <details>
+          <summary>어떤 GPU와 서버 OS를 지원하나요?</summary>
+          <p>Linux, macOS, Windows 호스트의 NVIDIA(nvidia-smi), AMD(amd-smi·rocm-smi), Intel, Apple Silicon GPU를 지원합니다. 표시되는 항목은 호스트의 도구와 드라이버에 따라 다릅니다.</p>
+        </details>
+        <details>
+          <summary>무료인가요?</summary>
+          <p>PolyForm Noncommercial 1.0.0 라이선스로 개인·비상업적 사용은 무료입니다. 상업적 사용은 관리자에게 별도 라이선스를 받아야 합니다.</p>
+        </details>
+        <details>
+          <summary>Termius나 MobaXterm과 무엇이 다른가요?</summary>
+          <p>GpuTerm은 GPU 서버를 중심으로 만들었습니다. GPU별 텔레메트리와 기록, GPU 프로세스·컨테이너 보기, LLM 런타임 모니터링, AI 도우미용 MCP 서버가 터미널·SFTP와 함께 기본으로 들어 있습니다.</p>
+        </details>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <span>© GpuTerm contributors · <a href="https://github.com/fortranmentis/GPUTERM/blob/main/LICENSE">PolyForm Noncommercial 1.0.0</a></span>
+      <span><a href="https://github.com/fortranmentis/GPUTERM">GitHub</a> · <a href="https://github.com/fortranmentis/GPUTERM/releases">릴리스</a> · <a href="../" hreflang="en" lang="en">English</a></span>
+    </div>
+  </footer>
+  <script src="../assets/site.js" defer></script>
+</body>
+</html>

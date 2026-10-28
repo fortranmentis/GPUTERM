@@ -14,7 +14,7 @@
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white)](https://react.dev)
 [![Rust](https://img.shields.io/badge/Rust-stable-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org)
 
-[English](./README.md) · [한국어](./README.ko.md)
+[웹사이트](https://fortranmentis.github.io/GPUTERM/ko/) · [English](./README.md) · [한국어](./README.ko.md)
 
 <img src="docs/screenshots/main.png" alt="GpuTerm 메인 창: 점프 호스트를 지원하는 세션 사이드바, SSH 터미널, SFTP 브라우저, 텔레메트리 바" width="850" />
 

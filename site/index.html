@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GpuTerm – SSH &amp; SFTP client with live GPU monitoring</title>
+  <meta name="description" content="GpuTerm is a free desktop SSH/SFTP client for GPU servers: terminal, file transfers and live CPU, RAM, disk and NVIDIA/AMD/Intel/Apple GPU telemetry in one window, with an MCP server for AI assistants. Windows, macOS, Linux.">
+  <link rel="canonical" href="https://fortranmentis.github.io/GPUTERM/">
+  <link rel="alternate" hreflang="en" href="https://fortranmentis.github.io/GPUTERM/">
+  <link rel="alternate" hreflang="ko" href="https://fortranmentis.github.io/GPUTERM/ko/">
+  <link rel="alternate" hreflang="x-default" href="https://fortranmentis.github.io/GPUTERM/">
+  <link rel="icon" href="assets/logo.svg" type="image/svg+xml">
+  <meta name="theme-color" content="#070a0f">
+
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="GpuTerm">
+  <meta property="og:title" content="GpuTerm – SSH & SFTP client with live GPU monitoring">
+  <meta property="og:description" content="Terminal, SFTP and real-time CPU · RAM · disk · GPU telemetry for remote GPU servers, in one native window.">
+  <meta property="og:url" content="https://fortranmentis.github.io/GPUTERM/">
+  <meta property="og:image" content="https://fortranmentis.github.io/GPUTERM/assets/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:locale" content="en_US">
+  <meta property="og:locale:alternate" content="ko_KR">
+  <meta name="twitter:card" content="summary_large_image">
+
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "GpuTerm",
+    "alternateName": "GPUTERM",
+    "description": "Desktop SSH/SFTP client for GPU servers with live CPU, memory, disk and GPU telemetry and a built-in MCP server for AI assistants.",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "Windows 10, Windows 11, macOS (Apple Silicon), Linux",
+    "url": "https://fortranmentis.github.io/GPUTERM/",
+    "downloadUrl": "https://github.com/fortranmentis/GPUTERM/releases",
+    "codeRepository": "https://github.com/fortranmentis/GPUTERM",
+    "image": "https://fortranmentis.github.io/GPUTERM/assets/og.png",
+    "screenshot": "https://fortranmentis.github.io/GPUTERM/assets/screenshot.png",
+    "license": "https://polyformproject.org/licenses/noncommercial/1.0.0/",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+  }
+  </script>
+  <link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="./"><img src="assets/logo.svg" alt="" width="30" height="30">GpuTerm</a>
+      <nav class="site-nav" aria-label="Main">
+        <a class="optional" href="#features">Features</a>
+        <a class="optional" href="#mcp">MCP</a>
+        <a class="optional" href="#download">Download</a>
+        <a href="ko/" hreflang="ko" lang="ko">한국어</a>
+        <a href="https://github.com/fortranmentis/GPUTERM">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <div class="hero">
+      <div class="wrap">
+        <span class="eyebrow">Free for personal &amp; noncommercial use · Windows · macOS · Linux</span>
+        <h1>The SSH &amp; SFTP client <span>built for GPU servers</span></h1>
+        <p class="lead">GpuTerm puts a terminal, a drag-and-drop file browser and live CPU, RAM, disk and GPU telemetry for every remote host into one native window, so you can stop juggling an SSH client, an SFTP tool and <code>watch nvidia-smi</code>.</p>
+        <div class="downloads" id="download">
+          <a class="button primary" data-download="windows" href="https://github.com/fortranmentis/GPUTERM/releases">Windows <small>.exe</small></a>
+          <a class="button" data-download="mac" href="https://github.com/fortranmentis/GPUTERM/releases">macOS <small>Apple Silicon .dmg</small></a>
+          <a class="button" data-download="deb" href="https://github.com/fortranmentis/GPUTERM/releases">Linux <small>.deb</small></a>
+          <a class="button" data-download="appimage" href="https://github.com/fortranmentis/GPUTERM/releases">Linux <small>AppImage</small></a>
+        </div>
+        <p class="release-line">Latest: <a data-release-link href="https://github.com/fortranmentis/GPUTERM/releases"><span data-release-version>beta</span></a> · <a href="https://github.com/fortranmentis/GPUTERM">Source on GitHub</a></p>
+        <figure class="shot">
+          <img src="assets/screenshot.png" width="1456" height="939" alt="GpuTerm window: session sidebar, SSH terminal, SFTP browser and the live CPU, memory, disk and GPU telemetry bar">
+        </figure>
+      </div>
+    </div>
+
+    <section id="features">
+      <div class="wrap">
+        <h2>Everything a GPU box needs, in one place</h2>
+        <p class="section-lead">Connect once. Monitoring runs on its own SSH channel, so it never blocks your shell, and core metrics need no root rights or agents on the server.</p>
+        <div class="grid">
+          <div class="card">
+            <h3><span class="icon" aria-hidden="true">🖥️</span>SSH terminal</h3>
+            <p>Full PTY terminal (xterm.js + Rust ssh2) with split panes, search, tmux sessions, ProxyJump hosts, port forwarding, keyboard-interactive / OTP sign-in and <code>~/.ssh/config</code> import.</p>
+          </div>
+          <div class="card">
+            <h3><span class="icon" aria-hidden="true">📊</span>Live GPU telemetry</h3>
+            <p>Utilization, VRAM, temperature and power for every GPU (NVIDIA, AMD, Intel, Apple Silicon), plus CPU, memory, disks and logged-in users, with history charts and threshold alerts.</p>
+          </div>
+          <div class="card">
+            <h3><span class="icon" aria-hidden="true">📁</span>SFTP browser</h3>
+            <p>Drag-and-drop uploads and downloads, a local/remote two-pane view, progress and cancel, rename, delete and new folders.</p>
+          </div>
+          <div class="card">
+            <h3><span class="icon" aria-hidden="true">🧠</span>Processes &amp; containers</h3>
+            <p>Who is using which GPU, top CPU and memory processes, Docker/Podman containers and Kubernetes pods, and a safe "end process" that re-checks the PID first.</p>
+          </div>
+          <div class="card">
+            <h3><span class="icon" aria-hidden="true">🤖</span>LLM runtime monitoring</h3>
+            <p>Ollama, vLLM, SGLang, TGI, llama.cpp, Triton and OpenAI-compatible servers: models, KV cache, queues, tokens per second and latency, directly or through an SSH tunnel.</p>
+          </div>
+          <div class="card">
+            <h3><span class="icon" aria-hidden="true">🔐</span>Secure by default</h3>
+            <p>Credentials in an Argon2id + AES-256-GCM vault, optional Touch ID / Windows Hello unlock, host-key verification, and GpuTerm-managed SSH keys installed and verified for you.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="mcp">
+      <div class="wrap split">
+        <div>
+          <h2>Let your AI assistant see your GPU servers</h2>
+          <p class="section-lead">GpuTerm includes an MCP server. Turn it on and Claude Code, Claude Desktop, Codex or Cursor can ask about the hosts you have connected.</p>
+          <ul class="checks">
+            <li><strong>"Which server has a free GPU?"</strong> — live telemetry, free GPUs across hosts, the last hour of history, GPU processes, containers and LLM runtimes.</li>
+            <li><strong>Actions only with your approval</strong> — commands, file reads and process kills each open a confirmation in GpuTerm; Deny is the default.</li>
+            <li><strong>Local and audited</strong> — loopback only with a per-start token, per-host hiding, untrusted output marking and an audit log.</li>
+          </ul>
+        </div>
+        <pre class="terminal" aria-label="Example: adding GpuTerm to Claude Code"><span class="dim">$</span> claude mcp add --scope user gputerm -- \
+    "/Applications/GpuTerm.app/Contents/MacOS/gputerm" --mcp-stdio
+
+<span class="dim"># example conversation</span>
+<span class="dim">&gt;</span> Which of my servers has an idle GPU with 20 GB free?
+<span class="ok">  ⎿ gputerm · find_free_gpus</span>
+  gpu-02 · GPU 1 (A100 80GB) — 0% busy, 79 GB free
+  gpu-05 · GPU 0 (RTX 4090)  — 2% busy, 23 GB free</pre>
+      </div>
+    </section>
+
+    <section>
+      <div class="wrap">
+        <h2>Download</h2>
+        <p class="section-lead">GpuTerm is in beta. Installers are built on GitHub Actions from the tagged source, and the app updates itself from signed releases.</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Platform</th><th>File</th><th>Notes</th></tr></thead>
+            <tbody>
+              <tr><td>Windows 10 / 11 (x64)</td><td><a data-download="windows" href="https://github.com/fortranmentis/GPUTERM/releases"><code>…_x64-setup.exe</code></a></td><td>SmartScreen may warn: More info → Run anyway</td></tr>
+              <tr><td>macOS (Apple Silicon)</td><td><a data-download="mac" href="https://github.com/fortranmentis/GPUTERM/releases"><code>…_aarch64.dmg</code></a></td><td>Ad-hoc signed; right-click → Open on first launch</td></tr>
+              <tr><td>Debian / Ubuntu (x64)</td><td><a data-download="deb" href="https://github.com/fortranmentis/GPUTERM/releases"><code>…_amd64.deb</code></a></td><td><code>sudo apt install ./GpuTerm_*.deb</code></td></tr>
+              <tr><td>Linux (x64, portable)</td><td><a data-download="appimage" href="https://github.com/fortranmentis/GPUTERM/releases"><code>…_amd64.AppImage</code></a></td><td><code>chmod +x</code> and run; updates in-app</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="faq">
+      <div class="wrap">
+        <h2>FAQ</h2>
+        <details>
+          <summary>Does GpuTerm install anything on my servers?</summary>
+          <p>No agent and no root rights are needed for the core metrics: they come from standard one-shot commands such as <code>nvidia-smi</code>, <code>/proc</code>, <code>sysctl</code> or PowerShell CIM over SSH.</p>
+        </details>
+        <details>
+          <summary>Which GPUs and server OSes are supported?</summary>
+          <p>NVIDIA (nvidia-smi), AMD (amd-smi / rocm-smi), Intel and Apple Silicon GPUs, on Linux, macOS and Windows hosts. What each host reports depends on its tools and drivers.</p>
+        </details>
+        <details>
+          <summary>Is it free?</summary>
+          <p>Yes for personal and noncommercial use, under the PolyForm Noncommercial 1.0.0 license. Commercial use needs a separate license from the maintainer.</p>
+        </details>
+        <details>
+          <summary>How is GpuTerm different from Termius or MobaXterm?</summary>
+          <p>GpuTerm is built around GPU servers: per-GPU telemetry and history, GPU process and container views, LLM runtime monitoring and an MCP server for AI assistants come built in, next to the terminal and SFTP.</p>
+        </details>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <span>© GpuTerm contributors · <a href="https://github.com/fortranmentis/GPUTERM/blob/main/LICENSE">PolyForm Noncommercial 1.0.0</a></span>
+      <span><a href="https://github.com/fortranmentis/GPUTERM">GitHub</a> · <a href="https://github.com/fortranmentis/GPUTERM/releases">Releases</a> · <a href="ko/" hreflang="ko" lang="ko">한국어</a></span>
+    </div>
+  </footer>
+  <script src="assets/site.js" defer></script>
+</body>
+</html>

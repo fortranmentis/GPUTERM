@@ -14,7 +14,7 @@ Terminal, file transfers, and real-time CPU · RAM · Disk · GPU telemetry (NVI
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=white)](https://react.dev)
 [![Rust](https://img.shields.io/badge/Rust-stable-DEA584?logo=rust&logoColor=white)](https://www.rust-lang.org)
 
-[English](./README.md) · [한국어](./README.ko.md)
+[Website](https://fortranmentis.github.io/GPUTERM/) · [English](./README.md) · [한국어](./README.ko.md)
 
 <img src="docs/screenshots/main.png" alt="GpuTerm main window: session sidebar with jump-host support, SSH terminal, SFTP browser, and the telemetry bar" width="850" />
 
