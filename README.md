@@ -26,7 +26,7 @@ Working on a remote GPU box usually means juggling an SSH client, an SFTP tool, 
 
 Almost nothing ever touches your servers: every metric comes from one-shot standard commands (`nvidia-smi`, `/proc`, `sysctl`, PowerShell CIM, …) over SSH, and no admin/root rights are required for the core metrics. The [three narrow exceptions](#faq) are an oversized Windows collector script, the opt-in Claude status-line helper, and LLM runtime monitoring — which runs no remote command at all.
 
-> **Status:** beta. Prebuilt installers for Windows, macOS, and Linux are attached to every [release](https://github.com/fortranmentis/GPUTERM/releases); you can also build from source below.
+> **Status:** stable release — **1.4.0** is the first official desktop release. Prebuilt installers for Windows, macOS, and Linux are attached to [releases](https://github.com/fortranmentis/GPUTERM/releases); you can also build from source below. Official release status does not imply Apple notarization or a trusted Windows publisher signature; see the packaging notes.
 
 ## Table of contents
 
@@ -100,6 +100,13 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 - Remote telemetry runs on a dedicated SSH connection with automatic reconnect; local telemetry executes collectors directly without SSH
 - **Quiet Windows local monitoring** — PowerShell collectors run without allocating console windows and emit UTF-8 text, so localized device and volume names remain parseable
 - Hosts without any GPU gracefully fall back to system-only metrics
+
+### 📂 Folder sizes within a disk
+
+- Click a mount in the disk detail popover to inspect its immediate child folders, largest first. Drill into a folder, use breadcrumbs to return, or open the current location in SFTP where available. The detached disk window also supports browsing.
+- Scans are **on demand**, not part of periodic telemetry. Results stay in an in-memory per-session/folder cache until **Rescan**; cached measurements can become stale.
+- Linux/macOS SSH hosts and local Linux/macOS terminals use `du -x -k -d 1` at low CPU priority (and idle I/O priority where `ionice` is available), without sudo. Remote scans open a dedicated SSH connection; only one scan per session runs at a time. Windows is not supported for folder sizes yet.
+- A 25-second host-side limit uses `timeout` or Perl when available, with a 35-second command budget. Truncated scans show lower bounds; permission errors, omitted smaller folders (top 200 displayed) and unknown totals are reported. This is allocated disk usage, not exact logical file size; other filesystems are not traversed. Very large trees, unusual filenames and live filesystem changes can limit accuracy.
 
 ### 📦 Containers and SQL monitoring
 
@@ -531,7 +538,7 @@ src-tauri/src/ssh/      Rust backend
 
 Pushing a `v*` tag runs the [Release Build workflow](.github/workflows/release.yml), which creates the prerelease from [RELEASE_NOTES.md](./RELEASE_NOTES.md), builds the Windows `.exe` (NSIS), Debian `.deb`, and macOS `.dmg` on GitHub-hosted runners, and attaches them to the tag. The macOS job signs every nested code object inside-out, deep-signs and verifies the final app, builds the DMG from that verified bundle, mounts it, and verifies the enclosed app again. A `SHA256SUMS.txt` file is published after all installers succeed. The workflow can also be dispatched manually for an existing tag from the Actions page.
 
-Each release also gets signed update bundles (the NSIS setup, the AppImage and a macOS `.app.tar.gz` packed from the ad-hoc signed app, each with a `.sig`) and a `latest.json` manifest built by [`scripts/make-updater-manifest.mjs`](scripts/make-updater-manifest.mjs). The manifest is copied to the fixed [`updater`](https://github.com/fortranmentis/GPUTERM/releases/tag/updater) release, which is the URL the app polls, because GitHub's “latest release” link skips pre-releases. Signing reads the `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` repository secrets; [`src-tauri/tauri.release.conf.json`](src-tauri/tauri.release.conf.json) turns on the update bundles only for release builds, so local `tauri build` runs need no key.
+Each release also gets signed update bundles (the NSIS setup, the AppImage and a macOS `.app.tar.gz` packed from the ad-hoc signed app, each with a `.sig`) and a `latest.json` manifest built by [`scripts/make-updater-manifest.mjs`](scripts/make-updater-manifest.mjs). Stable tags such as **v1.4.0** publish as official GitHub releases and become **Latest**; tags with prerelease suffixes stay prereleases. The manifest is also copied to the fixed [`updater`](https://github.com/fortranmentis/GPUTERM/releases/tag/updater) channel so existing beta installations can move to 1.4.0 without changing their endpoint. That infrastructure-only channel remains a prerelease; the versioned 1.4.0 release does not. Signing reads the `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` repository secrets; [`src-tauri/tauri.release.conf.json`](src-tauri/tauri.release.conf.json) enables updater bundles only for release builds, so local `tauri build` needs no key.
 
 ## FAQ
 

@@ -8,6 +8,18 @@ const signatures = {
 };
 
 describe("buildManifest", () => {
+  it("publishes an unsuffixed stable version without changing the updater platforms", () => {
+    const stable = Object.fromEntries(Object.entries(signatures).map(([name, sig]) =>
+      [name.replace("1.3.8-beta", "1.4.0"), sig],
+    ));
+    const manifest = buildManifest({ tag: "v1.4.0", repo: "fortranmentis/GPUTERM", notes: "official", pubDate: "2026-11-09T00:00:00Z", signatures: stable });
+    expect(manifest.version).toBe("1.4.0");
+    expect(Object.keys(manifest.platforms)).toHaveLength(3);
+    for (const platform of Object.values(manifest.platforms)) {
+      expect(platform.url).toContain("/releases/download/v1.4.0/GpuTerm_1.4.0_");
+      expect(platform.url).not.toContain("beta");
+    }
+  });
   it("lists one signed bundle per platform", () => {
     const manifest = buildManifest({
       tag: "v1.3.8-beta",

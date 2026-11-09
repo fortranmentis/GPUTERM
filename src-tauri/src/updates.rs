@@ -59,6 +59,10 @@ mod tests {
     #[test]
     fn release_url_accepts_only_version_strings() {
         assert_eq!(
+            release_url(Some("1.4.0")),
+            "https://github.com/fortranmentis/GPUTERM/releases/tag/v1.4.0"
+        );
+        assert_eq!(
             release_url(Some("1.3.8-beta")),
             "https://github.com/fortranmentis/GPUTERM/releases/tag/v1.3.8-beta"
         );

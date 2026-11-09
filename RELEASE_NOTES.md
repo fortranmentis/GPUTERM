@@ -1,38 +1,37 @@
-# GpuTerm 1.3.9-beta
+# GpuTerm 1.4.0
 
 ## Highlights
 
-- **Open remote web UIs without exposing a public port.** The sidebar's **Web services** lists TensorBoard, Jupyter, MLflow, Ray Dashboard, Streamlit, Gradio and code-server. **Open** creates/reuses a loopback-only SSH forward and launches the default browser; Jupyter runtime-file base URLs and login tokens are used when available.
-- **Watch every connected SSH host.** Discovery runs every 20 seconds on Linux, macOS and Windows. Newly detected known services can show an **Open** toast after the initial scan; notifications can be disabled. Other listening ports are listed separately, and Linux additionally inspects exposed TCP ports from up to 50 accessible Docker containers.
-- **Terminal links and saved forwards.** Cmd/Ctrl-click HTTP(S) URLs, including wrapped links. Plain HTTP URLs pointing to localhost, wildcard addresses or the SSH host's own name are opened through a temporary SSH forward. Pin a discovered service to save a forward for future connections.
-- **Web services for AI assistants.** The read-only MCP `list_web_services` tool returns discovered service metadata with Jupyter tokens removed from returned paths. MCP settings now use switches and compact host-visibility rows.
-- **Refreshed project website.** The bilingual GitHub Pages landing page now covers desktop/native mobile apps, external-display workspaces and Siri Shortcuts, with responsive download tables and Korean line-wrapping improvements. These website changes do not add new desktop mobile features.
+- **First official desktop release.** 1.4.0 leaves beta: the version has no prerelease suffix, GitHub publishes it as a non-prerelease and Latest, and existing signed-updater installations retain their update endpoint.
+- **See what fills a disk.** Click a mount in the disk details to list child folders largest first, drill down one level at a time, return with breadcrumbs, rescan, or open the current folder in SFTP where available. Measurements are requested on demand and cached in memory, not added to periodic monitoring.
+- **One workspace for remote operations.** The established terminal splits, SSH/SFTP, encrypted credential vault and key manager, GPU/system history and alerts, container/SQL monitoring, AI DASH, LLM-runtime monitoring, remote web-service opening and local MCP integration remain available with their documented platform limits.
+- **Windows, macOS and Linux distribution.** EXE, Apple Silicon DMG and DEB remain available, alongside AppImage and signed updater bundles. English/Korean READMEs and the desktop website status now identify the official release.
 
 ## Fixes
 
-- Stop global text-field styles from stretching checkbox and radio controls to text-input dimensions; restore horizontal checkbox labels across the app.
-- Declare the landing-page JavaScript's browser environment in ESLint so its DOM APIs are checked without false undefined-global errors.
-- Withhold MLflow backend-store and artifact-root URIs from service metadata: these command-line values can embed DB/storage credentials and must not reach the service panel or MCP responses. A regression test checks serialized metadata with synthetic secrets.
-- Handle wrapped terminal URLs and surrounding punctuation, retain Jupyter base paths/token queries when opening, and reuse live forwards or choose another free local port when needed.
-- Keep unrelated kernels/editor backends/agents out of named-service classification; expose unknown listening ports separately rather than labelling every port a recognized web UI.
-- Report scan/open failures in the service panel and browser-opening failures as in-app messages. Keep the first discovery scan quiet instead of announcing already-running services.
-- Update the English and Korean READMEs with discovery commands, browser-opening behavior, notification/pin controls and operational limits.
+- Distinguish stable version tags from prerelease tags in both GitHub release creation and installer upload, so packaging cannot turn 1.4.0 back into a prerelease. Keep only the infrastructure `updater` channel as a prerelease for backward compatibility.
+- Run remote folder scans on a separate SSH connection and admit one scan per session, avoiding a long `du` blocking shared operations. Surface incomplete results, unreadable paths, errors and omitted smaller folders instead of inventing totals.
+- Use a private `mktemp` file with exit cleanup for folder-scan diagnostics rather than a predictable temporary filename.
+- Count only `du` diagnostics as unreadable-path warnings, not unrelated priority-wrapper warnings; a controlled local scan caught this distinction during validation.
+- Retry transient DMG verification/mount service errors up to five times. Verification is never skipped: persistent image errors fail packaging, and an invalid app signature fails immediately with mount cleanup.
+- Preserve both the local folder-size feature and the incoming website documentation update; leave unrelated working documents/assets out of release commits.
 
 ## Validation
 
-- **348 frontend tests pass across 51 files**, including the two updater-manifest tests (also rerun separately). **498 macOS Rust tests pass; 6 are ignored.** Platform-specific counts can differ.
-- TypeScript, ESLint (0 errors, 14 existing React Hook warnings), the Vite production build and `git diff --check` pass. Strict Clippy checks all targets/features with warnings denied. Existing React test `act` and Vite chunk-size warnings are non-fatal.
-- Repository-wide `cargo fmt --check` reports pre-existing formatting differences across multiple modules; no unrelated bulk formatting was applied.
-- New automated coverage includes Linux/macOS/Windows listener fixtures, Docker port parsing, Jupyter token/base-path handling, forward-target/path validation, terminal URL wrapping, service-panel opening/pinning/errors and actionable notifications.
-- GitHub CI checks the declared Rust 1.88 minimum. Native release jobs build Windows NSIS EXE, Debian DEB, Linux AppImage and Apple Silicon DMG; signed update bundles, signatures, SHA-256 checksums and `latest.json` are published through the existing updater channel.
-- macOS packaging signs every nested code object inside-out and the final app ad-hoc, verifies with `codesign --verify --deep --strict`, then verifies the app again from the mounted DMG. Published assets are downloaded again for checksum, package-version and manifest checks.
+- **358 frontend tests pass across 54 files; 505 macOS Rust tests pass, with 6 ignored.** Platform-specific counts can differ. TypeScript, the Vite production build, strict Clippy across all targets/features, Bash syntax, release-workflow YAML parsing and `git diff --check` pass.
+- ESLint reports 0 errors and 14 existing React Hook warnings. Existing React test `act` and Vite chunk-size warnings remain non-fatal; unrelated repository-wide formatting differences are not rewritten.
+- New coverage exercises folder sorting/navigation/cache/rescan/SFTP actions/errors, complete and partial scan parsing, unreadable counts, bounded output and shell quoting. A controlled local filesystem fixture executes `du` and checks private diagnostic-file cleanup; it does not scan user data or a real SSH server.
+- Mock-command packaging tests check transient DMG retries, persistent verification failure, signature failure and cleanup without mounting an actual image. Published macOS artifacts are separately verified using the real platform tools.
+- Stable-version regression tests cover 1.4.0 release-page URLs and updater bundle names, website preference for an official release over a newer beta, historical beta fallback, and exclusion of drafts/infrastructure releases.
+- Release CI checks the declared Rust minimum and native Windows/Linux/macOS packaging. Final verification downloads the published files, checks SHA-256, inspects package versions, verifies the mounted DMG and signed update bundles, and confirms the official/Latest flag and updater-channel manifest.
 
 ## Notes
 
-- Compared with 1.3.8-beta this release adds web-service discovery/opening and UI refinements, not a credential or profile-format migration. Existing profiles, vaults, MCP approvals and updater behavior remain compatible. A pinned forward is saved only when explicitly selected.
-- Discovery is best-effort, not a health check: tool availability, account permissions, process visibility, Jupyter runtime paths and Docker networking affect results. Container image/port heuristics can misclassify a service; exposed ports may not be listening, and separate authentication may still be required. Docker discovery requires existing Docker access and never adds sudo.
-- Automatic discovery targets remote SSH hosts, not local terminal sessions. The watch announces only newly seen host/port pairs after a baseline scan. HTTP localhost/wildcard/own-host links are tunneled; HTTPS and unrelated addresses open unchanged. Saving a forward does not save its Jupyter token.
-- Tests use fixtures and mocked UI calls. Live remote Linux/macOS/Windows discovery, container web UIs and installed-platform browser interactions were not exercised by this release verification; the 1.3.8 live updater/MCP checks are historical, not rerun claims for 1.3.9.
-- Update bundles use the existing updater signing key; private signing material is read only from GitHub Secrets. The Windows installer has no trusted-publisher signature. The macOS app is fully ad-hoc signed, not Developer ID signed or Apple-notarized. The DMG targets Apple Silicon; DEB installs update through their package workflow/manual download, while AppImage supports in-app updates.
+- Official release status is a distribution milestone, not a claim that every host/GPU/server configuration was tested. Live remote folder scans, large production trees, Windows/Linux installed GUI behavior and biometric hardware remain outside this release's automated verification.
+- Folder sizes currently support Linux/macOS SSH hosts and local Linux/macOS terminals, not Windows. They use allocated disk usage from `du -x -k -d 1`, not logical file sizes, and stay on one filesystem. Only the top 200 folders are displayed; cached values can be stale. Permission errors, unusual tab/newline filenames, hard links and concurrent filesystem changes can limit interpretation.
+- Folder scans use low CPU priority and idle I/O priority when available, without sudo. A host-side 25-second limit depends on `timeout` or Perl; the command budget is 35 seconds, not an unconditional guarantee that a remote process is killed when neither helper exists. Truncated measurements are lower bounds.
+- Existing beta profiles and encrypted vaults remain compatible; upgrading does not automatically run a scan, install server keys or perform a remote action. The fixed updater channel continues serving the signed 1.4.0 manifest to existing installations. DEB installations update through package workflows/manual installation; AppImage supports in-app updates.
+- The macOS app is fully ad-hoc integrity-signed, not Developer ID signed or Apple-notarized; the DMG targets Apple Silicon. Windows installers lack a trusted-publisher signature. The updater's public-key signatures are separate from platform publisher trust; private signing keys remain in GitHub Secrets.
+- Existing repository-wide formatting differences, React Hook/test warnings and bundle-size warnings are not broadened into unrelated rewrites. Consult the README for feature-specific permissions, authentication and platform support.
 
-**Full changelog:** https://github.com/fortranmentis/GPUTERM/compare/v1.3.8-beta...v1.3.9-beta
+**Full changelog:** https://github.com/fortranmentis/GPUTERM/compare/v1.3.9-beta...v1.4.0

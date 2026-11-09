@@ -1,6 +1,6 @@
 name: Release Build
 
-# Creates/updates the prerelease, builds the native installers, and attaches
+# Creates/updates the release, builds the native installers, and attaches
 # them to the tag. The macOS path signs every nested code object before the
 # final app bundle and creates the DMG only from that verified app.
 #
@@ -8,13 +8,13 @@ name: Release Build
 # macOS .app.tar.gz, each with a minisign `.sig`) and a `latest.json`
 # manifest. The manifest is copied to the fixed `updater` release, which is
 # what the in-app updater polls: GitHub's `releases/latest` URL skips
-# pre-releases, and every GpuTerm release is one. Signing needs the
+# pre-releases. Keep this channel for existing beta installations too. Signing needs the
 # TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD secrets.
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to build and attach installers to (e.g. v1.2.0-beta)"
+        description: "Release tag to build and attach installers to (e.g. v1.4.0)"
         required: true
   push:
     tags: ["v*"]
@@ -29,23 +29,26 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
 
-      - name: Create or update prerelease notes
+      - name: Create or update release notes and channel
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           VERSION="${RELEASE_TAG#v}"
+          PRERELEASE=false
+          LATEST=true
+          if [[ "$VERSION" == *-* ]]; then PRERELEASE=true; LATEST=false; fi
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release edit "$RELEASE_TAG" \
               --title "GpuTerm $VERSION" \
               --notes-file RELEASE_NOTES.md \
-              --prerelease
+              --prerelease="$PRERELEASE" --latest="$LATEST"
           else
             gh release create "$RELEASE_TAG" \
               --verify-tag \
               --title "GpuTerm $VERSION" \
               --notes-file RELEASE_NOTES.md \
-              --prerelease
+              --prerelease="$PRERELEASE" --latest="$LATEST"
           fi
 
   build:
@@ -111,7 +114,7 @@ jobs:
         with:
           tagName: ${{ inputs.tag || github.ref_name }}
           releaseName: "GpuTerm __VERSION__"
-          prerelease: true
+          prerelease: ${{ contains(inputs.tag || github.ref_name, '-') }}
           # latest.json is assembled once every platform is up, in the
           # updater-manifest job below.
           includeUpdaterJson: false
@@ -152,12 +155,7 @@ jobs:
             -ov \
             -format UDZO \
             "$DMG_PATH"
-          hdiutil verify "$DMG_PATH"
-          hdiutil attach "$DMG_PATH" -readonly -nobrowse -mountpoint "$MOUNT_POINT"
-          trap 'hdiutil detach "$MOUNT_POINT" >/dev/null' EXIT
-          codesign --verify --deep --strict --verbose=4 "$MOUNT_POINT/GpuTerm.app"
-          hdiutil detach "$MOUNT_POINT"
-          trap - EXIT
+          bash scripts/verify-macos-dmg.sh "$DMG_PATH" "$MOUNT_POINT"
           echo "dmg_path=$DMG_PATH" >> "$GITHUB_OUTPUT"
 
       - name: Upload verified macOS DMG

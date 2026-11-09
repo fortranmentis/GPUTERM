@@ -1,6 +1,6 @@
-// Points the download buttons at the newest release's installers. Every
-// GpuTerm release is a pre-release, which GitHub's /releases/latest skips,
-// so the newest one is read from the API. Without it (offline, rate limit)
+// Prefer official releases; fall back to beta builds only if none exist.
+// Read the list to support both stable and historical beta distributions.
+// Without it (offline, rate limit)
 // the buttons keep their link to the release list.
 (function () {
   var API = "https://api.github.com/repos/fortranmentis/GPUTERM/releases?per_page=10";
@@ -16,9 +16,12 @@
       return response.ok ? response.json() : [];
     })
     .then(function (releases) {
-      var release = (releases || []).find(function (candidate) {
+      var candidates = (releases || []).filter(function (candidate) {
         return !candidate.draft && /^v\d/.test(candidate.tag_name);
       });
+      var release = candidates.find(function (candidate) {
+        return !candidate.prerelease;
+      }) || candidates[0];
       if (!release) return;
       Object.keys(patterns).forEach(function (key) {
         var asset = release.assets.find(function (item) {

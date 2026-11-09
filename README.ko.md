@@ -26,7 +26,7 @@
 
 서버에 닿는 것이 거의 없습니다: 모든 지표는 표준 명령(`nvidia-smi`, `/proc`, `sysctl`, PowerShell CIM 등)을 SSH로 1회씩 실행해 수집하며, 핵심 지표에는 root/관리자 권한도 필요 없습니다. [예외 세 가지](#faq)는 크기가 큰 Windows 수집기 스크립트, 선택 기능인 Claude status line 헬퍼, 그리고 원격 명령을 아예 실행하지 않는 LLM 런타임 모니터링입니다.
 
-> **상태:** 베타. 모든 [릴리스](https://github.com/fortranmentis/GPUTERM/releases)에 Windows·macOS·Linux 설치 파일이 첨부되며, 아래 안내에 따라 소스에서 직접 빌드할 수도 있습니다.
+> **상태:** 정식 릴리즈 — **1.4.0**은 첫 데스크톱 공식 버전입니다. [릴리스](https://github.com/fortranmentis/GPUTERM/releases)에서 Windows·macOS·Linux 설치 파일을 받거나 아래 안내에 따라 소스 빌드할 수 있습니다. 정식 버전 표시는 Apple 공증이나 Windows 신뢰 게시자 서명을 뜻하지 않습니다. 배포 안내의 제한을 확인해 주세요.
 
 ## 목차
 
@@ -97,6 +97,13 @@
 - 원격 텔레메트리는 전용 SSH 연결에서 자동 재연결하고, 로컬 텔레메트리는 SSH 없이 호스트에서 수집기를 직접 실행
 - **조용한 Windows 로컬 모니터링** — PowerShell 수집기를 콘솔 창 없이 실행하고 UTF-8 텍스트로 출력해 한글 장치명·볼륨명도 안정적으로 파싱
 - GPU가 전혀 없는 서버에서는 시스템 지표만 표시하며 정상 동작
+
+### 📂 디스크 안의 폴더별 용량
+
+- 디스크 상세 팝오버에서 마운트를 클릭하면 바로 아래 폴더를 큰 순서로 봅니다. 폴더를 클릭해 내려가거나 경로 표시로 돌아오고, 지원되는 화면에서는 현재 위치를 SFTP로 열 수 있습니다. 분리한 디스크 창에서도 탐색합니다.
+- 주기적 텔레메트리가 아닌 **요청 시 검사**입니다. 세션·폴더별 결과는 앱 메모리에 캐시되며 **Rescan**으로 갱신합니다. 이전 측정값은 실제 상태와 달라질 수 있습니다.
+- Linux/macOS SSH 호스트와 로컬 Linux/macOS 터미널에서 `du -x -k -d 1`을 낮은 CPU 우선순위로 실행하며, 가능하면 `ionice`로 유휴 I/O 우선순위도 적용합니다. sudo는 쓰지 않고 원격 검사는 별도 SSH 연결을 이용합니다. 세션당 검사는 하나만 실행하며 Windows 폴더 용량은 아직 지원하지 않습니다.
+- `timeout` 또는 Perl이 있으면 호스트에서 25초 제한을 적용하고, 전체 명령에는 35초 예산을 둡니다. 중단된 검사는 하한값으로 표시하며 권한 오류, 생략된 작은 폴더(상위 200개 표시), 알 수 없는 합계를 안내합니다. 논리적 파일 크기가 아닌 할당된 디스크 사용량이고 다른 파일시스템은 순회하지 않습니다. 매우 큰 트리, 특수한 파일명, 검사 중 파일 변경은 정확도에 영향을 줄 수 있습니다.
 
 ### 📦 컨테이너·SQL 모니터링
 
@@ -524,7 +531,7 @@ src-tauri/src/ssh/      Rust 백엔드
 
 `v*` 태그를 푸시하면 [Release Build 워크플로](.github/workflows/release.yml)가 [RELEASE_NOTES.md](./RELEASE_NOTES.md)로 프리릴리스를 만들고, GitHub 호스트 러너에서 Windows `.exe`(NSIS), Debian `.deb`, macOS `.dmg`를 빌드해 태그에 첨부합니다. macOS 작업은 모든 내부 코드 객체를 안쪽부터 서명하고 최종 앱을 deep 서명·검증한 뒤 DMG를 만들며, 생성된 DMG를 다시 마운트해 내부 앱 서명을 재검증합니다. 모든 설치 파일이 성공하면 `SHA256SUMS.txt`도 게시합니다. Actions 페이지에서 기존 태그를 지정해 수동 실행할 수도 있습니다.
 
-릴리스마다 서명된 업데이트 번들(NSIS 설치 파일, AppImage, ad-hoc 서명된 앱으로 만든 macOS `.app.tar.gz`, 각각의 `.sig`)과 [`scripts/make-updater-manifest.mjs`](scripts/make-updater-manifest.mjs)가 만드는 `latest.json`도 함께 올라갑니다. GitHub의 "최신 릴리스" 링크는 프리릴리스를 건너뛰기 때문에, 이 manifest는 앱이 확인하는 고정 [`updater`](https://github.com/fortranmentis/GPUTERM/releases/tag/updater) 릴리스에도 복사됩니다. 서명에는 저장소 secret `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`가 필요합니다. 업데이트 번들은 [`src-tauri/tauri.release.conf.json`](src-tauri/tauri.release.conf.json)으로 릴리스 빌드에서만 켜지므로, 로컬 `tauri build`에는 키가 필요 없습니다.
+릴리스마다 서명된 업데이트 번들(NSIS 설치 파일, AppImage, ad-hoc 서명된 앱으로 만든 macOS `.app.tar.gz`, 각각의 `.sig`)과 [`scripts/make-updater-manifest.mjs`](scripts/make-updater-manifest.mjs)가 만드는 `latest.json`도 함께 올라갑니다. **v1.4.0** 같은 안정 버전 태그는 GitHub 정식 릴리스이자 **Latest**로 게시하고, 프리릴리스 접미사가 있는 태그는 프리릴리스로 유지합니다. 기존 베타 설치본도 주소 변경 없이 1.4.0으로 갱신하도록 고정 [`updater`](https://github.com/fortranmentis/GPUTERM/releases/tag/updater) 채널에 manifest를 계속 복사합니다. 배포 기반시설용 채널만 프리릴리스로 남으며, 버전별 1.4.0 릴리스는 정식입니다. 서명에는 저장소 secret `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`가 필요하며 [`src-tauri/tauri.release.conf.json`](src-tauri/tauri.release.conf.json)은 릴리스 빌드에서만 updater 번들을 켜므로 로컬 빌드에는 키가 필요 없습니다.
 
 ## FAQ
 

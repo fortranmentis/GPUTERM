@@ -65,11 +65,12 @@ fn scan_script(path: &str) -> String {
     format!(
         r#"p={path}
 if [ ! -d "$p" ]; then echo "E Not a directory: $p"; exit 0; fi
-e="${{TMPDIR:-/tmp}}/gputerm-du.$$"
-set -- du -x -k -d 1 -- "$p"
+e=$(mktemp "${{TMPDIR:-/tmp}}/gputerm-du.XXXXXX") || {{ echo "E Could not create private scan error file"; exit 0; }}
+trap 'rm -f "$e"' 0
+set -- sh -c 'exec du -x -k -d 1 -- "$1" 2>"$2"' sh "$p" "$e"
 if command -v ionice >/dev/null 2>&1 && ionice -c3 true 2>/dev/null; then set -- ionice -c3 nice -n 19 "$@"; else set -- nice -n 19 "$@"; fi
 if command -v timeout >/dev/null 2>&1; then set -- timeout {limit} "$@"; elif command -v perl >/dev/null 2>&1; then set -- perl -e 'alarm shift; exec @ARGV; exit 127' {limit} "$@"; fi
-"$@" 2>"$e" | sort -rn | awk 'NR<={keep}{{print}} END{{print "N " NR}}'
+"$@" | sort -rn | awk 'NR<={keep}{{print}} END{{print "N " NR}}'
 echo "X $(wc -l < "$e" | tr -d ' ')"
 rm -f "$e""#,
         path = shell_quote(path),
@@ -297,9 +298,13 @@ X 0
     fn script_quotes_the_path_and_limits_du() {
         let script = scan_script("/data/it's here");
         assert!(script.starts_with("p='/data/it'\\''s here'"));
-        assert!(script.contains("du -x -k -d 1 -- \"$p\""));
+        assert!(script.contains("du -x -k -d 1 -- \"$1\" 2>\"$2\""));
+        assert!(script.contains("sh \"$p\" \"$e\""));
         assert!(script.contains("timeout 25"));
         assert!(script.contains("NR<=201"));
+        assert!(script.contains("mktemp"));
+        assert!(script.contains("trap 'rm -f \"$e\"' 0"));
+        assert!(!script.contains("gputerm-du.$$"));
     }
 
     #[test]
@@ -308,5 +313,37 @@ X 0
         assert!(valid_path("/mnt/data disk"));
         assert!(!valid_path("data"));
         assert!(!valid_path("/a\nb"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collects_a_small_local_fixture_and_cleans_private_error_files() {
+        struct Fixture(std::path::PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let fixture = Fixture(std::env::temp_dir().join(format!("gputerm-du-test-{}-{unique}", std::process::id())));
+        let root = fixture.0.join("tree with spaces");
+        let errors = fixture.0.join("errors");
+        std::fs::create_dir_all(root.join("child folder")).unwrap();
+        std::fs::create_dir_all(&errors).unwrap();
+        std::fs::write(root.join("child folder/file"), b"controlled test data").unwrap();
+        let output = std::process::Command::new("sh")
+            .args(["-c", &scan_script(root.to_str().unwrap())])
+            .env("TMPDIR", &errors)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let sizes = parse_sizes(root.to_str().unwrap(), &String::from_utf8_lossy(&output.stdout)).unwrap();
+        assert!(sizes.complete);
+        assert_eq!(sizes.unreadable, 0);
+        assert_eq!(sizes.entries[0].name, "child folder");
+        assert_eq!(std::fs::read_dir(errors).unwrap().count(), 0);
     }
 }
