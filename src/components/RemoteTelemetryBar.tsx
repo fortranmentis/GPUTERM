@@ -784,6 +784,15 @@ export function RemoteTelemetryBar({ onClose }: RemoteTelemetryBarProps = {}) {
           onClose={() => setOpenResource(null)}
           onPopOut={() => void popOut("disk")}
           history={history}
+          sessionId={telemetry.sessionId}
+          onOpenInSftp={
+            activeIsLocal
+              ? undefined
+              : (path) => {
+                  setOpenResource(null);
+                  useSessionStore.getState().requestSftpPath(telemetry.sessionId, path);
+                }
+          }
         />
       )}
       {openResource === "users" && telemetry && (

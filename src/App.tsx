@@ -291,6 +291,15 @@ function App() {
     window.setTimeout(() => window.dispatchEvent(new Event("resize")), 0);
   };
 
+  // Another panel (the disk popover's folder sizes) asked to show a folder.
+  const sftpRequest = useSessionStore((state) => state.sftpRequest);
+  useEffect(() => {
+    if (sftpRequest && !sftpOpen) {
+      setSftpPanelOpen(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only a new request opens the panel
+  }, [sftpRequest]);
+
   const setMonitoringPanelOpen = (open: boolean) => {
     setMonitoringOpen(open);
     localStorage.setItem(MONITORING_OPEN_STORAGE_KEY, String(open));

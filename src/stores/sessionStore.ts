@@ -30,6 +30,8 @@ type SessionStore = {
   lostSessionIds: string[];
   message: AppMessage | null;
   telemetrySettings: TelemetrySettings;
+  /** A folder another panel asked the SFTP browser to show; it clears it once handled. */
+  sftpRequest: { sessionId: string; path: string } | null;
   setSessions: (sessions: SessionProfile[]) => void;
   setActiveSession: (sessionId: string | null) => void;
   showSession: (sessionId: string | null) => void;
@@ -42,6 +44,8 @@ type SessionStore = {
   clearSessionLost: (sessionId: string) => void;
   setMessage: (message: AppMessage | null) => void;
   setTelemetrySettings: (settings: TelemetrySettings) => void;
+  requestSftpPath: (sessionId: string, path: string) => void;
+  clearSftpRequest: () => void;
 };
 
 export const useSessionStore = create<SessionStore>((set) => ({
@@ -54,6 +58,9 @@ export const useSessionStore = create<SessionStore>((set) => ({
   lostSessionIds: [],
   message: null,
   telemetrySettings: defaultTelemetrySettings,
+  sftpRequest: null,
+  requestSftpPath: (sessionId, path) => set({ sftpRequest: { sessionId, path } }),
+  clearSftpRequest: () => set({ sftpRequest: null }),
   setSessions: (sessions) => set({ sessions }),
   setActiveSession: (activeSessionId) => set({ activeSessionId }),
   showSession: (activeSessionId) =>

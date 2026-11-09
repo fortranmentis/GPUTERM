@@ -3,6 +3,7 @@ pub mod biometric;
 pub mod container_monitor;
 pub mod credentials;
 pub mod db_monitor;
+pub mod dir_sizes;
 pub mod forwarding;
 pub mod gpu_monitor;
 pub mod kbdint;

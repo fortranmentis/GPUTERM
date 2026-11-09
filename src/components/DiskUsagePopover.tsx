@@ -1,5 +1,5 @@
 import { HardDrive } from "lucide-react";
-import { useMemo, useState, type RefObject } from "react";
+import { useMemo, useState, type KeyboardEvent, type RefObject } from "react";
 import type { DiskMetric, ThermalMetric } from "../types/gpu";
 import { formatGiBOrTiB } from "../utils/formatBytes";
 import {
@@ -11,6 +11,7 @@ import {
 import { ResourceDetailPopover, ThermalSection } from "./ResourceDetailPopover";
 import type { TelemetryHistory } from "../types/telemetryHistory";
 import { DiskHistory } from "./UsageHistory";
+import { DirectorySizesView } from "./DirectorySizesView";
 
 type DiskUsagePopoverProps = {
   disks: DiskMetric[];
@@ -21,6 +22,8 @@ type DiskUsagePopoverProps = {
   onClose: () => void;
   onPopOut?: () => void;
   history?: TelemetryHistory | null;
+  sessionId?: string;
+  onOpenInSftp?: (path: string) => void;
 };
 
 export function DiskDetailContent({
@@ -30,6 +33,8 @@ export function DiskDetailContent({
   ignoredFsTypes,
   history,
   compactHistory = false,
+  sessionId,
+  onOpenInSftp,
 }: {
   disks: DiskMetric[];
   thermal: ThermalMetric | null;
@@ -39,8 +44,12 @@ export function DiskDetailContent({
   history?: TelemetryHistory | null;
   /** The popover's small sparkline instead of the full charts. */
   compactHistory?: boolean;
+  /** Enables clicking a mount to see the sizes of the folders in it. */
+  sessionId?: string;
+  onOpenInSftp?: (path: string) => void;
 }) {
   const [showHidden, setShowHidden] = useState(false);
+  const [openMount, setOpenMount] = useState<string | null>(null);
   const visibleDisks = useMemo(
     () =>
       sortDisksByPriority(
@@ -48,6 +57,18 @@ export function DiskDetailContent({
       ),
     [disks, ignoredFsTypes, showHidden],
   );
+
+  if (sessionId && openMount) {
+    return (
+      <DirectorySizesView
+        key={`${sessionId}:${openMount}`}
+        sessionId={sessionId}
+        root={openMount}
+        onBack={() => setOpenMount(null)}
+        onOpenInSftp={onOpenInSftp}
+      />
+    );
+  }
 
   return (
     <>
@@ -76,9 +97,24 @@ export function DiskDetailContent({
           </div>
           {visibleDisks.map((disk) => (
             <div
-              className={`disk-detail-row ${diskUsageLevel(disk.usagePercent)}`}
+              className={`disk-detail-row ${diskUsageLevel(disk.usagePercent)}${sessionId ? " clickable" : ""}`}
               key={`${disk.filesystem}:${disk.mountPoint}`}
               data-usage-level={diskUsageLevel(disk.usagePercent)}
+              {...(sessionId
+                ? {
+                    role: "button",
+                    tabIndex: 0,
+                    "aria-label": `Show folder sizes in ${disk.mountPoint}`,
+                    title: "Show the sizes of the folders in this mount",
+                    onClick: () => setOpenMount(disk.mountPoint),
+                    onKeyDown: (event: KeyboardEvent) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        setOpenMount(disk.mountPoint);
+                      }
+                    },
+                  }
+                : {})}
             >
               <span title={disk.mountPoint}>{disk.mountPoint}</span>
               <span title={disk.filesystem}>{disk.filesystem}</span>
@@ -107,6 +143,8 @@ export function DiskUsagePopover({
   onClose,
   onPopOut,
   history,
+  sessionId,
+  onOpenInSftp,
 }: DiskUsagePopoverProps) {
   return (
     <ResourceDetailPopover
@@ -124,6 +162,8 @@ export function DiskUsagePopover({
         ignoredFsTypes={ignoredFsTypes}
         history={history}
         compactHistory
+        sessionId={sessionId}
+        onOpenInSftp={onOpenInSftp}
       />
     </ResourceDetailPopover>
   );

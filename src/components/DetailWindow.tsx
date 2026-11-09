@@ -298,6 +298,7 @@ export function DetailWindow() {
             thermalError={telemetry?.errors.thermal}
             ignoredFsTypes={settings.diskIgnoreFsTypes}
             history={history}
+            sessionId={telemetry?.sessionId}
           />
         ) : resource === "users" ? (
           <UsersDetailContent

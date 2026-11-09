@@ -6176,3 +6176,176 @@ button.agent-summary-section {
 .web-service-row .port-forward-actions {
   align-items: center;
 }
+
+/* Disk popover: clicking a mount shows the sizes of the folders in it. */
+.disk-detail-row.clickable {
+  cursor: pointer;
+}
+
+.disk-detail-row.clickable:hover,
+.disk-detail-row.clickable:focus-visible {
+  background: rgba(34, 211, 238, 0.06);
+  outline: none;
+}
+
+.dir-sizes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.dir-sizes-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.dir-sizes-toolbar .icon-button {
+  flex: none;
+  width: 26px;
+  height: 26px;
+}
+
+.dir-sizes-crumbs {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.dir-sizes-crumbs > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  color: var(--muted);
+}
+
+.dir-sizes-crumbs button {
+  padding: 1px 3px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--cyan);
+  font: inherit;
+  cursor: pointer;
+}
+
+.dir-sizes-crumbs button:hover {
+  background: rgba(34, 211, 238, 0.08);
+}
+
+.dir-sizes-crumbs strong {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dir-sizes-status {
+  min-height: 16px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.dir-sizes-status span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.dir-sizes-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(251, 191, 36, 0.08);
+  color: var(--amber);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.dir-sizes-warning.error {
+  background: rgba(248, 113, 113, 0.1);
+  color: #fecaca;
+}
+
+.dir-sizes-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 360px;
+  overflow-y: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+}
+
+.dir-sizes-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(60px, 34%) 72px 12px;
+  align-items: center;
+  gap: 10px;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dir-sizes-row:last-child {
+  border-bottom: 0;
+}
+
+.dir-sizes-row:hover:not(.static) {
+  background: rgba(34, 211, 238, 0.06);
+}
+
+.dir-sizes-row.static {
+  cursor: default;
+}
+
+.dir-sizes-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dir-sizes-name.muted {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.dir-sizes-bar {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(137, 150, 168, 0.14);
+}
+
+.dir-sizes-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--cyan-strong);
+}
+
+.dir-sizes-bytes {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.dir-sizes-more {
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 11px;
+}

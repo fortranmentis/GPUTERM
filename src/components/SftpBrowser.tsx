@@ -184,6 +184,10 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
     if (connected && activeSessionId) {
       // Each session remembers its own remote path; fall back to the SFTP
       // starting directory when the remembered path no longer resolves.
+      // A folder another panel asked for is loaded by the effect below.
+      if (useSessionStore.getState().sftpRequest?.sessionId === activeSessionId) {
+        return;
+      }
       const remembered = pathBySessionRef.current.get(activeSessionId) ?? ".";
       loadDirectory(remembered).catch(() =>
         loadDirectory(".").catch((error) =>
@@ -247,6 +251,18 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
       setLoading(false);
     }
   };
+
+  const sftpRequest = useSessionStore((state) => state.sftpRequest);
+  useEffect(() => {
+    if (!sftpRequest || !connected || sftpRequest.sessionId !== activeSessionId) {
+      return;
+    }
+    useSessionStore.getState().clearSftpRequest();
+    loadDirectory(sftpRequest.path).catch((error) =>
+      setMessage({ kind: "error", text: String(error) }),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- loadDirectory changes every render
+  }, [sftpRequest, connected, activeSessionId]);
 
   const loadLocalDirectory = async (nextPath: string) => {
     const response = await invoke<LocalListResponse>("list_local_dir", {
