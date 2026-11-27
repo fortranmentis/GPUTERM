@@ -17,7 +17,7 @@ import { McpApprovalDialog } from "./components/McpApprovalDialog";
 import { useLlmStore } from "./stores/llmStore";
 import { useSessionStore } from "./stores/sessionStore";
 import { useSettingsStore } from "./stores/settingsStore";
-import { progressToMessage } from "./stores/transferStore";
+import { progressToMessage, useTransferStore } from "./stores/transferStore";
 import { useAlertStore } from "./stores/alertStore";
 import type { AlertEvent, AlertSettings } from "./types/alerts";
 import { useAutoReconnect } from "./hooks/useAutoReconnect";
@@ -73,9 +73,13 @@ function App() {
     () => localStorage.getItem(MONITORING_OPEN_STORAGE_KEY) !== "false",
   );
   const workspaceGridRef = useRef<HTMLDivElement | null>(null);
+  const splitterCleanupRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => () => splitterCleanupRef.current?.(), []);
 
   const startSplitterDrag = (event: ReactMouseEvent<HTMLDivElement>) => {
     event.preventDefault();
+    splitterCleanupRef.current?.();
     const grid = workspaceGridRef.current;
     if (!grid) {
       return;
@@ -91,15 +95,22 @@ function App() {
       latestWidth = clampSftpWidth(gridRight - moveEvent.clientX - 3);
       setSftpWidth(latestWidth);
     };
-    const handleUp = () => {
+    const cleanup = (persist: boolean) => {
       window.removeEventListener("mousemove", handleMove);
       window.removeEventListener("mouseup", handleUp);
+      window.removeEventListener("blur", handleUp);
       document.body.style.userSelect = previousUserSelect;
       document.body.style.cursor = previousCursor;
-      localStorage.setItem(SFTP_WIDTH_STORAGE_KEY, String(latestWidth));
+      splitterCleanupRef.current = null;
+      if (persist) {
+        localStorage.setItem(SFTP_WIDTH_STORAGE_KEY, String(latestWidth));
+      }
     };
+    const handleUp = () => cleanup(true);
+    splitterCleanupRef.current = () => cleanup(false);
     window.addEventListener("mousemove", handleMove);
     window.addEventListener("mouseup", handleUp);
+    window.addEventListener("blur", handleUp);
   };
 
   useEffect(() => {
@@ -255,6 +266,7 @@ function App() {
     });
 
     listen<SftpProgressPayload>("sftp-progress", (event) => {
+      useTransferStore.getState().updateFromProgress(event.payload);
       const message = progressToMessage(event.payload);
       if (message) {
         setMessage(message);

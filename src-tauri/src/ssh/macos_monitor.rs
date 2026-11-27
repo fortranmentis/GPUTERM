@@ -4,16 +4,14 @@
 
 use crate::ssh::gpu_monitor::GpuMetric;
 use crate::ssh::parse_util::{parse_first_u64, parse_loadavg, required_section, split_sections};
-use crate::ssh::system_monitor::{CpuMetric, DiskMetric, MemoryMetric};
+use crate::ssh::system_monitor::{CpuMetric, DiskMetric, HostStaticInfo, MemoryMetric};
 use std::collections::HashMap;
 
 const BYTES_PER_MIB: u64 = 1024 * 1024;
 
-pub(crate) const MACOS_CPU_COMMAND: &str = "printf '__BRAND__\\n'; sysctl -n machdep.cpu.brand_string 2>/dev/null || true; printf '\\n__NCPU__\\n'; sysctl -n hw.logicalcpu 2>/dev/null || true; printf '\\n__NCPU_ONLINE__\\n'; sysctl -n hw.activecpu 2>/dev/null || true; printf '\\n__PCORES__\\n'; sysctl -n hw.perflevel0.logicalcpu 2>/dev/null || true; printf '\\n__ECORES__\\n'; sysctl -n hw.perflevel1.logicalcpu 2>/dev/null || true; printf '\\n__LOADAVG__\\n'; sysctl -n vm.loadavg 2>/dev/null || true; printf '\\n__TOP__\\n'; top -l 2 -n 0 -s 1 2>/dev/null || true";
+pub(crate) const MACOS_STATIC_COMMAND: &str = "printf '__HOSTNAME__\\n'; hostname 2>/dev/null || uname -n 2>/dev/null || true; printf '\\n__BRAND__\\n'; sysctl -n machdep.cpu.brand_string 2>/dev/null || true; printf '\\n__NCPU__\\n'; sysctl -n hw.logicalcpu 2>/dev/null || true; printf '\\n__NCPU_ONLINE__\\n'; sysctl -n hw.activecpu 2>/dev/null || true; printf '\\n__PCORES__\\n'; sysctl -n hw.perflevel0.logicalcpu 2>/dev/null || true; printf '\\n__ECORES__\\n'; sysctl -n hw.perflevel1.logicalcpu 2>/dev/null || true";
 
-pub(crate) const MACOS_MEMORY_COMMAND: &str = "printf '__MEMSIZE__\\n'; sysctl -n hw.memsize 2>/dev/null || true; printf '\\n__VMSTAT__\\n'; vm_stat 2>/dev/null || true; printf '\\n__SWAP__\\n'; sysctl -n vm.swapusage 2>/dev/null || true";
-
-pub(crate) const MACOS_DISK_COMMAND: &str = "printf '__DF__\\n'; df -P -k 2>/dev/null || true; printf '\\n__MOUNT__\\n'; mount 2>/dev/null || true";
+pub(crate) const MACOS_TELEMETRY_COMMAND: &str = "printf '__LOADAVG__\\n'; sysctl -n vm.loadavg 2>/dev/null || true; printf '\\n__TOP__\\n'; top -l 2 -n 0 -s 1 2>/dev/null || true; printf '\\n__MEMSIZE__\\n'; sysctl -n hw.memsize 2>/dev/null || true; printf '\\n__VMSTAT__\\n'; vm_stat 2>/dev/null || true; printf '\\n__SWAP__\\n'; sysctl -n vm.swapusage 2>/dev/null || true; printf '\\n__DF__\\n'; df -P -k 2>/dev/null || true; printf '\\n__MOUNT__\\n'; mount 2>/dev/null || true; printf '\\n__USERS__\\n'; LC_ALL=C who 2>/dev/null || true";
 
 pub(crate) const MACOS_GPU_COMMAND: &str = "printf '__IOREG__\\n'; ioreg -r -d 1 -c IOAccelerator 2>/dev/null || true; printf '\\n__BRAND__\\n'; sysctl -n machdep.cpu.brand_string 2>/dev/null || true";
 
@@ -60,34 +58,75 @@ pub(crate) fn parse_top_cpu_usage(output: &str) -> Option<f64> {
     }
 }
 
-pub(crate) fn parse_macos_cpu_output(output: &str) -> Result<CpuMetric, String> {
+pub(crate) fn parse_macos_static_output(output: &str) -> HostStaticInfo {
     let sections = split_sections(output);
-    let section = |name: &str| sections.get(name).map(|value| value.trim().to_string());
-
-    let brand = section("BRAND").filter(|value| !value.is_empty());
+    let section = |name: &str| {
+        sections
+            .get(name)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let hostname = section("HOSTNAME");
+    let brand = section("BRAND");
     let total_cores = sections.get("NCPU").and_then(|value| parse_first_u64(value));
     let online_cores = sections
         .get("NCPU_ONLINE")
         .and_then(|value| parse_first_u64(value))
         .or(total_cores);
-    let usage = sections.get("TOP").and_then(|value| parse_top_cpu_usage(value));
-
-    if brand.is_none() && total_cores.is_none() && usage.is_none() {
-        return Err("macOS CPU telemetry unavailable (sysctl/top produced no output)".to_string());
+    let p_cores = sections
+        .get("PCORES")
+        .and_then(|value| parse_first_u64(value));
+    let e_cores = sections
+        .get("ECORES")
+        .and_then(|value| parse_first_u64(value));
+    let cpu_model = match (brand, p_cores, e_cores) {
+        (Some(brand), Some(p), Some(e)) => Some(format!("{} ({}P+{}E)", brand, p, e)),
+        (Some(brand), _, _) => Some(brand),
+        (None, _, _) => None,
+    };
+    HostStaticInfo {
+        hostname,
+        cpu_model,
+        total_cores,
+        online_cores,
+        fallback_clock_ghz: None,
     }
+}
+
+pub(crate) fn parse_macos_cpu_sections(
+    sections: &HashMap<String, String>,
+    static_info: Option<&HostStaticInfo>,
+) -> Result<CpuMetric, String> {
+    let section = |name: &str| sections.get(name).map(|value| value.trim().to_string());
+
+    let brand = section("BRAND").filter(|value| !value.is_empty());
+    let total_cores = sections
+        .get("NCPU")
+        .and_then(|value| parse_first_u64(value))
+        .or_else(|| static_info.and_then(|info| info.total_cores));
+    let online_cores = sections
+        .get("NCPU_ONLINE")
+        .and_then(|value| parse_first_u64(value))
+        .or_else(|| static_info.and_then(|info| info.online_cores))
+        .or(total_cores);
+    let usage = sections.get("TOP").and_then(|value| parse_top_cpu_usage(value));
 
     let p_cores = sections.get("PCORES").and_then(|value| parse_first_u64(value));
     let e_cores = sections.get("ECORES").and_then(|value| parse_first_u64(value));
     let model_name = match (brand, p_cores, e_cores) {
         (Some(brand), Some(p), Some(e)) => Some(format!("{} ({}P+{}E)", brand, p, e)),
         (Some(brand), _, _) => Some(brand),
-        (None, _, _) => None,
+        (None, _, _) => static_info.and_then(|info| info.cpu_model.clone()),
     };
 
     let load = sections
         .get("LOADAVG")
         .map(|value| parse_sysctl_loadavg(value))
         .unwrap_or((None, None, None));
+
+    if model_name.is_none() && total_cores.is_none() && usage.is_none() && load.0.is_none() {
+        return Err("macOS CPU telemetry unavailable (sysctl/top produced no output)".to_string());
+    }
 
     Ok(CpuMetric {
         model_name,
@@ -100,6 +139,11 @@ pub(crate) fn parse_macos_cpu_output(output: &str) -> Result<CpuMetric, String> 
         // Apple Silicon exposes no hw.cpufrequency; the UI renders n/a.
         avg_clock_ghz: None,
     })
+}
+
+pub(crate) fn parse_macos_cpu_output(output: &str) -> Result<CpuMetric, String> {
+    let sections = split_sections(output);
+    parse_macos_cpu_sections(&sections, None)
 }
 
 /// Parses `vm_stat` output into (page_size_bytes, page counts by label).
@@ -159,13 +203,20 @@ pub(crate) fn parse_swapusage(output: &str) -> (Option<u64>, Option<u64>, Option
     )
 }
 
+#[cfg(test)]
 pub(crate) fn parse_macos_memory_output(output: &str) -> Result<MemoryMetric, String> {
     let sections = split_sections(output);
+    parse_macos_memory_sections(&sections)
+}
+
+pub(crate) fn parse_macos_memory_sections(
+    sections: &HashMap<String, String>,
+) -> Result<MemoryMetric, String> {
     let total_bytes = sections
         .get("MEMSIZE")
         .and_then(|value| parse_first_u64(value))
         .ok_or_else(|| "macOS memory telemetry unavailable (hw.memsize missing)".to_string())?;
-    let (page_size, pages) = required_section(&sections, "VMSTAT")
+    let (page_size, pages) = required_section(sections, "VMSTAT")
         .ok()
         .and_then(parse_vm_stat)
         .ok_or_else(|| "macOS memory telemetry unavailable (vm_stat missing)".to_string())?;
@@ -222,9 +273,16 @@ pub(crate) fn parse_mount_fs_types(output: &str) -> HashMap<String, String> {
 /// Parses BSD `df -P -k` (6 columns, no fstype) combined with `mount` output.
 /// Filesystems (`map auto_home`) and mount points (`/Volumes/My Disk`) may
 /// contain spaces, so the numeric triple + `%` column is located by scanning.
+#[cfg(test)]
 pub(crate) fn parse_macos_disk_output(output: &str) -> Result<Vec<DiskMetric>, String> {
     let sections = split_sections(output);
-    let df = required_section(&sections, "DF")
+    parse_macos_disk_sections(&sections)
+}
+
+pub(crate) fn parse_macos_disk_sections(
+    sections: &HashMap<String, String>,
+) -> Result<Vec<DiskMetric>, String> {
+    let df = required_section(sections, "DF")
         .map_err(|_| "macOS disk telemetry unavailable (df produced no output)".to_string())?;
     let fs_types = sections
         .get("MOUNT")

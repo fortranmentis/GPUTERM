@@ -585,7 +585,7 @@ describe("TerminalPane multi-session split", () => {
     );
   });
 
-  it("searches terminal output from the Ctrl+F bar", async () => {
+  it("searches terminal output from the Ctrl+Shift+F bar and leaves bare Ctrl+F to the shell", async () => {
     render(<TerminalPane />);
     await waitFor(() => expect(terminalMocks.open).toHaveBeenCalled());
 
@@ -593,7 +593,13 @@ describe("TerminalPane multi-session split", () => {
       screen.queryByRole("searchbox", { name: /search terminal output/i }),
     ).toBeNull();
 
-    fireEvent.keyDown(window, { key: "f", ctrlKey: true });
+    // Bare Ctrl+F must pass through to bash/emacs instead of opening search.
+    fireEvent.keyDown(window, { key: "f", code: "KeyF", ctrlKey: true });
+    expect(
+      screen.queryByRole("searchbox", { name: /search terminal output/i }),
+    ).toBeNull();
+
+    fireEvent.keyDown(window, { key: "F", code: "KeyF", ctrlKey: true, shiftKey: true });
 
     const input = await screen.findByRole("searchbox", {
       name: /search terminal output/i,
@@ -612,14 +618,14 @@ describe("TerminalPane multi-session split", () => {
     );
   });
 
-  it("leaves Ctrl+F to a text field the user is typing in", async () => {
+  it("leaves Ctrl+Shift+F to a text field the user is typing in", async () => {
     render(<TerminalPane />);
     await waitFor(() => expect(terminalMocks.open).toHaveBeenCalled());
 
     const field = document.createElement("input");
     document.body.appendChild(field);
     field.focus();
-    fireEvent.keyDown(field, { key: "f", ctrlKey: true });
+    fireEvent.keyDown(field, { key: "F", code: "KeyF", ctrlKey: true, shiftKey: true });
 
     expect(
       screen.queryByRole("searchbox", { name: /search terminal output/i }),

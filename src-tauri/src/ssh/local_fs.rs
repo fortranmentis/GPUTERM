@@ -124,11 +124,17 @@ pub fn list_local_dir(path: String) -> Result<LocalListResponse, String> {
     for entry in fs::read_dir(&normalized)
         .map_err(|error| format!("Failed to read local path {}: {}", normalized, error))?
     {
-        let entry = entry.map_err(|error| format!("Failed to read local entry: {}", error))?;
+        let Ok(entry) = entry else {
+            continue;
+        };
         let path = entry.path();
-        let metadata = entry
-            .metadata()
-            .map_err(|error| format!("Failed to inspect local entry {}: {}", path.display(), error))?;
+        // Follow symlinks so symlinked directories are browsable; fall back to
+        // symlink metadata for broken symlinks, and skip unreadable entries
+        // instead of aborting the whole directory listing.
+        let metadata = match fs::metadata(&path).or_else(|_| entry.metadata()) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
         let name = entry.file_name().to_string_lossy().to_string();
         let entry_type = if metadata.is_dir() {
             "directory"
@@ -333,6 +339,38 @@ mod tests {
         assert_eq!(entries[0].entry_type, "file");
         assert_eq!(entries[0].size, Some(5));
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lists_symlinked_directories_and_survives_broken_symlinks() {
+        use super::list_local_dir;
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!("gputerm-local-fs-{}", uuid::Uuid::new_v4()));
+        let target_dir = root.join("real-dir");
+        fs::create_dir_all(&target_dir).unwrap();
+        fs::write(root.join("note.txt"), b"ok").unwrap();
+        symlink(&target_dir, root.join("link-to-dir")).unwrap();
+        symlink(root.join("missing-target"), root.join("broken-link")).unwrap();
+
+        let listed = list_local_dir(root.to_string_lossy().to_string()).unwrap();
+        let link_dir = listed
+            .entries
+            .iter()
+            .find(|entry| entry.name == "link-to-dir")
+            .expect("symlinked directory should be listed");
+        assert_eq!(link_dir.entry_type, "directory");
+
+        let broken = listed
+            .entries
+            .iter()
+            .find(|entry| entry.name == "broken-link")
+            .expect("broken symlink should not abort listing");
+        assert_eq!(broken.entry_type, "other");
+
+        assert!(listed.entries.iter().any(|entry| entry.name == "note.txt"));
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -8,7 +8,6 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   confirm as confirmDialog,
@@ -37,7 +36,6 @@ import type {
   LocalListResponse,
   SftpEntry,
   SftpListResponse,
-  SftpProgressPayload,
 } from "../types/session";
 import type {
   LocalTransferDragFile,
@@ -104,10 +102,11 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
   const setMessage = useSessionStore((state) => state.setMessage);
   const addTask = useTransferStore((state) => state.addTask);
   const updateTask = useTransferStore((state) => state.updateTask);
-  const updateFromProgress = useTransferStore((state) => state.updateFromProgress);
   const setActiveDrag = useTransferStore((state) => state.setActiveDrag);
   const clearActiveDrag = useTransferStore((state) => state.clearActiveDrag);
   const [path, setPath] = useState(".");
+  const pathRef = useRef(path);
+  pathRef.current = path;
   const [pathDraft, setPathDraft] = useState(".");
   const [entries, setEntries] = useState<SftpEntry[]>([]);
   const [selectedRemotePaths, setSelectedRemotePaths] = useState<string[]>([]);
@@ -146,6 +145,9 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
   >(null);
   const prepareRemoteDragOutRef = useRef<
     ((files: RemoteDragFile[]) => Promise<string[]>) | null
+  >(null);
+  const describeAndEnqueueLocalPathsRef = useRef<
+    ((paths: string[], targetDirectory: string) => Promise<void>) | null
   >(null);
 
   const selectedRemoteEntries = useMemo(
@@ -203,28 +205,6 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
     }
     setRenamingPath(null);
   }, [activeSessionId, connected]);
-
-  useEffect(() => {
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-
-    // No session filter: transfer ids are globally unique and background
-    // sessions' transfers must keep updating while another session is viewed.
-    listen<SftpProgressPayload>("sftp-progress", (event) => {
-      updateFromProgress(event.payload);
-    }).then((nextUnlisten) => {
-      if (disposed) {
-        nextUnlisten();
-      } else {
-        unlisten = nextUnlisten;
-      }
-    });
-
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, [updateFromProgress]);
 
   const loadDirectory = async (nextPath: string) => {
     const sessionId = activeSessionId;
@@ -694,6 +674,7 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
       setMessage({ kind: "error", text: String(error) });
     }
   };
+  describeAndEnqueueLocalPathsRef.current = describeAndEnqueueLocalPaths;
 
   useEffect(() => {
     let disposed = false;
@@ -729,7 +710,10 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
 
           setRemoteDropActive(false);
           if (overRemote && payload.paths.length > 0) {
-            void describeAndEnqueueLocalPaths(payload.paths, path);
+            void describeAndEnqueueLocalPathsRef.current?.(
+              payload.paths,
+              pathRef.current,
+            );
           }
         });
         if (disposed) {
@@ -752,7 +736,7 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
       disposed = true;
       unlisten?.();
     };
-  }, [activeSessionId, connected, path, setMessage]);
+  }, [activeSessionId, connected, setMessage]);
 
   useEffect(() => {
     const clearPointerDrag = () => {
@@ -909,7 +893,7 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
             remoteDropZoneRef.current,
           )
         ) {
-          void enqueueUploadsRef.current?.(state.drag.files, path);
+          void enqueueUploadsRef.current?.(state.drag.files, pathRef.current);
         } else if (
           state.drag.kind === "remote" &&
           isClientPositionInsideElement(
@@ -935,7 +919,7 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
       clearActiveDrag();
       document.body.classList.remove("sftp-pointer-dragging");
     };
-  }, [clearActiveDrag, path, setMessage]);
+  }, [clearActiveDrag, setMessage]);
 
   const confirmOverwrite = async (
     command: "sftp_path_exists" | "local_path_exists",
@@ -1039,8 +1023,10 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
     const preparation = invoke<SftpDragOutPath[]>("sftp_create_drag_out_paths", {
       remotePaths: downloadable.map((file) => file.path),
     }).then(async (reservedPaths) => {
-      const results = await Promise.all(
-        reservedPaths.map(async (reservedPath) => {
+      const results = await mapWithConcurrencyLimit(
+        reservedPaths,
+        MAX_CONCURRENT_TRANSFERS,
+        async (reservedPath) => {
           const file = downloadable.find(
             (candidate) => candidate.path === reservedPath.remotePath,
           );
@@ -1062,7 +1048,7 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
             localPath: reservedPath.localPath,
             transferId: task.id,
           });
-        }),
+        },
       );
       if (results.some((succeeded) => !succeeded)) {
         throw new Error("Failed to prepare one or more remote items for desktop drag");

@@ -591,6 +591,64 @@ const MAX_IDLE_SLEEP: Duration = Duration::from_millis(30);
 const NONBLOCKING_RETRY_SLEEP: Duration = Duration::from_millis(8);
 const NONBLOCKING_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 const LIBSSH2_ERROR_EAGAIN: i32 = -37;
+const TERMINAL_COALESCE_MAX_BYTES: usize = 48 * 1024;
+const TERMINAL_COALESCE_MAX_WAIT: Duration = Duration::from_millis(6);
+
+struct OutputCoalescer {
+    buffer: String,
+    first_chunk_at: Option<Instant>,
+}
+
+impl OutputCoalescer {
+    fn new() -> Self {
+        Self {
+            buffer: String::new(),
+            first_chunk_at: None,
+        }
+    }
+
+    fn push(&mut self, chunk: &str, now: Instant) -> Option<String> {
+        if chunk.is_empty() {
+            return None;
+        }
+        if self.buffer.is_empty() {
+            self.first_chunk_at = Some(now);
+        }
+        self.buffer.push_str(chunk);
+        if self.buffer.len() >= TERMINAL_COALESCE_MAX_BYTES
+            || self.first_chunk_at.is_some_and(|started| {
+                now.saturating_duration_since(started) >= TERMINAL_COALESCE_MAX_WAIT
+            })
+        {
+            self.flush()
+        } else {
+            None
+        }
+    }
+
+    fn flush(&mut self) -> Option<String> {
+        if self.buffer.is_empty() {
+            return None;
+        }
+        self.first_chunk_at = None;
+        Some(std::mem::take(&mut self.buffer))
+    }
+}
+
+fn emit_terminal_output(app: &AppHandle, session_id: &str, terminal_id: &str, data: String) {
+    if data.is_empty() {
+        return;
+    }
+    let _ = app.emit_to(
+        "main",
+        "terminal-output",
+        TerminalOutputPayload {
+            session_id: session_id.to_string(),
+            terminal_id: terminal_id.to_string(),
+            data,
+        },
+    );
+}
 
 /// Appends `bytes` to `pending`, drains everything decodable into a String
 /// (invalid sequences become U+FFFD), and leaves at most 3 trailing bytes of a
@@ -642,6 +700,7 @@ fn start_remote_terminal_reader(
     thread::spawn(move || {
         let mut buffer = [0_u8; 8192];
         let mut pending = Vec::new();
+        let mut coalescer = OutputCoalescer::new();
         let mut close_message = None;
         // Set only for transport failures, which the UI may reconnect on its
         // own; a shell the user exited must stay closed.
@@ -682,15 +741,8 @@ fn start_remote_terminal_reader(
                     idle_sleep = MIN_IDLE_SLEEP;
                     last_received = Instant::now();
                     let data = drain_utf8_stream(&mut pending, &buffer[..bytes_read]);
-                    if !data.is_empty() {
-                        let _ = app.emit(
-                            "terminal-output",
-                            TerminalOutputPayload {
-                                session_id: session_id.clone(),
-                                terminal_id: terminal_id.clone(),
-                                data,
-                            },
-                        );
+                    if let Some(batch) = coalescer.push(&data, last_received) {
+                        emit_terminal_output(&app, &session_id, &terminal_id, batch);
                     }
                     false
                 }
@@ -706,6 +758,12 @@ fn start_remote_terminal_reader(
                     break;
                 }
             };
+
+            if idle {
+                if let Some(batch) = coalescer.flush() {
+                    emit_terminal_output(&app, &session_id, &terminal_id, batch);
+                }
+            }
 
             if idle && liveness != LivenessMode::KeepaliveOnly {
                 let due = liveness == LivenessMode::Uncalibrated
@@ -777,16 +835,12 @@ fn start_remote_terminal_reader(
             }
         }
 
+        if let Some(batch) = coalescer.flush() {
+            emit_terminal_output(&app, &session_id, &terminal_id, batch);
+        }
         if !pending.is_empty() {
             let data = String::from_utf8_lossy(&pending).to_string();
-            let _ = app.emit(
-                "terminal-output",
-                TerminalOutputPayload {
-                    session_id: session_id.clone(),
-                    terminal_id: terminal_id.clone(),
-                    data,
-                },
-            );
+            emit_terminal_output(&app, &session_id, &terminal_id, data);
         }
 
         if let Ok(mut channel) = channel.lock() {
@@ -862,8 +916,71 @@ fn start_local_terminal_reader(
     reader_state: TerminalReaderState,
 ) {
     thread::spawn(move || {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(32);
+        let emitter_app = app.clone();
+        let emitter_session_id = session_id.clone();
+        let emitter_terminal_id = terminal_id.clone();
+        let emitter = thread::spawn(move || {
+            let mut pending = Vec::new();
+            let mut coalescer = OutputCoalescer::new();
+            while let Ok(chunk) = rx.recv() {
+                let data = drain_utf8_stream(&mut pending, &chunk);
+                if let Some(batch) = coalescer.push(&data, Instant::now()) {
+                    emit_terminal_output(
+                        &emitter_app,
+                        &emitter_session_id,
+                        &emitter_terminal_id,
+                        batch,
+                    );
+                    continue;
+                }
+                let deadline = Instant::now() + TERMINAL_COALESCE_MAX_WAIT;
+                while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+                    match rx.recv_timeout(remaining) {
+                        Ok(next_chunk) => {
+                            let next_data = drain_utf8_stream(&mut pending, &next_chunk);
+                            if let Some(batch) = coalescer.push(&next_data, Instant::now()) {
+                                emit_terminal_output(
+                                    &emitter_app,
+                                    &emitter_session_id,
+                                    &emitter_terminal_id,
+                                    batch,
+                                );
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                if let Some(batch) = coalescer.flush() {
+                    emit_terminal_output(
+                        &emitter_app,
+                        &emitter_session_id,
+                        &emitter_terminal_id,
+                        batch,
+                    );
+                }
+            }
+            if let Some(batch) = coalescer.flush() {
+                emit_terminal_output(
+                    &emitter_app,
+                    &emitter_session_id,
+                    &emitter_terminal_id,
+                    batch,
+                );
+            }
+            if !pending.is_empty() {
+                let data = String::from_utf8_lossy(&pending).to_string();
+                emit_terminal_output(
+                    &emitter_app,
+                    &emitter_session_id,
+                    &emitter_terminal_id,
+                    data,
+                );
+            }
+        });
+
         let mut buffer = [0_u8; 8192];
-        let mut pending = Vec::new();
         let mut close_message = None;
 
         while !stop.load(Ordering::SeqCst) {
@@ -873,16 +990,8 @@ fn start_local_terminal_reader(
                     break;
                 }
                 Ok(bytes_read) => {
-                    let data = drain_utf8_stream(&mut pending, &buffer[..bytes_read]);
-                    if !data.is_empty() {
-                        let _ = app.emit(
-                            "terminal-output",
-                            TerminalOutputPayload {
-                                session_id: session_id.clone(),
-                                terminal_id: terminal_id.clone(),
-                                data,
-                            },
-                        );
+                    if tx.send(buffer[..bytes_read].to_vec()).is_err() {
+                        break;
                     }
                 }
                 Err(error) if error.kind() == ErrorKind::Interrupted => continue,
@@ -895,17 +1004,8 @@ fn start_local_terminal_reader(
             }
         }
 
-        if !pending.is_empty() {
-            let data = String::from_utf8_lossy(&pending).to_string();
-            let _ = app.emit(
-                "terminal-output",
-                TerminalOutputPayload {
-                    session_id: session_id.clone(),
-                    terminal_id: terminal_id.clone(),
-                    data,
-                },
-            );
-        }
+        drop(tx);
+        let _ = emitter.join();
         finish_terminal_reader(&app, session_id, terminal_id, close_message, false, &reader_state);
     });
 }
@@ -1590,5 +1690,30 @@ mod tests {
             output.extend_from_slice(&buffer[..count]);
         }
         assert!(String::from_utf8_lossy(&output).contains("__GPUTERM_LOCAL_PTY_OK__"));
+    }
+
+    #[test]
+    fn coalesces_terminal_output_until_size_window_or_flush() {
+        use super::{
+            OutputCoalescer, TERMINAL_COALESCE_MAX_BYTES, TERMINAL_COALESCE_MAX_WAIT,
+        };
+        use std::time::{Duration, Instant};
+
+        let mut coalescer = OutputCoalescer::new();
+        let start = Instant::now();
+
+        assert_eq!(coalescer.push("hello ", start), None);
+        assert_eq!(coalescer.push("world", start + Duration::from_millis(1)), None);
+        assert_eq!(
+            coalescer.push("!", start + TERMINAL_COALESCE_MAX_WAIT),
+            Some("hello world!".to_string())
+        );
+        assert_eq!(coalescer.flush(), None);
+
+        let big = "x".repeat(TERMINAL_COALESCE_MAX_BYTES);
+        assert_eq!(coalescer.push(&big, start), Some(big));
+
+        assert_eq!(coalescer.push("echo", start), None);
+        assert_eq!(coalescer.flush(), Some("echo".to_string()));
     }
 }

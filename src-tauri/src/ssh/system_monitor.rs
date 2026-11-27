@@ -65,7 +65,42 @@ const DEFAULT_IGNORED_FS_TYPES: &[&str] = &[
 // (`df -P -T -B1`, `nproc`, `lscpu`, `ps --sort`), which Debian/Ubuntu, RHEL/
 // Fedora, openSUSE, Arch and Gentoo all ship; BusyBox-only hosts degrade to
 // the /proc sections. The distribution name comes from os-release(5).
-const CPU_COMMAND: &str = "printf '__PROC_STAT__\\n'; cat /proc/stat 2>/dev/null; printf '\\n__LOADAVG__\\n'; cat /proc/loadavg 2>/dev/null; printf '\\n__CPUINFO__\\n'; cat /proc/cpuinfo 2>/dev/null; printf '\\n__NPROC_ALL__\\n'; nproc --all 2>/dev/null || true; printf '\\n__NPROC_ONLINE__\\n'; nproc 2>/dev/null || true; printf '\\n__LSCPU__\\n'; lscpu 2>/dev/null || true";
+
+/// Per-connection static host invariants (hostname, CPU model, physical/logical
+/// core counts, static fallback clock) queried once per connection instead of
+/// every poll cycle.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct HostStaticInfo {
+    pub(crate) hostname: Option<String>,
+    pub(crate) cpu_model: Option<String>,
+    pub(crate) total_cores: Option<u64>,
+    pub(crate) online_cores: Option<u64>,
+    pub(crate) fallback_clock_ghz: Option<f64>,
+}
+
+fn linux_static_command() -> String {
+    format!(
+        "printf '__HOSTNAME__\\n'; hostname 2>/dev/null || uname -n 2>/dev/null || true; \
+         printf '\\n__OS_RELEASE__\\n'; {os_release}; \
+         printf '\\n__CPUINFO__\\n'; cat /proc/cpuinfo 2>/dev/null || true; \
+         printf '\\n__NPROC_ALL__\\n'; nproc --all 2>/dev/null || true; \
+         printf '\\n__NPROC_ONLINE__\\n'; nproc 2>/dev/null || true; \
+         printf '\\n__LSCPU__\\n'; lscpu 2>/dev/null || true",
+        os_release = OS_RELEASE_COMMAND,
+    )
+}
+
+fn linux_telemetry_command() -> String {
+    format!(
+        "printf '__PROC_STAT__\\n'; cat /proc/stat 2>/dev/null || true; \
+         printf '\\n__LOADAVG__\\n'; cat /proc/loadavg 2>/dev/null || true; \
+         printf '\\n__CPU_MHZ__\\n'; grep '^cpu MHz' /proc/cpuinfo 2>/dev/null || true; \
+         printf '\\n__MEMINFO__\\n'; cat /proc/meminfo 2>/dev/null || true; \
+         printf '\\n__DF__\\n'; df -P -T -B1 2>/dev/null || true; \
+         printf '\\n__USERS__\\n'; {users}",
+        users = USERS_COMMAND,
+    )
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -342,6 +377,7 @@ pub fn start(
             let mut thermal_probe = None;
             // Outer None until read; the inner value is what the host reported.
             let mut os_release: Option<Option<OsRelease>> = None;
+            let mut host_static: Option<HostStaticInfo> = None;
             let mut host_os: Option<RemoteOs> = None;
             let mut consecutive_total_failures = 0_u32;
             while !stop.load(Ordering::SeqCst) {
@@ -372,6 +408,7 @@ pub fn start(
                     &mut gpu_probe,
                     &mut thermal_probe,
                     &mut os_release,
+                    &mut host_static,
                     &mut agent_state,
                 );
                 let all_failed = telemetry_all_failed(&telemetry);
@@ -421,6 +458,7 @@ pub fn start_local(
         // drivetemp` after start-up is picked up on restart, not mid-session.
         let mut thermal_probe = None;
         let mut os_release: Option<Option<OsRelease>> = None;
+        let mut host_static: Option<HostStaticInfo> = None;
 
         while !stop.load(Ordering::SeqCst) {
             let settings_snapshot = settings
@@ -435,6 +473,7 @@ pub fn start_local(
                 &mut gpu_probe,
                 &mut thermal_probe,
                 &mut os_release,
+                &mut host_static,
                 &mut agent_state,
             );
             emit_telemetry(&app, telemetry);
@@ -654,6 +693,231 @@ impl RemoteTelemetry {
     }
 }
 
+#[derive(Debug, Default)]
+struct UnixBatchedTelemetry {
+    hostname: Option<String>,
+    cpu: Option<CpuMetric>,
+    memory: Option<MemoryMetric>,
+    disks: Vec<DiskMetric>,
+    users: Vec<RemoteUserSession>,
+}
+
+fn parse_linux_static_output(output: &str) -> (HostStaticInfo, Option<OsRelease>) {
+    let sections = split_sections(output);
+    let hostname = sections
+        .get("HOSTNAME")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let os_release = sections
+        .get("OS_RELEASE")
+        .and_then(|content| parse_os_release(content));
+    let cpuinfo = sections.get("CPUINFO").map(String::as_str).unwrap_or("");
+    let lscpu = sections.get("LSCPU").map(String::as_str).unwrap_or("");
+
+    let total_cores = sections
+        .get("NPROC_ALL")
+        .and_then(|content| parse_first_u64(content))
+        .or_else(|| parse_lscpu_cpu_count(lscpu))
+        .or_else(|| parse_cpuinfo_processor_count(cpuinfo));
+    let online_cores = sections
+        .get("NPROC_ONLINE")
+        .and_then(|content| parse_first_u64(content))
+        .or_else(|| parse_lscpu_online_count(lscpu))
+        .or(total_cores);
+    let cpu_model = parse_cpu_model(cpuinfo).or_else(|| parse_lscpu_value(lscpu, "Model name"));
+    let fallback_clock_ghz = parse_lscpu_cpu_mhz(lscpu).map(|mhz| mhz / 1000.0);
+
+    (
+        HostStaticInfo {
+            hostname,
+            cpu_model,
+            total_cores,
+            online_cores,
+            fallback_clock_ghz,
+        },
+        os_release,
+    )
+}
+
+fn parse_batched_users(sections: &std::collections::HashMap<String, String>) -> Vec<RemoteUserSession> {
+    // `USERS_COMMAND` prints `__LOGINCTL__` when `who` is empty and logind is
+    // available; `split_sections` splits that marker into its own section.
+    if let Some(loginctl) = sections.get("LOGINCTL") {
+        parse_loginctl_sessions(loginctl)
+    } else if let Some(users) = sections.get("USERS") {
+        parse_users_output(users)
+    } else {
+        Vec::new()
+    }
+}
+
+fn parse_linux_batched_telemetry(
+    output: &str,
+    static_info: Option<&HostStaticInfo>,
+    previous_cpu: &mut Option<CpuStatSample>,
+    errors: &mut TelemetryErrors,
+) -> UnixBatchedTelemetry {
+    let sections = split_sections(output);
+
+    let cpu_result = required_section(&sections, "PROC_STAT")
+        .and_then(parse_proc_stat_cpu_sample)
+        .map(|current_cpu| {
+            let usage_percent =
+                previous_cpu.and_then(|previous| calculate_cpu_usage(previous, current_cpu));
+            *previous_cpu = Some(current_cpu);
+
+            let load = sections
+                .get("LOADAVG")
+                .map(|content| parse_loadavg(content))
+                .unwrap_or((None, None, None));
+            let cpu_mhz = sections.get("CPU_MHZ").map(String::as_str).unwrap_or("");
+            let avg_clock_ghz = parse_average_clock(cpu_mhz)
+                .or_else(|| static_info.and_then(|info| info.fallback_clock_ghz));
+
+            CpuMetric {
+                model_name: static_info.and_then(|info| info.cpu_model.clone()),
+                usage_percent,
+                load_avg1: load.0,
+                load_avg5: load.1,
+                load_avg15: load.2,
+                total_cores: static_info.and_then(|info| info.total_cores),
+                online_cores: static_info.and_then(|info| info.online_cores),
+                avg_clock_ghz,
+            }
+        });
+    let cpu = match cpu_result {
+        Ok(metric) => Some(metric),
+        Err(error) => {
+            errors.cpu = Some(error);
+            None
+        }
+    };
+
+    let memory = match required_section(&sections, "MEMINFO").and_then(parse_meminfo) {
+        Ok(metric) => Some(metric),
+        Err(error) => {
+            errors.memory = Some(error);
+            None
+        }
+    };
+
+    let disks = match required_section(&sections, "DF").and_then(parse_df_output) {
+        Ok(disks) => sort_disks(disks),
+        Err(error) => {
+            errors.disk = Some(error);
+            Vec::new()
+        }
+    };
+
+    let users = parse_batched_users(&sections);
+
+    UnixBatchedTelemetry {
+        hostname: static_info.and_then(|info| info.hostname.clone()),
+        cpu,
+        memory,
+        disks,
+        users,
+    }
+}
+
+fn parse_macos_batched_telemetry(
+    output: &str,
+    static_info: Option<&HostStaticInfo>,
+    errors: &mut TelemetryErrors,
+) -> UnixBatchedTelemetry {
+    let sections = split_sections(output);
+
+    let cpu = match macos_monitor::parse_macos_cpu_sections(&sections, static_info) {
+        Ok(metric) => Some(metric),
+        Err(error) => {
+            errors.cpu = Some(error);
+            None
+        }
+    };
+    let memory = match macos_monitor::parse_macos_memory_sections(&sections) {
+        Ok(metric) => Some(metric),
+        Err(error) => {
+            errors.memory = Some(error);
+            None
+        }
+    };
+    let disks = match macos_monitor::parse_macos_disk_sections(&sections) {
+        Ok(disks) => sort_disks(disks),
+        Err(error) => {
+            errors.disk = Some(error);
+            Vec::new()
+        }
+    };
+    let users = parse_batched_users(&sections);
+
+    UnixBatchedTelemetry {
+        hostname: static_info.and_then(|info| info.hostname.clone()),
+        cpu,
+        memory,
+        disks,
+        users,
+    }
+}
+
+fn collect_unix_core<F>(
+    os: RemoteOs,
+    previous_cpu: &mut Option<CpuStatSample>,
+    os_release: &mut Option<Option<OsRelease>>,
+    host_static: &mut Option<HostStaticInfo>,
+    errors: &mut TelemetryErrors,
+    run_non_login: F,
+) -> UnixBatchedTelemetry
+where
+    F: Fn(&str) -> Result<String, String>,
+{
+    if host_static.is_none() {
+        match os {
+            RemoteOs::Linux => {
+                if let Ok(output) = run_non_login(&linux_static_command()) {
+                    let (info, release) = parse_linux_static_output(&output);
+                    *host_static = Some(info);
+                    if os_release.is_none() {
+                        *os_release = Some(release);
+                    }
+                }
+            }
+            RemoteOs::MacOs => {
+                if let Ok(output) = run_non_login(macos_monitor::MACOS_STATIC_COMMAND) {
+                    *host_static = Some(macos_monitor::parse_macos_static_output(&output));
+                }
+            }
+            RemoteOs::Windows => unreachable!("Windows telemetry is collected separately"),
+        }
+    }
+
+    let dynamic_cmd = match os {
+        RemoteOs::Linux => linux_telemetry_command(),
+        RemoteOs::MacOs => macos_monitor::MACOS_TELEMETRY_COMMAND.to_string(),
+        RemoteOs::Windows => unreachable!("Windows telemetry is collected separately"),
+    };
+
+    match run_non_login(&dynamic_cmd) {
+        Ok(output) => match os {
+            RemoteOs::Linux => {
+                parse_linux_batched_telemetry(&output, host_static.as_ref(), previous_cpu, errors)
+            }
+            RemoteOs::MacOs => {
+                parse_macos_batched_telemetry(&output, host_static.as_ref(), errors)
+            }
+            RemoteOs::Windows => unreachable!("Windows telemetry is collected separately"),
+        },
+        Err(error) => {
+            // Leave hostname as None on transport failure so `telemetry_all_failed`
+            // triggers reconnection even when `host_static` was cached earlier.
+            errors.cpu = Some(error.clone());
+            errors.memory = Some(error.clone());
+            errors.disk = Some(error.clone());
+            errors.users = Some(error);
+            UnixBatchedTelemetry::default()
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn collect_remote_telemetry(
     target: &SshTarget,
@@ -663,6 +927,7 @@ fn collect_remote_telemetry(
     gpu_probe: &mut Option<GpuProbe>,
     thermal_probe: &mut Option<ThermalProbe>,
     os_release: &mut Option<Option<OsRelease>>,
+    host_static: &mut Option<HostStaticInfo>,
     agent_state: &mut AgentMonitorState,
 ) -> RemoteTelemetry {
     if os == RemoteOs::Windows {
@@ -677,68 +942,14 @@ fn collect_remote_telemetry(
     }
     let mut errors = TelemetryErrors::default();
 
-    if os == RemoteOs::Linux && os_release.is_none() {
-        // A failed read is retried next poll; a host without the file is
-        // remembered as unnamed.
-        if let Ok(output) = run_remote_command(session, OS_RELEASE_COMMAND) {
-            *os_release = Some(parse_os_release(&output));
-        }
-    }
-
-    let hostname = run_remote_command(
-        session,
-        "hostname 2>/dev/null || uname -n 2>/dev/null || true",
-    )
-    .ok()
-    .map(|hostname| hostname.trim().to_string())
-    .filter(|hostname| !hostname.is_empty());
-
-    let cpu_result = match os {
-        RemoteOs::Linux => run_remote_command(session, CPU_COMMAND)
-            .and_then(|output| parse_cpu_command_output(&output, previous_cpu)),
-        RemoteOs::MacOs => run_remote_command(session, macos_monitor::MACOS_CPU_COMMAND)
-            .and_then(|output| macos_monitor::parse_macos_cpu_output(&output)),
-        RemoteOs::Windows => unreachable!("Windows telemetry is collected above"),
-    };
-    let cpu = match cpu_result {
-        Ok(metric) => Some(metric),
-        Err(error) => {
-            errors.cpu = Some(error);
-            None
-        }
-    };
-
-    let memory_result = match os {
-        RemoteOs::Linux => run_remote_command(session, "cat /proc/meminfo 2>/dev/null")
-            .and_then(|output| parse_meminfo(&output)),
-        RemoteOs::MacOs => run_remote_command(session, macos_monitor::MACOS_MEMORY_COMMAND)
-            .and_then(|output| macos_monitor::parse_macos_memory_output(&output)),
-        RemoteOs::Windows => unreachable!("Windows telemetry is collected above"),
-    };
-    let memory = match memory_result {
-        Ok(metric) => Some(metric),
-        Err(error) => {
-            errors.memory = Some(error);
-            None
-        }
-    };
-
-    let disks_result = match os {
-        RemoteOs::Linux => run_remote_command(session, "df -P -T -B1 2>/dev/null")
-            .and_then(|output| parse_df_output(&output)),
-        RemoteOs::MacOs => run_remote_command(session, macos_monitor::MACOS_DISK_COMMAND)
-            .and_then(|output| macos_monitor::parse_macos_disk_output(&output)),
-        RemoteOs::Windows => unreachable!("Windows telemetry is collected above"),
-    };
-    let disks = match disks_result {
-        // The frontend filters by the user's disk_ignore_fs_types setting so the
-        // "show hidden filesystems" toggle can reveal them; the backend only sorts.
-        Ok(disks) => sort_disks(disks),
-        Err(error) => {
-            errors.disk = Some(error);
-            Vec::new()
-        }
-    };
+    let core = collect_unix_core(
+        os,
+        previous_cpu,
+        os_release,
+        host_static,
+        &mut errors,
+        |command| run_remote_command_non_login(session, command),
+    );
 
     let thermal = collect_unix_thermal(os, thermal_probe, &mut errors, |command| {
         run_remote_command(session, command)
@@ -752,13 +963,6 @@ fn collect_remote_telemetry(
         }
     };
 
-    let users = match run_remote_command(session, USERS_COMMAND) {
-        Ok(output) => parse_users_output(&output),
-        Err(error) => {
-            errors.users = Some(error);
-            Vec::new()
-        }
-    };
     let agents = match agent_monitor::collect_remote_agents(session, target, os, agent_state) {
         Ok(metrics) => metrics,
         Err(error) => {
@@ -770,19 +974,20 @@ fn collect_remote_telemetry(
     RemoteTelemetry {
         session_id: target.session_id.clone(),
         timestamp: timestamp(),
-        hostname,
-        cpu,
-        memory,
+        hostname: core.hostname,
+        cpu: core.cpu,
+        memory: core.memory,
         thermal,
-        disks,
+        disks: core.disks,
         gpu,
-        users,
+        users: core.users,
         agents,
         os_release: os_release.clone().flatten(),
         errors,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_local_telemetry(
     session_id: &str,
     os: RemoteOs,
@@ -790,6 +995,7 @@ fn collect_local_telemetry(
     gpu_probe: &mut Option<GpuProbe>,
     thermal_probe: &mut Option<ThermalProbe>,
     os_release: &mut Option<Option<OsRelease>>,
+    host_static: &mut Option<HostStaticInfo>,
     agent_state: &mut AgentMonitorState,
 ) -> RemoteTelemetry {
     if os == RemoteOs::Windows {
@@ -803,48 +1009,14 @@ fn collect_local_telemetry(
     }
 
     let mut errors = TelemetryErrors::default();
-    if os == RemoteOs::Linux && os_release.is_none() {
-        if let Ok(output) = run_local_command_for(os, OS_RELEASE_COMMAND) {
-            *os_release = Some(parse_os_release(&output));
-        }
-    }
-    let hostname =
-        run_local_command_for(os, "hostname 2>/dev/null || uname -n 2>/dev/null || true")
-            .ok()
-            .map(|hostname| hostname.trim().to_string())
-            .filter(|hostname| !hostname.is_empty());
-
-    let cpu_result = match os {
-        RemoteOs::Linux => run_local_command_for(os, CPU_COMMAND)
-            .and_then(|output| parse_cpu_command_output(&output, previous_cpu)),
-        RemoteOs::MacOs => run_local_command_for(os, macos_monitor::MACOS_CPU_COMMAND)
-            .and_then(|output| macos_monitor::parse_macos_cpu_output(&output)),
-        RemoteOs::Windows => unreachable!("Windows telemetry is collected above"),
-    };
-    let cpu = cpu_result.map_err(|error| errors.cpu = Some(error)).ok();
-
-    let memory_result = match os {
-        RemoteOs::Linux => run_local_command_for(os, "cat /proc/meminfo 2>/dev/null")
-            .and_then(|output| parse_meminfo(&output)),
-        RemoteOs::MacOs => run_local_command_for(os, macos_monitor::MACOS_MEMORY_COMMAND)
-            .and_then(|output| macos_monitor::parse_macos_memory_output(&output)),
-        RemoteOs::Windows => unreachable!("Windows telemetry is collected above"),
-    };
-    let memory = memory_result
-        .map_err(|error| errors.memory = Some(error))
-        .ok();
-
-    let disks_result = match os {
-        RemoteOs::Linux => run_local_command_for(os, "df -P -T -B1 2>/dev/null")
-            .and_then(|output| parse_df_output(&output)),
-        RemoteOs::MacOs => run_local_command_for(os, macos_monitor::MACOS_DISK_COMMAND)
-            .and_then(|output| macos_monitor::parse_macos_disk_output(&output)),
-        RemoteOs::Windows => unreachable!("Windows telemetry is collected above"),
-    };
-    let disks = disks_result
-        .map(sort_disks)
-        .map_err(|error| errors.disk = Some(error))
-        .unwrap_or_default();
+    let core = collect_unix_core(
+        os,
+        previous_cpu,
+        os_release,
+        host_static,
+        &mut errors,
+        |command| run_local_command_non_login(os, command),
+    );
 
     let thermal = collect_unix_thermal(os, thermal_probe, &mut errors, |command| {
         run_local_command_for(os, command)
@@ -853,10 +1025,6 @@ fn collect_local_telemetry(
     let gpu = collect_local_gpu_metrics(os, gpu_probe)
         .map_err(|error| errors.gpu = Some(error))
         .unwrap_or_default();
-    let users = run_local_command_for(os, USERS_COMMAND)
-        .map(|output| parse_users_output(&output))
-        .map_err(|error| errors.users = Some(error))
-        .unwrap_or_default();
     let agents = agent_monitor::collect_local_agents(os, agent_state)
         .map_err(|error| errors.agents = Some(error))
         .unwrap_or_default();
@@ -864,13 +1032,13 @@ fn collect_local_telemetry(
     RemoteTelemetry {
         session_id: session_id.to_string(),
         timestamp: timestamp(),
-        hostname,
-        cpu,
-        memory,
+        hostname: core.hostname,
+        cpu: core.cpu,
+        memory: core.memory,
         thermal,
-        disks,
+        disks: core.disks,
         gpu,
-        users,
+        users: core.users,
         agents,
         os_release: os_release.clone().flatten(),
         errors,
@@ -1527,6 +1695,12 @@ pub(crate) fn run_remote_command(session: &Session, command: &str) -> Result<Str
     run_remote_command_with_budget(session, command, COMMAND_TIMEOUT_SECS)
 }
 
+/// Runs a POSIX collector in a non-login `sh -c` shell so telemetry polls do
+/// not pay the cost of sourcing login profiles every cycle.
+fn run_remote_command_non_login(session: &Session, command: &str) -> Result<String, String> {
+    run_remote_command_inner(session, command, None, COMMAND_TIMEOUT_SECS, false)
+}
+
 /// Runs one POSIX collector with an explicit time budget.
 ///
 /// The remote `timeout` wrapper and libssh2's own read timeout are raised
@@ -1551,12 +1725,24 @@ pub(crate) fn run_remote_command_with_input(
     input: Option<&[u8]>,
     budget_secs: u64,
 ) -> Result<String, String> {
+    run_remote_command_inner(session, command, input, budget_secs, true)
+}
+
+fn run_remote_command_inner(
+    session: &Session,
+    command: &str,
+    input: Option<&[u8]>,
+    budget_secs: u64,
+    login_shell: bool,
+) -> Result<String, String> {
     // `timeout` is missing on macOS <= 12, so fall back to a bare shell there;
     // libssh2's session timeout still bounds the fallback branch.
     let quoted = shell_quote(command);
+    let shell_flag = if login_shell { "-lc" } else { "-c" };
     let wrapped = format!(
-        "command -v timeout >/dev/null 2>&1 && exec timeout {secs}s sh -lc {quoted}; exec sh -lc {quoted}",
+        "command -v timeout >/dev/null 2>&1 && exec timeout {secs}s sh {flag} {quoted}; exec sh {flag} {quoted}",
         secs = budget_secs,
+        flag = shell_flag,
         quoted = quoted
     );
 
@@ -1608,6 +1794,10 @@ pub(crate) fn run_local_command_for(os: RemoteOs, command: &str) -> Result<Strin
     run_local_command_with_timeout(os, command, LOCAL_COMMAND_TIMEOUT)
 }
 
+fn run_local_command_non_login(os: RemoteOs, command: &str) -> Result<String, String> {
+    run_local_command_inner(os, command, LOCAL_COMMAND_TIMEOUT, false)
+}
+
 fn spawn_pipe_reader<R: Read + Send + 'static>(
     pipe: Option<R>,
 ) -> thread::JoinHandle<std::io::Result<Vec<u8>>> {
@@ -1632,7 +1822,16 @@ pub(crate) fn run_local_command_with_timeout(
     command: &str,
     timeout: Duration,
 ) -> Result<String, String> {
-    let mut child = local_collector_command(os, command)
+    run_local_command_inner(os, command, timeout, true)
+}
+
+fn run_local_command_inner(
+    os: RemoteOs,
+    command: &str,
+    timeout: Duration,
+    login_shell: bool,
+) -> Result<String, String> {
+    let mut child = local_collector_command_with_shell(os, command, login_shell)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -1686,7 +1885,16 @@ pub(crate) fn run_local_command_with_timeout(
     Ok(String::from_utf8_lossy(&stdout).into_owned())
 }
 
+#[cfg(test)]
 fn local_collector_command(os: RemoteOs, command: &str) -> Command {
+    local_collector_command_with_shell(os, command, true)
+}
+
+fn local_collector_command_with_shell(
+    os: RemoteOs,
+    command: &str,
+    login_shell: bool,
+) -> Command {
     let process = match os {
         RemoteOs::Windows => {
             let mut process = Command::new(windows_powershell_executable());
@@ -1704,7 +1912,7 @@ fn local_collector_command(os: RemoteOs, command: &str) -> Command {
         }
         RemoteOs::Linux | RemoteOs::MacOs => {
             let mut process = Command::new("sh");
-            process.args(["-lc", command]);
+            process.args([if login_shell { "-lc" } else { "-c" }, command]);
             process
         }
     };
@@ -2018,6 +2226,7 @@ pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+#[cfg(test)]
 pub fn parse_cpu_command_output(
     output: &str,
     previous_cpu: &mut Option<CpuStatSample>,
@@ -2588,6 +2797,7 @@ mod tests {
         let mut gpu_probe = None;
         let mut thermal_probe = None;
         let mut os_release = None;
+        let mut host_static = None;
         let mut agent_state = AgentMonitorState::default();
         let telemetry = collect_local_telemetry(
             "local-test",
@@ -2596,6 +2806,7 @@ mod tests {
             &mut gpu_probe,
             &mut thermal_probe,
             &mut os_release,
+            &mut host_static,
             &mut agent_state,
         );
 
@@ -2797,5 +3008,158 @@ mod tests {
             run_local_command_with_timeout(local_os(), "sleep 5", Duration::from_millis(150))
                 .expect_err("sleeping command should time out");
         assert!(error.contains("timed out"), "{error}");
+    }
+
+    #[test]
+    fn parses_linux_static_and_batched_telemetry_with_cached_invariants() {
+        let static_output = "\
+__HOSTNAME__
+gpu-node-01
+__OS_RELEASE__
+NAME=\"Ubuntu\"
+ID=ubuntu
+VERSION_ID=\"24.04\"
+PRETTY_NAME=\"Ubuntu 24.04 LTS\"
+__CPUINFO__
+processor : 0
+model name : AMD EPYC 9654
+processor : 1
+model name : AMD EPYC 9654
+__NPROC_ALL__
+192
+__NPROC_ONLINE__
+190
+__LSCPU__
+CPU(s): 192
+On-line CPU(s) list: 0-189
+Model name: AMD EPYC 9654
+CPU max MHz: 3700.0000
+";
+        let (static_info, os_release) = parse_linux_static_output(static_output);
+        assert_eq!(static_info.hostname.as_deref(), Some("gpu-node-01"));
+        assert_eq!(static_info.cpu_model.as_deref(), Some("AMD EPYC 9654"));
+        assert_eq!(static_info.total_cores, Some(192));
+        assert_eq!(static_info.online_cores, Some(190));
+        assert_eq!(static_info.fallback_clock_ghz, Some(3.7));
+        assert_eq!(
+            os_release.as_ref().map(|r| r.id.as_str()),
+            Some("ubuntu")
+        );
+
+        let dynamic_output = "\
+__PROC_STAT__
+cpu  100 0 0 100 0 0 0 0 0 0
+__LOADAVG__
+3.50 2.10 1.80 2/400 1234
+__CPU_MHZ__
+cpu MHz\t\t: 3200.000
+cpu MHz\t\t: 3600.000
+__MEMINFO__
+MemTotal:       262144000 kB
+MemFree:         1024000 kB
+MemAvailable:   131072000 kB
+SwapTotal:       8388608 kB
+SwapFree:        4194304 kB
+__DF__
+Filesystem Type 1-blocks Used Available Use% Mounted on
+/dev/nvme0n1p1 ext4 1000 400 600 40% /
+server:/data nfs 2000 1000 1000 50% /data
+__USERS__
+alice    pts/0        2026-07-15 09:12 (10.0.0.5)
+";
+        let mut previous = Some(CpuStatSample {
+            idle: 50,
+            total: 100,
+        });
+        let mut errors = TelemetryErrors::default();
+        let parsed = parse_linux_batched_telemetry(
+            dynamic_output,
+            Some(&static_info),
+            &mut previous,
+            &mut errors,
+        );
+        assert!(errors.cpu.is_none());
+        assert!(errors.memory.is_none());
+        assert!(errors.disk.is_none());
+        assert_eq!(parsed.hostname.as_deref(), Some("gpu-node-01"));
+        let cpu = parsed.cpu.unwrap();
+        assert_eq!(cpu.model_name.as_deref(), Some("AMD EPYC 9654"));
+        assert_eq!(cpu.total_cores, Some(192));
+        assert_eq!(cpu.online_cores, Some(190));
+        assert_eq!(cpu.usage_percent, Some(50.0));
+        assert_eq!(cpu.load_avg1, Some(3.5));
+        assert_eq!(cpu.avg_clock_ghz, Some(3.4));
+        assert_eq!(parsed.memory.unwrap().used_mi_b, Some(128_000));
+        assert_eq!(parsed.disks.len(), 2);
+        assert_eq!(parsed.disks[0].mount_point, "/");
+        assert_eq!(parsed.users.len(), 1);
+        assert_eq!(parsed.users[0].user, "alice");
+
+        // When __CPU_MHZ__ is absent (e.g. ARM64), fallback_clock_ghz from static info is used,
+        // and __LOGINCTL__ inside __USERS__ still parses logind sessions.
+        let loginctl_batch = format!(
+            "__PROC_STAT__\ncpu  200 0 0 200 0 0 0 0 0 0\n__MEMINFO__\nMemTotal: 1024 kB\n__DF__\nFilesystem Type 1-blocks Used Available Use% Mounted on\n/dev/sda1 ext4 100 50 50 50% /\n__USERS__\n{LOGINCTL_SESSIONS}"
+        );
+        let mut errors = TelemetryErrors::default();
+        let parsed = parse_linux_batched_telemetry(
+            &loginctl_batch,
+            Some(&static_info),
+            &mut previous,
+            &mut errors,
+        );
+        assert_eq!(parsed.cpu.unwrap().avg_clock_ghz, Some(3.7));
+        assert_eq!(parsed.users.len(), 2);
+        assert_eq!(parsed.users[0].user, "alice");
+        assert_eq!(parsed.users[1].user, "bob");
+    }
+
+    #[test]
+    fn collect_unix_core_caches_static_probe_and_clears_hostname_on_failure() {
+        let mut previous_cpu = None;
+        let mut os_release = None;
+        let mut host_static = None;
+        let static_calls = std::cell::Cell::new(0usize);
+        let dynamic_calls = std::cell::Cell::new(0usize);
+
+        let static_output = "__HOSTNAME__\nnode01\n__OS_RELEASE__\nID=debian\nPRETTY_NAME=Debian\n__NPROC_ALL__\n8\n__NPROC_ONLINE__\n8\n";
+        let dynamic_output = "__PROC_STAT__\ncpu 10 0 0 90 0 0 0 0 0 0\n__MEMINFO__\nMemTotal: 2048 kB\n__DF__\nFilesystem Type 1-blocks Used Available Use% Mounted on\n/dev/sda1 ext4 100 20 80 20% /\n__USERS__\n";
+
+        for _ in 0..2 {
+            let mut errors = TelemetryErrors::default();
+            let core = collect_unix_core(
+                RemoteOs::Linux,
+                &mut previous_cpu,
+                &mut os_release,
+                &mut host_static,
+                &mut errors,
+                |cmd| {
+                    if cmd.contains("__HOSTNAME__") {
+                        static_calls.set(static_calls.get() + 1);
+                        Ok(static_output.to_string())
+                    } else {
+                        dynamic_calls.set(dynamic_calls.get() + 1);
+                        Ok(dynamic_output.to_string())
+                    }
+                },
+            );
+            assert_eq!(core.hostname.as_deref(), Some("node01"));
+        }
+        assert_eq!(static_calls.get(), 1);
+        assert_eq!(dynamic_calls.get(), 2);
+
+        // If the transport later fails, hostname must be None so reconnect logic triggers.
+        let mut errors = TelemetryErrors::default();
+        let failed = collect_unix_core(
+            RemoteOs::Linux,
+            &mut previous_cpu,
+            &mut os_release,
+            &mut host_static,
+            &mut errors,
+            |_| Err("transport closed".to_string()),
+        );
+        assert!(failed.hostname.is_none());
+        assert!(errors.cpu.is_some());
+        assert!(errors.memory.is_some());
+        assert!(errors.disk.is_some());
     }
 }

@@ -1366,7 +1366,8 @@ fn emit_progress(
     error: Option<String>,
     folder: Option<&FolderProgress>,
 ) {
-    let _ = app.emit(
+    let _ = app.emit_to(
+        "main",
         "sftp-progress",
         SftpProgressPayload {
             transfer_id: request.transfer_id.clone(),

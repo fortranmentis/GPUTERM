@@ -79,9 +79,19 @@ rm -f "$e""#,
     )
 }
 
+fn normalize_root_path(path: &str) -> &str {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/"
+    } else {
+        trimmed
+    }
+}
+
 fn child_name(root: &str, child: &str) -> String {
-    let prefix = if root.ends_with('/') {
-        root.to_string()
+    let root = normalize_root_path(root);
+    let prefix = if root == "/" {
+        "/".to_string()
     } else {
         format!("{root}/")
     };
@@ -89,6 +99,7 @@ fn child_name(root: &str, child: &str) -> String {
 }
 
 fn parse_sizes(root: &str, output: &str) -> Result<DirectorySizes, String> {
+    let root = normalize_root_path(root);
     let mut total_kib = None;
     let mut entries = Vec::new();
     let mut counted = 0usize;
@@ -111,12 +122,13 @@ fn parse_sizes(root: &str, output: &str) -> Result<DirectorySizes, String> {
         let Ok(kib) = kib.trim().parse::<u64>() else {
             continue;
         };
-        if path == root {
+        let normalized_path = normalize_root_path(path);
+        if normalized_path == root {
             total_kib = Some(kib);
         } else {
             entries.push(DirectoryEntrySize {
-                name: child_name(root, path),
-                path: path.to_string(),
+                name: child_name(root, normalized_path),
+                path: normalized_path.to_string(),
                 bytes: kib.saturating_mul(1024),
             });
         }
@@ -154,6 +166,20 @@ fn valid_path(path: &str) -> bool {
     path.starts_with('/') && path.len() <= MAX_PATH_LEN && !path.contains(['\0', '\n'])
 }
 
+fn validate_path_for_os(os: RemoteOs, path: &str, is_local: bool) -> Result<String, String> {
+    if os == RemoteOs::Windows {
+        return Err(if is_local {
+            "Folder sizes are not available on Windows yet".to_string()
+        } else {
+            "Folder sizes are not available for Windows hosts yet".to_string()
+        });
+    }
+    if !valid_path(path) {
+        return Err("Choose an absolute folder path".to_string());
+    }
+    Ok(normalize_root_path(path).to_string())
+}
+
 /// Releases the per-session slot however the scan ends.
 struct RunningGuard(String);
 
@@ -171,9 +197,6 @@ pub async fn directory_sizes(
     session_id: String,
     path: String,
 ) -> Result<DirectorySizes, String> {
-    if !valid_path(&path) {
-        return Err("Choose an absolute folder path".to_string());
-    }
     let is_local = state
         .active_connections
         .lock()
@@ -202,30 +225,32 @@ pub async fn directory_sizes(
 
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = guard;
-        let script = scan_script(&path);
-        let output = match target {
+        let (normalized_path, output) = match target {
             None => {
                 let os = local_os();
-                if os == RemoteOs::Windows {
-                    return Err("Folder sizes are not available on Windows yet".to_string());
-                }
-                run_local_command_with_timeout(
+                let normalized_path = validate_path_for_os(os, &path, true)?;
+                let script = scan_script(&normalized_path);
+                let output = run_local_command_with_timeout(
                     os,
                     &script,
                     Duration::from_secs(COMMAND_BUDGET_SECS),
-                )?
+                )?;
+                (normalized_path, output)
             }
             Some(target) => {
                 let connection = open_ssh_session(&target)?;
-                if resolve_remote_os(&os_cache, &target.session_id, &connection.session)
-                    == RemoteOs::Windows
-                {
-                    return Err("Folder sizes are not available for Windows hosts yet".to_string());
-                }
-                run_remote_command_with_budget(&connection.session, &script, COMMAND_BUDGET_SECS)?
+                let os = resolve_remote_os(&os_cache, &target.session_id, &connection.session);
+                let normalized_path = validate_path_for_os(os, &path, false)?;
+                let script = scan_script(&normalized_path);
+                let output = run_remote_command_with_budget(
+                    &connection.session,
+                    &script,
+                    COMMAND_BUDGET_SECS,
+                )?;
+                (normalized_path, output)
             }
         };
-        parse_sizes(&path, &output)
+        parse_sizes(&normalized_path, &output)
     })
     .await
     .map_err(|error| format!("Folder size task failed: {}", error))?
@@ -313,6 +338,49 @@ X 0
         assert!(valid_path("/mnt/data disk"));
         assert!(!valid_path("data"));
         assert!(!valid_path("/a\nb"));
+    }
+
+    #[test]
+    fn normalizes_trailing_slashes_for_root_matching() {
+        assert_eq!(normalize_root_path("/"), "/");
+        assert_eq!(normalize_root_path("///"), "/");
+        assert_eq!(normalize_root_path("/data/"), "/data");
+        assert_eq!(normalize_root_path("/data///"), "/data");
+
+        let output = "100\t/data\n40\t/data/models\nN 2\nX 0\n";
+        let sizes = parse_sizes("/data/", output).unwrap();
+        assert!(sizes.complete);
+        assert_eq!(sizes.path, "/data");
+        assert_eq!(sizes.total_bytes, Some(100 * 1024));
+        assert_eq!(sizes.entries.len(), 1);
+        assert_eq!(sizes.entries[0].name, "models");
+
+        let trailing_du_output = "100\t/data/\n40\t/data/models/\nN 2\nX 0\n";
+        let sizes = parse_sizes("/data", trailing_du_output).unwrap();
+        assert!(sizes.complete);
+        assert_eq!(sizes.total_bytes, Some(100 * 1024));
+        assert_eq!(sizes.entries[0].name, "models");
+        assert_eq!(sizes.entries[0].path, "/data/models");
+    }
+
+    #[test]
+    fn windows_os_check_precedes_posix_path_validation() {
+        assert_eq!(
+            validate_path_for_os(RemoteOs::Windows, "C:\\Users", false).unwrap_err(),
+            "Folder sizes are not available for Windows hosts yet"
+        );
+        assert_eq!(
+            validate_path_for_os(RemoteOs::Windows, "C:\\Users", true).unwrap_err(),
+            "Folder sizes are not available on Windows yet"
+        );
+        assert_eq!(
+            validate_path_for_os(RemoteOs::Linux, "C:\\Users", false).unwrap_err(),
+            "Choose an absolute folder path"
+        );
+        assert_eq!(
+            validate_path_for_os(RemoteOs::Linux, "/data/", false).unwrap(),
+            "/data"
+        );
     }
 
     #[cfg(unix)]

@@ -259,8 +259,11 @@ export function TerminalPane() {
   const sessionPickerRef = useRef<HTMLDivElement | null>(null);
   const tmuxPickerRef = useRef<HTMLDivElement | null>(null);
   const lastTerminalViewRevisionRef = useRef<number | null>(null);
+  const paneResizeCleanupRef = useRef<(() => void) | null>(null);
   const [paneLayout, setPaneLayout] = useState<TerminalLayoutNode | null>(null);
   const [focusedTerminalId, setFocusedTerminalId] = useState<string | null>(null);
+  const focusedTerminalIdRef = useRef<string | null>(null);
+  focusedTerminalIdRef.current = focusedTerminalId;
   // Panes whose shell or channel ended, with the reason the backend reported.
   // Without this the pane just silently stops accepting input.
   const [closedPanes, setClosedPanes] = useState<Record<string, string>>({});
@@ -577,14 +580,18 @@ export function TerminalPane() {
         fitAddon,
         searchAddon,
         // The addon is the authority on match counts; deriving them here would
-        // only ever approximate what it already knows.
-        onSearchResults: searchAddon.onDidChangeResults((results) =>
+        // only ever approximate what it already knows. Ignore updates from
+        // non-focused panes so background search state cannot overwrite the bar.
+        onSearchResults: searchAddon.onDidChangeResults((results) => {
+          if (focusedTerminalIdRef.current !== terminalId) {
+            return;
+          }
           setSearchMatches(
             results
               ? { current: results.resultIndex + 1, total: results.resultCount }
               : null,
-          ),
-        ),
+          );
+        }),
         onData: { dispose() {} },
         imeWorkaround,
         linkProvider,
@@ -737,6 +744,7 @@ export function TerminalPane() {
     return () => {
       disposed = true;
       unlisteners.forEach((unlisten) => unlisten());
+      paneResizeCleanupRef.current?.();
       if (fitTimerRef.current != null) {
         window.clearTimeout(fitTimerRef.current);
         fitTimerRef.current = null;
@@ -746,6 +754,7 @@ export function TerminalPane() {
         entry.onData.dispose();
         entry.onSearchResults.dispose();
         entry.imeWorkaround.dispose();
+        entry.linkProvider.dispose();
         entry.searchAddon.dispose();
         entry.terminal.dispose();
       }
@@ -787,6 +796,7 @@ export function TerminalPane() {
   ) => {
     event.preventDefault();
     event.stopPropagation();
+    paneResizeCleanupRef.current?.();
     const splitElement = event.currentTarget.parentElement;
     if (!splitElement) {
       return;
@@ -809,15 +819,22 @@ export function TerminalPane() {
       );
       scheduleFit(0);
     };
-    const handleUp = () => {
+    const cleanup = (refit: boolean) => {
       window.removeEventListener("mousemove", handleMove);
       window.removeEventListener("mouseup", handleUp);
+      window.removeEventListener("blur", handleUp);
       document.body.style.userSelect = previousUserSelect;
       document.body.style.cursor = previousCursor;
-      scheduleFit(20);
+      paneResizeCleanupRef.current = null;
+      if (refit) {
+        scheduleFit(20);
+      }
     };
+    const handleUp = () => cleanup(true);
+    paneResizeCleanupRef.current = () => cleanup(false);
     window.addEventListener("mousemove", handleMove);
     window.addEventListener("mouseup", handleUp);
+    window.addEventListener("blur", handleUp);
   };
 
   /**
@@ -1140,28 +1157,6 @@ export function TerminalPane() {
       instancesRef.current.get(focusedTerminalId)?.terminal.focus();
     }
   };
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "f") {
-        return;
-      }
-      // Ctrl+F belongs to whatever field the user is typing in — the path box,
-      // the profile form — unless that field is this search bar. The target is
-      // not always an element: with focus nowhere it is the window itself.
-      const { target } = event;
-      if (target instanceof Element) {
-        const field = target.closest("input, textarea, select");
-        if (field && !target.closest(".terminal-search-bar")) {
-          return;
-        }
-      }
-      event.preventDefault();
-      openSearch();
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [openSearch]);
 
   // Restyle every live pane when the theme, font or size changes, then refit:
   // a new font size changes how many rows and columns fit.

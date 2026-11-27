@@ -55,10 +55,109 @@ export function tunnelTarget(url: string, hostNames: string[]): TunnelTarget | n
   };
 }
 
+/** Display cell width of a single Unicode code point in a terminal grid. */
+export function charCellWidth(cp: number): number {
+  // Control chars, zero-width joiner/non-joiner, variation selectors, combining marks.
+  if (
+    cp === 0 ||
+    cp < 0x20 ||
+    (cp >= 0x7f && cp < 0xa0) ||
+    cp === 0x200b ||
+    cp === 0x200c ||
+    cp === 0x200d ||
+    cp === 0xfeff ||
+    (cp >= 0x0300 && cp <= 0x036f) ||
+    (cp >= 0x1ab0 && cp <= 0x1aff) ||
+    (cp >= 0x1dc0 && cp <= 0x1dff) ||
+    (cp >= 0x20d0 && cp <= 0x20ff) ||
+    (cp >= 0xfe00 && cp <= 0xfe0f) ||
+    (cp >= 0xfe20 && cp <= 0xfe2f) ||
+    (cp >= 0xe0100 && cp <= 0xe01ef)
+  ) {
+    return 0;
+  }
+
+  // East Asian Wide / Fullwidth (Hangul, CJK, fullwidth forms) and common emoji.
+  if (
+    (cp >= 0x1100 && cp <= 0x115f) ||
+    cp === 0x231a ||
+    cp === 0x231b ||
+    cp === 0x2329 ||
+    cp === 0x232a ||
+    (cp >= 0x23e9 && cp <= 0x23f3) ||
+    (cp >= 0x25fd && cp <= 0x25fe) ||
+    (cp >= 0x2614 && cp <= 0x2615) ||
+    (cp >= 0x2648 && cp <= 0x2653) ||
+    cp === 0x267f ||
+    cp === 0x2693 ||
+    cp === 0x26a1 ||
+    (cp >= 0x26aa && cp <= 0x26ab) ||
+    (cp >= 0x26bd && cp <= 0x26be) ||
+    (cp >= 0x26c4 && cp <= 0x26c5) ||
+    cp === 0x26ce ||
+    cp === 0x26d4 ||
+    cp === 0x26ea ||
+    (cp >= 0x26f2 && cp <= 0x26f3) ||
+    cp === 0x26f5 ||
+    cp === 0x26fa ||
+    cp === 0x26fd ||
+    cp === 0x2705 ||
+    (cp >= 0x270a && cp <= 0x270b) ||
+    cp === 0x2728 ||
+    cp === 0x274c ||
+    cp === 0x274e ||
+    (cp >= 0x2753 && cp <= 0x2755) ||
+    cp === 0x2757 ||
+    (cp >= 0x2795 && cp <= 0x2797) ||
+    cp === 0x27b0 ||
+    cp === 0x27bf ||
+    (cp >= 0x2b1b && cp <= 0x2b1c) ||
+    cp === 0x2b50 ||
+    cp === 0x2b55 ||
+    (cp >= 0x2e80 && cp <= 0x303e) ||
+    (cp >= 0x3040 && cp <= 0xa4cf) ||
+    (cp >= 0xa960 && cp <= 0xa97c) ||
+    (cp >= 0xac00 && cp <= 0xd7a3) ||
+    (cp >= 0xf900 && cp <= 0xfaff) ||
+    (cp >= 0xfe10 && cp <= 0xfe19) ||
+    (cp >= 0xfe30 && cp <= 0xfe6f) ||
+    (cp >= 0xff00 && cp <= 0xff60) ||
+    (cp >= 0xffe0 && cp <= 0xffe6) ||
+    (cp >= 0x1f300 && cp <= 0x1faff) ||
+    (cp >= 0x20000 && cp <= 0x2fffd) ||
+    (cp >= 0x30000 && cp <= 0x3fffd)
+  ) {
+    return 2;
+  }
+
+  return 1;
+}
+
 /**
- * Buffer range (1-based, inclusive) of `[start, end)` in a logical line that
- * begins at 0-based row `firstRow` and wraps every `cols` cells. Assumes one
- * cell per character, which holds for URLs.
+ * Converts a UTF-16 string offset in `text` to a 0-based terminal cell offset,
+ * accounting for wide (East Asian / Hangul / emoji) and zero-width characters,
+ * plus row-end padding when a wide character wraps at the last column.
+ */
+export function cellOffsetFor(text: string, utf16Index: number, cols?: number): number {
+  let cell = 0;
+  let index = 0;
+  const limit = Math.min(utf16Index, text.length);
+  while (index < limit) {
+    const cp = text.codePointAt(index)!;
+    const step = cp > 0xffff ? 2 : 1;
+    const width = charCellWidth(cp);
+    if (cols && cols > 0 && width === 2 && cell % cols === cols - 1) {
+      cell += 1;
+    }
+    cell += width;
+    index += step;
+  }
+  return cell;
+}
+
+/**
+ * Buffer range (1-based, inclusive) of cell span `[start, end)` in a logical
+ * line that begins at 0-based row `firstRow` and wraps every `cols` cells.
  */
 export function rangeFor(start: number, end: number, firstRow: number, cols: number): IBufferRange {
   const last = end - 1;
@@ -66,6 +165,19 @@ export function rangeFor(start: number, end: number, firstRow: number, cols: num
     start: { x: (start % cols) + 1, y: firstRow + Math.floor(start / cols) + 1 },
     end: { x: (last % cols) + 1, y: firstRow + Math.floor(last / cols) + 1 },
   };
+}
+
+/** Buffer range (1-based, inclusive) for UTF-16 match `[start, end)` in `text`. */
+export function rangeForText(
+  text: string,
+  start: number,
+  end: number,
+  firstRow: number,
+  cols: number,
+): IBufferRange {
+  const startCell = cellOffsetFor(text, start, cols);
+  const endCell = cellOffsetFor(text, end, cols);
+  return rangeFor(startCell, endCell, firstRow, cols);
 }
 
 /** Clickable URLs, including ones that wrap across rows. */
@@ -91,7 +203,10 @@ export function createUrlLinkProvider(
         text += buffer.getLine(index)?.translateToString(index === last) ?? "";
       }
       const links: ILink[] = findUrls(text)
-        .map(({ url, start, end }) => ({ url, range: rangeFor(start, end, first, terminal.cols) }))
+        .map(({ url, start, end }) => ({
+          url,
+          range: rangeForText(text, start, end, first, terminal.cols),
+        }))
         .filter(({ range }) => range.start.y <= bufferLineNumber && range.end.y >= bufferLineNumber)
         .map(({ url, range }) => ({
           range,

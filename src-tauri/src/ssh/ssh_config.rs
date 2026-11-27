@@ -338,20 +338,37 @@ fn is_pattern(name: &str) -> bool {
 }
 
 /// `*` and `?` globbing, case-insensitive like OpenSSH host matching.
+/// Uses an iterative two-pointer algorithm (O(N * M) worst-case) to avoid
+/// exponential backtracking on patterns with repeated `*` wildcards.
 fn glob(pattern: &str, text: &str) -> bool {
-    fn go(pattern: &[char], text: &[char]) -> bool {
-        match pattern.split_first() {
-            None => text.is_empty(),
-            Some(('*', rest)) => (0..=text.len()).any(|skip| go(rest, &text[skip..])),
-            Some(('?', rest)) => !text.is_empty() && go(rest, &text[1..]),
-            Some((c, rest)) => text
-                .split_first()
-                .is_some_and(|(t, text)| t.eq_ignore_ascii_case(c) && go(rest, text)),
-        }
-    }
     let pattern: Vec<char> = pattern.chars().collect();
     let text: Vec<char> = text.chars().collect();
-    go(&pattern, &text)
+    let (mut p, mut t) = (0usize, 0usize);
+    let mut star_p: Option<usize> = None;
+    let mut star_t = 0usize;
+
+    while t < text.len() {
+        if p < pattern.len() && pattern[p] == '*' {
+            star_p = Some(p);
+            star_t = t;
+            p += 1;
+        } else if p < pattern.len()
+            && (pattern[p] == '?' || text[t].eq_ignore_ascii_case(&pattern[p]))
+        {
+            p += 1;
+            t += 1;
+        } else if let Some(sp) = star_p {
+            p = sp + 1;
+            star_t += 1;
+            t = star_t;
+        } else {
+            return false;
+        }
+    }
+    while p < pattern.len() && pattern[p] == '*' {
+        p += 1;
+    }
+    p == pattern.len()
 }
 
 /// A `Host` line matches when some pattern matches and no negated one does.
@@ -1151,5 +1168,17 @@ Host *
         assert!(preview.hosts.is_empty());
         assert!(preview.warnings.iter().any(|w| w.contains("inside a Match")));
         fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn glob_handles_repeated_wildcards_without_exponential_backtracking() {
+        let pattern = format!("{}*b", "*a".repeat(25));
+        let text = "a".repeat(50);
+        assert!(!glob(&pattern, &text));
+        assert!(glob(&pattern, &format!("{}b", "a".repeat(50))));
+        assert!(glob("", ""));
+        assert!(glob("***", ""));
+        assert!(!glob("?", ""));
+        assert!(glob("GPU-??.*", "gpu-01.lab"));
     }
 }
