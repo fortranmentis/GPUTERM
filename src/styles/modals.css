@@ -1,0 +1,257 @@
+.app-message {
+  position: absolute;
+  z-index: 5;
+  top: 14px;
+  left: 24px;
+  right: 24px;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) 34px;
+  align-items: center;
+  min-height: 42px;
+  gap: 10px;
+  padding: 4px 6px 4px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(12, 17, 24, 0.96);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+}
+
+.app-message span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-message.info {
+  color: #bfdbfe;
+}
+
+.app-message.success {
+  color: #bbf7d0;
+}
+
+.app-message.error {
+  color: #fecaca;
+}
+
+.app-message.warning {
+  color: #fde68a;
+}
+
+.app-toast {
+  left: 50%;
+  right: auto;
+  z-index: 30;
+  width: max-content;
+  max-width: min(560px, 80%);
+  transform: translateX(-50%);
+}
+
+.app-modal-backdrop {
+  display: grid;
+  position: fixed;
+  z-index: 50;
+  inset: 0;
+  place-items: center;
+  background: rgba(4, 7, 11, 0.6);
+}
+
+.app-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(480px, calc(100vw - 48px));
+  gap: 12px;
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #0c1118;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+}
+
+.app-modal-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #fca5a5;
+  font-size: 14px;
+}
+
+.app-modal-text {
+  margin: 0;
+  color: #e2e8f0;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: break-word;
+}
+
+.app-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.credential-vault-backdrop {
+  display: grid;
+  position: fixed;
+  z-index: 70;
+  inset: 0;
+  place-items: center;
+  padding: 24px;
+  background: rgba(3, 7, 12, 0.86);
+  backdrop-filter: blur(8px);
+}
+
+.credential-vault-dialog {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  width: min(520px, calc(100vw - 48px));
+  gap: 14px 16px;
+  padding: 22px;
+  border: 1px solid #274258;
+  border-radius: 12px;
+  background: #0b121a;
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.6);
+}
+
+.credential-vault-icon {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border: 1px solid #155e75;
+  border-radius: 10px;
+  background: rgba(8, 145, 178, 0.12);
+  color: var(--cyan);
+}
+
+.credential-vault-heading h2 {
+  margin: 0 0 6px;
+  color: var(--text);
+  font-size: 17px;
+}
+
+.credential-vault-heading p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.credential-vault-dialog > label,
+.credential-vault-warning,
+.credential-vault-note,
+.credential-vault-error,
+.credential-vault-loading,
+.credential-vault-actions {
+  grid-column: 1 / -1;
+}
+
+.credential-vault-dialog > label {
+  display: grid;
+  gap: 6px;
+}
+
+.credential-vault-dialog > label span {
+  color: #cbd5e1;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.credential-vault-warning {
+  color: #fbbf24;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.biometric-unlock-toggle {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 7px;
+  margin-top: 10px;
+  padding: 6px 2px;
+  color: #cbd5e1;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.biometric-unlock-toggle input {
+  margin: 0;
+}
+
+.credential-vault-note {
+  color: #cbd5e1;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.credential-vault-error {
+  padding: 9px 10px;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  border-radius: 7px;
+  background: rgba(127, 29, 29, 0.2);
+  color: #fecaca;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.credential-vault-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.credential-vault-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.credential-vault-actions .danger {
+  margin-right: auto;
+}
+
+.detail-window {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: #0c1118;
+  color: var(--text);
+}
+
+.detail-window-header {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--line);
+  color: #cbd5e1;
+}
+
+.detail-window-content {
+  padding: 12px 14px;
+}
+
+.detail-window-content .process-table {
+  max-height: none;
+}
+
+.disk-hidden-toggle {
+  padding: 4px 12px 8px;
+}
+
+@media (max-width: 1180px) {
+  .session-sidebar {
+    flex-basis: 292px;
+    min-width: 292px;
+  }
+
+  .file-row {
+    grid-template-columns: minmax(110px, 1fr) 70px 76px 102px;
+  }
+}

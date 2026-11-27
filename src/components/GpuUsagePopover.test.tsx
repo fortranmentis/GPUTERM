@@ -5,7 +5,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { GpuDetailMetric } from "../types/resourceDetails";
 import { GpuUsagePopover } from "./GpuUsagePopover";
 
-const styles = readFileSync("src/styles.css", "utf8");
+const styles = readFileSync("src/styles.css", "utf8").replace(
+  /@import\s+"\.\/([^"]+)";/g,
+  (_match, relPath: string) => readFileSync(`src/${relPath}`, "utf8"),
+);
 
 const gpu0: GpuDetailMetric = {
   index: 0,

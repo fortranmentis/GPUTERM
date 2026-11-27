@@ -1,0 +1,554 @@
+/* Port forwards ----------------------------------------------------------- */
+
+.port-forwards {
+  flex: none;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.port-forwards-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 2px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+  text-align: left;
+}
+
+.port-forwards-toggle small {
+  margin-left: auto;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.port-forwards-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow: auto;
+  padding: 6px 0 2px;
+}
+
+.port-forwards-empty {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.port-forward-error {
+  color: var(--red);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.port-forward-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+}
+
+.port-forward-row.error {
+  border-color: rgba(248, 113, 113, 0.4);
+}
+
+.port-forward-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.port-forward-main strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.port-forward-main strong em {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.port-forward-main small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.port-forward-main small.port-forward-warning {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--amber);
+}
+
+.port-forward-state {
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(137, 150, 168, 0.14);
+  color: var(--muted);
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.port-forward-state.listening {
+  background: rgba(52, 211, 153, 0.12);
+  color: var(--green);
+}
+
+.port-forward-state.starting {
+  background: rgba(96, 165, 250, 0.14);
+  color: var(--blue);
+}
+
+.port-forward-state.error {
+  background: rgba(248, 113, 113, 0.14);
+  color: var(--red);
+}
+
+.port-forward-actions {
+  display: flex;
+  flex: none;
+  gap: 2px;
+}
+
+.port-forward-actions .icon-button {
+  width: 24px;
+  height: 24px;
+}
+
+.port-forward-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.port-forward-form .port-forward-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.port-forward-form .port-forward-check input {
+  width: auto;
+  height: auto;
+}
+
+.alert-button {
+  position: relative;
+  align-self: end;
+  width: 30px;
+  height: 28px;
+}
+
+.alert-button.firing {
+  color: var(--amber);
+}
+
+.alert-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--amber);
+  color: #111827;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 15px;
+  text-align: center;
+}
+
+.alert-settings {
+  display: grid;
+  gap: 10px;
+  padding: 10px 12px 12px;
+  font-size: 12px;
+}
+
+.alert-settings fieldset {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.alert-settings fieldset:disabled {
+  opacity: 0.5;
+}
+
+/* Global label/input rules stack labels and size inputs for forms; the
+   alert controls are inline rows instead. */
+.alert-settings label {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+
+.alert-settings label span {
+  color: #cbd5e1;
+}
+
+.alert-settings input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+}
+
+.alert-toggle {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  color: #cbd5e1;
+}
+
+.alert-toggle > span {
+  line-height: 1.8;
+}
+
+.alert-settings input[type="number"] {
+  width: 52px;
+  height: 22px;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #0a1119;
+  color: #e2e8f0;
+  font-size: 12px;
+}
+
+.alert-rule-table {
+  display: grid;
+  gap: 4px;
+}
+
+.alert-rule-row {
+  display: grid;
+  grid-template-columns: minmax(130px, 1.4fr) 1fr 1fr 64px;
+  align-items: center;
+  gap: 6px;
+}
+
+.alert-rule-row.head {
+  color: var(--subtle);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.alert-rule-row label,
+.alert-number {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.alert-notifications {
+  display: grid;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.alert-permission {
+  color: var(--amber);
+}
+
+.alert-recent h4 {
+  margin: 0 0 4px;
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.alert-recent ul {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.alert-recent li {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px;
+  color: #fde68a;
+}
+
+.alert-recent li.resolved {
+  color: var(--subtle);
+}
+
+.alert-recent time {
+  color: var(--subtle);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.auth-prompt-dialog {
+  display: grid;
+  gap: 10px;
+  width: min(440px, calc(100vw - 32px));
+}
+
+.auth-prompt-badge {
+  margin-left: auto;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--subtle);
+  font-size: 10px;
+}
+
+.auth-prompt-instructions {
+  white-space: pre-wrap;
+}
+
+.auth-prompt-field {
+  display: grid;
+  gap: 4px;
+}
+
+.auth-prompt-field span {
+  color: #cbd5e1;
+  font-size: 12px;
+}
+
+.managed-key-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px 8px;
+  margin: 0;
+  font-size: 11px;
+}
+
+.managed-key-facts dt {
+  color: var(--muted);
+}
+
+.managed-key-facts dd {
+  margin: 0;
+  overflow: hidden;
+  font-family: var(--mono, ui-monospace, monospace);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.managed-key-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.managed-key-dialog {
+  display: grid;
+  gap: 10px;
+  width: min(440px, calc(100vw - 32px));
+}
+
+.managed-key-problem {
+  color: #fecaca;
+  font-size: 11px;
+}
+
+.managed-key-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+
+.managed-key-check input {
+  width: 14px;
+  height: 14px;
+  padding: 0;
+}
+
+/* SSH key manager ----------------------------------------------------------
+   Reuses the app-modal, managed-key and port-forwards primitives above. */
+
+.key-manager-dialog {
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+}
+
+.key-manager-title {
+  color: var(--cyan);
+}
+
+.key-manager-close {
+  margin-left: auto;
+}
+
+.key-manager-success {
+  color: #86efac;
+  font-size: 12px;
+}
+
+.key-manager-hint {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.key-manager-actions {
+  gap: 8px;
+}
+
+.key-generate-button {
+  align-self: flex-start;
+}
+
+.key-generate-form {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #0a1018;
+}
+
+.key-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.key-row {
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #0a1018;
+}
+
+.key-row-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.key-row-summary:hover {
+  background: #121d29;
+}
+
+.key-row-summary > svg:nth-child(2) {
+  flex: none;
+  color: var(--cyan);
+}
+
+.key-row-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.key-row-text strong,
+.key-row-text small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.key-row-text small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.key-row-details {
+  display: grid;
+  gap: 8px;
+  padding: 0 10px 10px;
+}
+
+.key-row-public {
+  display: block;
+  max-height: 72px;
+  overflow: auto;
+  padding: 6px 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: #070b11;
+  color: #cbd5e1;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.key-rename-row {
+  display: flex;
+  gap: 6px;
+}
+
+.key-rename-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.key-export-backdrop {
+  z-index: 55;
+}
+
+.profile-key-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.profile-key-select {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.profile-key-select > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.profile-key-install {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.profile-key-install small {
+  flex: 1 1 160px;
+  color: var(--muted);
+  font-size: 11px;
+}

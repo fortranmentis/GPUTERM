@@ -1,0 +1,604 @@
+.app-shell {
+  display: flex;
+  width: 100vw;
+  height: 100vh;
+  min-width: 980px;
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, rgba(96, 165, 250, 0.08), transparent 28%),
+    var(--bg);
+}
+
+.session-sidebar {
+  display: flex;
+  flex: 0 0 314px;
+  flex-direction: column;
+  min-width: 314px;
+  height: 100%;
+  padding: 18px;
+  border-right: 1px solid var(--line);
+  background: #0b1017;
+}
+
+.brand-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 52px;
+  margin-bottom: 18px;
+}
+
+.brand-row > div {
+  min-width: 0;
+}
+
+.sidebar-close-button {
+  margin-left: auto;
+}
+
+.brand-mark {
+  display: block;
+  width: 42px;
+  height: 42px;
+  border: 1px solid rgba(34, 211, 238, 0.5);
+  border-radius: 8px;
+  background: #07151c;
+  /* The logo asset is a full-bleed square; the radius clips its corners. */
+  object-fit: cover;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+.brand-row h1 {
+  font-size: 18px;
+  line-height: 1.2;
+}
+
+.brand-row p,
+.panel-title-row p {
+  max-width: 210px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.new-session-form {
+  flex: 0 1 auto;
+  max-height: min(570px, 68vh);
+  margin-bottom: 4px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.form-binding-hint {
+  /* In a scrolling flex column, overflow: hidden would let it shrink to 0. */
+  flex-shrink: 0;
+  color: var(--text-soft, #8b98a9);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-host-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.session-host-label-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.session-host-label-row > label:first-child {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.local-host-toggle {
+  display: inline-flex;
+  flex: none;
+  flex-direction: row;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+
+.local-host-toggle input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--cyan-strong);
+}
+
+.local-host-toggle span {
+  color: #b8f7dd;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+label,
+.full-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+label span,
+.full-label span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+input:not([type="checkbox"]):not([type="radio"]) {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  outline: none;
+  background-color: #090e15;
+  color: var(--text);
+}
+
+/* Checkboxes keep their native look at one size everywhere; the text-field
+   rules above would otherwise stretch them into 34px boxes. */
+input[type="checkbox"],
+input[type="radio"] {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--cyan-strong);
+  cursor: pointer;
+}
+
+input[type="checkbox"]:disabled,
+input[type="radio"]:disabled {
+  cursor: not-allowed;
+}
+
+input[type="checkbox"]:focus-visible,
+input[type="radio"]:focus-visible {
+  outline: 2px solid rgba(34, 211, 238, 0.5);
+  outline-offset: 2px;
+}
+
+select {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 0 30px 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  outline: none;
+  background-color: #090e15;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 13px) 50%,
+    calc(100% - 9px) 50%;
+  background-repeat: no-repeat;
+  background-size: 4px 4px;
+  color: var(--text);
+  color-scheme: dark;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+select option {
+  background: #090e15;
+  color: var(--text);
+}
+
+input:not([type="checkbox"]):not([type="radio"]):focus,
+select:focus {
+  border-color: var(--cyan-strong);
+  box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.12);
+}
+
+input::placeholder {
+  color: #4f5c6d;
+}
+
+input:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+select:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.field-row,
+.button-row,
+.path-row {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.field-row label:first-child {
+  flex: 0 0 78px;
+}
+
+.field-row label:last-child,
+.path-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.local-path-row {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.local-path-row input {
+  flex: 1 1 auto;
+}
+
+.local-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 142px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #0a1018;
+}
+
+.local-file-item {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) 70px;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.local-file-item:hover {
+  border-color: var(--line);
+  background: #121d29;
+}
+
+.local-file-item.selected {
+  border-color: rgba(34, 211, 238, 0.78);
+  background: rgba(34, 211, 238, 0.2);
+  box-shadow: inset 3px 0 0 var(--cyan-strong);
+  color: #f5fbff;
+}
+
+.local-file-item.selected span,
+.local-file-item.selected small {
+  color: #b9ecf7;
+}
+
+.local-file-item,
+.file-list .file-row:not(.file-head) {
+  cursor: grab;
+}
+
+/* Checkbox selection column (SFTP remote and local panels). */
+.file-select-row,
+.local-file-select-row,
+.local-file-head {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.file-select-row {
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.file-select-row > .file-row {
+  flex: 1 1 auto;
+  min-width: 0;
+  border-bottom: 0;
+}
+
+.file-select-row.selected {
+  background: rgba(34, 211, 238, 0.2);
+}
+
+.file-select-row.selected > button.file-row.selected {
+  background: transparent;
+}
+
+.file-select-head {
+  flex: 0 0 auto;
+  background: #111923;
+}
+
+.local-file-select-row {
+  gap: 2px;
+}
+
+.local-file-select-row > .local-file-item {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.local-file-head {
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.file-select-cell {
+  display: inline-flex;
+  flex: 0 0 26px;
+  align-items: center;
+  justify-content: center;
+  align-self: stretch;
+}
+
+.file-select-checkbox {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--cyan-strong);
+  cursor: pointer;
+}
+
+.file-select-checkbox:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.file-select-checkbox:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 1px;
+}
+
+body.sftp-pointer-dragging,
+body.sftp-pointer-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
+.local-file-item span,
+.local-file-item small {
+  color: var(--subtle);
+  font-size: 11px;
+}
+
+.local-file-item strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.primary-button,
+.secondary-button,
+.disconnect-button,
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 34px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease,
+    color 140ms ease;
+}
+
+.primary-button,
+.secondary-button,
+.disconnect-button {
+  gap: 8px;
+  padding: 0 12px;
+  font-weight: 650;
+}
+
+.primary-button {
+  flex: 1;
+  background: #0e7490;
+  color: #effcff;
+}
+
+.primary-button:hover:not(:disabled) {
+  background: #0891b2;
+}
+
+.secondary-button,
+.disconnect-button,
+.icon-button {
+  border-color: var(--line);
+  background: #101720;
+  color: #cbd5e1;
+}
+
+.secondary-button:hover:not(:disabled),
+.disconnect-button:hover:not(:disabled),
+.icon-button:hover:not(:disabled) {
+  border-color: #31516a;
+  background: #162131;
+}
+
+.secondary-button.compact {
+  flex: 0 0 auto;
+  padding: 0 10px;
+}
+
+.secondary-button.danger:hover:not(:disabled),
+.disconnect-button:hover:not(:disabled) {
+  border-color: rgba(248, 113, 113, 0.65);
+  color: #fecaca;
+}
+
+.icon-button {
+  flex: 0 0 34px;
+  width: 34px;
+  padding: 0;
+}
+
+.icon-button.ghost {
+  border-color: transparent;
+  background: transparent;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.sidebar-section-title {
+  margin: 0;
+  color: var(--subtle);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.sidebar-section-heading {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+
+.selected-session-actions {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.selected-session-actions > span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selected-session-actions .primary-button {
+  min-width: 0;
+}
+
+.session-credential-hint {
+  color: var(--subtle);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.session-list {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.session-item {
+  display: grid;
+  position: relative;
+  grid-template-columns: 18px minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 48px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.session-item .status-dot {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #34d399;
+  box-shadow: 0 0 6px rgba(52, 211, 153, 0.7);
+}
+
+.session-item:hover,
+.session-item.selected {
+  border-color: var(--line);
+  background: #101720;
+}
+
+.session-item.active {
+  border-color: rgba(52, 211, 153, 0.55);
+}
+
+.session-item span {
+  min-width: 0;
+}
+
+.session-item strong,
+.session-item small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-item strong {
+  font-size: 13px;
+}
+
+.session-item small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.disconnect-button {
+  width: 100%;
+  margin-top: 12px;
+}
