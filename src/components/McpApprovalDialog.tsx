@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ShieldAlert } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { McpApprovalRequest } from "../types/mcp";
 
 const TOOL_TITLES: Record<string, string> = {
@@ -38,13 +38,16 @@ export function McpApprovalDialog() {
     };
   }, []);
 
-  const answer = (approved: boolean) => {
-    if (!current) return;
-    void invoke("answer_mcp_approval", { requestId: current.requestId, approved }).catch(
-      () => undefined,
-    );
-    setQueue((pending) => pending.slice(1));
-  };
+  const answer = useCallback(
+    (approved: boolean) => {
+      if (!current) return;
+      void invoke("answer_mcp_approval", { requestId: current.requestId, approved }).catch(
+        () => undefined,
+      );
+      setQueue((pending) => pending.slice(1));
+    },
+    [current],
+  );
 
   useEffect(() => {
     if (!current) return;
@@ -53,7 +56,7 @@ export function McpApprovalDialog() {
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  });
+  }, [answer, current]);
 
   if (!current) {
     return null;

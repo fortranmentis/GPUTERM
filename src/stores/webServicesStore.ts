@@ -40,6 +40,18 @@ type WebServicesState = {
   setNotify: (notify: boolean) => void;
 };
 
+const sessionGeneration = new Map<string, number>();
+
+function currentGeneration(sessionId: string): number {
+  return sessionGeneration.get(sessionId) ?? 0;
+}
+
+function bumpGeneration(sessionId: string): number {
+  const next = currentGeneration(sessionId) + 1;
+  sessionGeneration.set(sessionId, next);
+  return next;
+}
+
 export const useWebServicesStore = create<WebServicesState>((set, get) => ({
   scans: {},
   errors: {},
@@ -49,9 +61,13 @@ export const useWebServicesStore = create<WebServicesState>((set, get) => ({
     if (get().scanning[sessionId]) {
       return [];
     }
+    const generation = currentGeneration(sessionId);
     set((state) => ({ scanning: { ...state.scanning, [sessionId]: true } }));
     try {
       const scan = await invoke<WebServiceScan>("scan_web_services", { sessionId });
+      if (currentGeneration(sessionId) !== generation) {
+        return [];
+      }
       const previous = get().scans[sessionId];
       const known = new Set(previous?.services.map(webServiceKey));
       set((state) => {
@@ -60,18 +76,26 @@ export const useWebServicesStore = create<WebServicesState>((set, get) => ({
       });
       return previous ? scan.services.filter((service) => !known.has(webServiceKey(service))) : [];
     } catch (error) {
+      if (currentGeneration(sessionId) !== generation) {
+        return [];
+      }
       set((state) => ({ errors: { ...state.errors, [sessionId]: String(error) } }));
       return [];
     } finally {
-      set((state) => ({ scanning: { ...state.scanning, [sessionId]: false } }));
+      if (currentGeneration(sessionId) === generation) {
+        set((state) => ({ scanning: { ...state.scanning, [sessionId]: false } }));
+      }
     }
   },
-  forget: (sessionId) =>
+  forget: (sessionId) => {
+    bumpGeneration(sessionId);
     set((state) => {
       const { [sessionId]: _scan, ...scans } = state.scans;
       const { [sessionId]: _error, ...errors } = state.errors;
-      return { scans, errors };
-    }),
+      const { [sessionId]: _scanning, ...scanning } = state.scanning;
+      return { scans, errors, scanning };
+    });
+  },
   setNotify: (notify) => {
     try {
       localStorage.setItem(WEB_SERVICE_NOTIFY_KEY, notify ? "on" : "off");

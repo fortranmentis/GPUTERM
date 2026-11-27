@@ -19,20 +19,21 @@ export function useContainerOverview(sessionId: string | null, enabled: boolean,
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [unsupported, setUnsupported] = useState(false);
-  const inFlightRef = useRef(false);
+  const inFlightSessionsRef = useRef<Set<string>>(new Set());
   const generationRef = useRef(0);
 
   useEffect(() => {
     generationRef.current += 1;
     setOverview(null);
     setError(null);
+    setLoading(false);
     setUnsupported(false);
   }, [sessionId]);
 
   const refresh = useCallback(async () => {
-    if (!sessionId || inFlightRef.current) return;
+    if (!sessionId || inFlightSessionsRef.current.has(sessionId)) return;
     const generation = generationRef.current;
-    inFlightRef.current = true;
+    inFlightSessionsRef.current.add(sessionId);
     setLoading(true);
     try {
       const next = await invoke<ContainerOverview>("container_overview", { sessionId });
@@ -47,7 +48,7 @@ export function useContainerOverview(sessionId: string | null, enabled: boolean,
         if (message.includes(UNSUPPORTED_HOST)) setUnsupported(true);
       }
     } finally {
-      inFlightRef.current = false;
+      inFlightSessionsRef.current.delete(sessionId);
       if (generation === generationRef.current) setLoading(false);
     }
   }, [sessionId]);

@@ -20,9 +20,7 @@ export default tseslint.config(
     plugins: { "react-hooks": reactHooks },
     rules: {
       ...reactHooks.configs.recommended.rules,
-      // Effect dependency problems are real here but pre-existing; surfaced as
-      // warnings so the gate stays useful while they are worked through.
-      "react-hooks/exhaustive-deps": "warn",
+      "react-hooks/exhaustive-deps": "error",
       // `_removed` destructuring is the idiom used to drop store keys.
       "@typescript-eslint/no-unused-vars": [
         "error",

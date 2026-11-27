@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -182,6 +183,35 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
       .catch(() => undefined);
   }, [setMessage]);
 
+  const loadDirectory = useCallback(
+    async (nextPath: string) => {
+      const sessionId = activeSessionId;
+      if (!sessionId) {
+        return;
+      }
+      setLoading(true);
+      try {
+        const response = await invoke<SftpListResponse>("sftp_list_dir", {
+          sessionId,
+          path: nextPath,
+        });
+        // Record against the invoked session so a fast session switch cannot
+        // attribute this listing to the wrong session.
+        pathBySessionRef.current.set(sessionId, response.path);
+        if (useSessionStore.getState().activeSessionId === sessionId) {
+          setPath(response.path);
+          setPathDraft(response.path);
+          setEntries(response.entries);
+          setSelectedRemotePaths([]);
+          remoteAnchorRef.current = null;
+        }
+      } finally {
+        setLoading(false);
+      }
+    },
+    [activeSessionId],
+  );
+
   useEffect(() => {
     if (connected && activeSessionId) {
       // Each session remembers its own remote path; fall back to the SFTP
@@ -204,33 +234,7 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
       setNewFolderName("");
     }
     setRenamingPath(null);
-  }, [activeSessionId, connected]);
-
-  const loadDirectory = async (nextPath: string) => {
-    const sessionId = activeSessionId;
-    if (!sessionId) {
-      return;
-    }
-    setLoading(true);
-    try {
-      const response = await invoke<SftpListResponse>("sftp_list_dir", {
-        sessionId,
-        path: nextPath,
-      });
-      // Record against the invoked session so a fast session switch cannot
-      // attribute this listing to the wrong session.
-      pathBySessionRef.current.set(sessionId, response.path);
-      if (useSessionStore.getState().activeSessionId === sessionId) {
-        setPath(response.path);
-        setPathDraft(response.path);
-        setEntries(response.entries);
-        setSelectedRemotePaths([]);
-        remoteAnchorRef.current = null;
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
+  }, [activeSessionId, connected, loadDirectory, setMessage]);
 
   const sftpRequest = useSessionStore((state) => state.sftpRequest);
   useEffect(() => {
@@ -241,8 +245,7 @@ export function SftpBrowser({ onClose }: SftpBrowserProps = {}) {
     loadDirectory(sftpRequest.path).catch((error) =>
       setMessage({ kind: "error", text: String(error) }),
     );
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- loadDirectory changes every render
-  }, [sftpRequest, connected, activeSessionId]);
+  }, [sftpRequest, connected, activeSessionId, loadDirectory, setMessage]);
 
   const loadLocalDirectory = async (nextPath: string) => {
     const response = await invoke<LocalListResponse>("list_local_dir", {

@@ -225,6 +225,18 @@ function isClosedChannelError(error: unknown) {
   );
 }
 
+/** Keeps the previous array reference while its ordered string items are unchanged. */
+function useStableStringArray(items: string[]): string[] {
+  const ref = useRef<string[]>(items);
+  if (
+    ref.current.length !== items.length ||
+    ref.current.some((item, index) => item !== items[index])
+  ) {
+    ref.current = items;
+  }
+  return ref.current;
+}
+
 export function TerminalPane() {
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
   const terminalViewRevision = useSessionStore(
@@ -306,16 +318,14 @@ export function TerminalPane() {
 
   const activeProfile =
     sessions.find((session) => session.id === activeSessionId) ?? null;
-  const activeSessionPaneIds = activeSessionId
-    ? terminalIdsBySession[activeSessionId] ?? []
-    : [];
-  const visiblePaneIds = useMemo(
-    () => getTerminalLayoutPaneIds(paneLayout),
-    [paneLayout],
+  const activeSessionPaneIds = useStableStringArray(
+    activeSessionId ? terminalIdsBySession[activeSessionId] ?? [] : [],
   );
-  const allTerminalIds = useMemo(
-    () => Object.values(terminalIdsBySession).flat(),
-    [terminalIdsBySession],
+  const visiblePaneIds = useStableStringArray(
+    getTerminalLayoutPaneIds(paneLayout),
+  );
+  const allTerminalIds = useStableStringArray(
+    Object.values(terminalIdsBySession).flat(),
   );
   const sessionIdByTerminalId = useMemo(() => {
     const result = new Map<string, string>();
@@ -411,11 +421,7 @@ export function TerminalPane() {
       lastTerminalViewRevisionRef.current = terminalViewRevision;
       setPaneLayout(createTerminalLayout(activeSessionPaneIds));
     }
-  }, [
-    activeSessionId,
-    activeSessionPaneIds.join("|"),
-    terminalViewRevision,
-  ]);
+  }, [activeSessionId, activeSessionPaneIds, terminalViewRevision]);
 
   useEffect(() => {
     setPaneLayout((current) => {
@@ -427,9 +433,9 @@ export function TerminalPane() {
         retainedIds.length > 0 ? retainedIds : activeSessionPaneIds;
       return reconcileTerminalLayout(current, desiredIds);
     });
-  }, [activeSessionPaneIds.join("|"), allTerminalIds.join("|")]);
+  }, [activeSessionPaneIds, allTerminalIds]);
 
-  const fitVisiblePanes = () => {
+  const fitVisiblePanes = useCallback(() => {
     for (const terminalId of activePaneIdsRef.current) {
       const entry = instancesRef.current.get(terminalId);
       if (!entry) {
@@ -449,17 +455,20 @@ export function TerminalPane() {
         // xterm can throw while its container is mounting or has zero size.
       }
     }
-  };
+  }, []);
 
-  const scheduleFit = (delayMs: number) => {
-    if (fitTimerRef.current != null) {
-      window.clearTimeout(fitTimerRef.current);
-    }
-    fitTimerRef.current = window.setTimeout(() => {
-      fitTimerRef.current = null;
-      fitVisiblePanes();
-    }, delayMs);
-  };
+  const scheduleFit = useCallback(
+    (delayMs: number) => {
+      if (fitTimerRef.current != null) {
+        window.clearTimeout(fitTimerRef.current);
+      }
+      fitTimerRef.current = window.setTimeout(() => {
+        fitTimerRef.current = null;
+        fitVisiblePanes();
+      }, delayMs);
+    },
+    [fitVisiblePanes],
+  );
 
   const registerTerminalHost = (
     terminalId: string,
@@ -482,34 +491,37 @@ export function TerminalPane() {
     }
   };
 
-  const flushInput = async (terminalId: string, entry: TermEntry) => {
-    if (entry.writing || !entry.writable) {
-      return;
-    }
-    entry.writing = true;
-    try {
-      while (entry.writable && entry.inputQueue.length > 0) {
-        // Coalesce key-repeat bursts and serialize IPC writes so multiple
-        // commands never race each other against a closing SSH channel.
-        const data = entry.inputQueue;
-        entry.inputQueue = "";
-        try {
-          await invoke("terminal_write", { terminalId, data });
-        } catch (error) {
-          entry.writable = false;
+  const flushInput = useCallback(
+    async (terminalId: string, entry: TermEntry) => {
+      if (entry.writing || !entry.writable) {
+        return;
+      }
+      entry.writing = true;
+      try {
+        while (entry.writable && entry.inputQueue.length > 0) {
+          // Coalesce key-repeat bursts and serialize IPC writes so multiple
+          // commands never race each other against a closing SSH channel.
+          const data = entry.inputQueue;
           entry.inputQueue = "";
-          if (!isClosedChannelError(error)) {
-            setMessage({ kind: "error", text: String(error) });
+          try {
+            await invoke("terminal_write", { terminalId, data });
+          } catch (error) {
+            entry.writable = false;
+            entry.inputQueue = "";
+            if (!isClosedChannelError(error)) {
+              setMessage({ kind: "error", text: String(error) });
+            }
           }
         }
+      } finally {
+        entry.writing = false;
+        if (entry.writable && entry.inputQueue.length > 0) {
+          void flushInput(terminalId, entry);
+        }
       }
-    } finally {
-      entry.writing = false;
-      if (entry.writable && entry.inputQueue.length > 0) {
-        void flushInput(terminalId, entry);
-      }
-    }
-  };
+    },
+    [setMessage],
+  );
 
   // Types a saved command into the focused pane through the same queue as
   // keystrokes, so it can never interleave with typing in flight.
@@ -532,23 +544,26 @@ export function TerminalPane() {
   // ⌘-click (Ctrl-click elsewhere) opens a link. A link to a web server on
   // the session's host (localhost, 0.0.0.0 or its own name) goes through a
   // temporary SSH forward, so TensorBoard and Jupyter open as printed.
-  const openTerminalLink = (terminalId: string, event: MouseEvent, url: string) => {
-    if (!(isMacPlatform() ? event.metaKey : event.ctrlKey)) {
-      return;
-    }
-    const sessionId = sessionIdByTerminalIdRef.current.get(terminalId);
-    const { sessions, telemetryBySession } = useSessionStore.getState();
-    const profile = sessions.find((session) => session.id === sessionId);
-    const hostNames = profile?.isLocal
-      ? []
-      : [profile?.host ?? "", (sessionId && telemetryBySession[sessionId]?.hostname) || ""];
-    const target = tunnelTarget(url, hostNames);
-    const request =
-      target && sessionId
-        ? invoke<string>("open_web_service", { sessionId, ...target })
-        : invoke("open_link", { url });
-    request.catch((error) => setMessage({ kind: "error", text: String(error) }));
-  };
+  const openTerminalLink = useCallback(
+    (terminalId: string, event: MouseEvent, url: string) => {
+      if (!(isMacPlatform() ? event.metaKey : event.ctrlKey)) {
+        return;
+      }
+      const sessionId = sessionIdByTerminalIdRef.current.get(terminalId);
+      const { sessions, telemetryBySession } = useSessionStore.getState();
+      const profile = sessions.find((session) => session.id === sessionId);
+      const hostNames = profile?.isLocal
+        ? []
+        : [profile?.host ?? "", (sessionId && telemetryBySession[sessionId]?.hostname) || ""];
+      const target = tunnelTarget(url, hostNames);
+      const request =
+        target && sessionId
+          ? invoke<string>("open_web_service", { sessionId, ...target })
+          : invoke("open_link", { url });
+      request.catch((error) => setMessage({ kind: "error", text: String(error) }));
+    },
+    [setMessage],
+  );
   const linkHint = isMacPlatform() ? "⌘-click to open" : "Ctrl-click to open";
 
   // Create an xterm instance for every live backend pane and preserve
@@ -627,18 +642,16 @@ export function TerminalPane() {
     }
 
     scheduleFit(60);
-  }, [allTerminalIds.join("|"), visiblePaneIds.join("|")]);
+  }, [allTerminalIds, flushInput, linkHint, openTerminalLink, scheduleFit, visiblePaneIds]);
 
   useEffect(() => {
-    const nextFocused =
-      focusedTerminalId && visiblePaneIds.includes(focusedTerminalId)
-        ? focusedTerminalId
-        : visiblePaneIds[0] ?? null;
-    if (nextFocused !== focusedTerminalId) {
-      setFocusedTerminalId(nextFocused);
-    }
+    setFocusedTerminalId((current) =>
+      current && visiblePaneIds.includes(current)
+        ? current
+        : visiblePaneIds[0] ?? null,
+    );
     scheduleFit(60);
-  }, [visiblePaneIds.join("|")]);
+  }, [scheduleFit, visiblePaneIds]);
 
   useEffect(() => {
     if (!focusedTerminalId) {
@@ -697,10 +710,11 @@ export function TerminalPane() {
     const resizeObserver = new ResizeObserver(() => scheduleFit(20));
     resizeObserver.observe(surface);
     return () => resizeObserver.disconnect();
-  }, []);
+  }, [scheduleFit]);
 
   useEffect(() => {
     let disposed = false;
+    const instances = instancesRef.current;
     const unlisteners: Array<() => void> = [];
     const register = (promise: Promise<() => void>) => {
       promise.then((unlisten) => {
@@ -716,7 +730,7 @@ export function TerminalPane() {
       listen<TerminalOutputPayload>("terminal-output", (event) => {
         const { sessionId, data } = event.payload;
         const terminalId = event.payload.terminalId ?? sessionId;
-        const entry = instancesRef.current.get(terminalId);
+        const entry = instances.get(terminalId);
         if (entry) {
           entry.terminal.write(data);
         } else {
@@ -728,7 +742,7 @@ export function TerminalPane() {
     register(
       listen<TerminalClosedPayload>("terminal-closed", (event) => {
         const terminalId = event.payload.terminalId ?? event.payload.sessionId;
-        const entry = instancesRef.current.get(terminalId);
+        const entry = instances.get(terminalId);
         if (entry) {
           entry.writable = false;
           entry.inputQueue = "";
@@ -749,7 +763,7 @@ export function TerminalPane() {
         window.clearTimeout(fitTimerRef.current);
         fitTimerRef.current = null;
       }
-      for (const entry of instancesRef.current.values()) {
+      for (const entry of instances.values()) {
         entry.writable = false;
         entry.onData.dispose();
         entry.onSearchResults.dispose();
@@ -758,7 +772,7 @@ export function TerminalPane() {
         entry.searchAddon.dispose();
         entry.terminal.dispose();
       }
-      instancesRef.current.clear();
+      instances.clear();
     };
   }, []);
 
