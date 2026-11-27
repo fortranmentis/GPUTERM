@@ -26,7 +26,7 @@ Working on a remote GPU box usually means juggling an SSH client, an SFTP tool, 
 
 Almost nothing ever touches your servers: every metric comes from one-shot standard commands (`nvidia-smi`, `/proc`, `sysctl`, PowerShell CIM, …) over SSH, and no admin/root rights are required for the core metrics. The [three narrow exceptions](#faq) are an oversized Windows collector script, the opt-in Claude status-line helper, and LLM runtime monitoring — which runs no remote command at all.
 
-> **Status:** stable release — **1.4.0** is the first official desktop release. Prebuilt installers for Windows, macOS, and Linux are attached to [releases](https://github.com/fortranmentis/GPUTERM/releases); you can also build from source below. Official release status does not imply Apple notarization or a trusted Windows publisher signature; see the packaging notes.
+> **Status:** stable release — current patch **1.4.1**, following the first official desktop release 1.4.0. Prebuilt installers for Windows, macOS, and Linux are attached to [releases](https://github.com/fortranmentis/GPUTERM/releases); you can also build from source below. Official release status does not imply Apple notarization or a trusted Windows publisher signature; see the packaging notes.
 
 ## Table of contents
 
@@ -141,6 +141,15 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 - **Built-in MCP server** — turn on **MCP** at the bottom of the sidebar and Claude Code, Claude Desktop, Codex or Cursor can read the hosts you have connected: live telemetry, the last hour of history, free GPUs across hosts, GPU/top processes, containers, tmux sessions, directory listings, LLM runtimes and firing alerts. See [MCP server for AI assistants](#mcp-server-for-ai-assistants)
 - **Actions only with your approval** — with **Allow actions** on, `run_command`, `read_file` and `kill_process` each open a confirmation in GpuTerm (Deny by default). Loopback only, a per-start token, per-host hiding and an audit log
 - **In-app updates** — GpuTerm checks GitHub for a newer release and installs it from a signed update bundle after you press **Update**. See [Updates](#updates)
+
+### 🛠️ 1.4.1 reliability and access-control refinements
+
+- MCP's hidden-host settings also filter host-linked LLM runtimes and active alerts. Approved actions re-check settings before execution; disabling MCP/actions cancels pending approvals. Direct-URL LLM instances without an SSH-profile association remain visible.
+- MCP commands use a dedicated SSH session and drain stdout/stderr together; local collectors also drain both pipes concurrently to avoid pipe-buffer stalls. File reads reject non-regular targets, and audit arguments have a bounded size.
+- SFTP drag-out exports use the app's `drag-out` configuration subdirectory, with 0700 directories/0600 files on Unix. Entries older than 24 hours are pruned best-effort at startup, export preparation and exit. These are plaintext local copies, not encrypted vault entries; Windows relies on OS/account directory permissions, not Unix mode bits.
+- Local downloads and vault-file replacements use platform atomic replacement (including Windows). Folder overwrite transfers avoid redundant per-file remote checks; downloaded folder segments are sanitized. Remote overwrite behavior still depends on SFTP-server rename support and may require a non-atomic fallback.
+- Deleting a saved host now asks for confirmation, disconnect/settings work is moved off the UI thread, and app exit requests session/forward teardown.
+- Updated Claude status-line helpers validate session IDs, avoid passing the payload in `GPUTERM_PAYLOAD`, and use safer temporary files. Re-run the integration setup or reinstall the helper on each monitored host to apply helper changes; upgrading the desktop alone does not replace remote files.
 
 ### 🔐 Security by default
 - **SSH key manager** — open **SSH keys** to generate Ed25519, RSA 3072/4096, or ECDSA P-256/P-384/P-521 keys. Copy/save public keys, rename/delete local keys, and export private keys with a passphrase or by explicitly choosing **Save without a passphrase**. Private keys live in the vault; `keys.json` contains public metadata and profile assignments only.
