@@ -209,6 +209,13 @@ impl ForwardManager {
         }
     }
 
+    /// Stops every forward across all profiles; called on app exit.
+    pub fn stop_all(&self) {
+        if let Ok(mut sets) = self.sets.lock() {
+            sets.clear();
+        }
+    }
+
     pub(crate) fn statuses(&self, profile_id: Option<&str>) -> Vec<ForwardStatus> {
         let Ok(sets) = self.sets.lock() else {
             return Vec::new();
@@ -635,21 +642,28 @@ fn run_remote(context: &RuleContext) -> Result<(), String> {
     let spec = &context.spec;
     let session = &context.connection.session;
     let deadline = Instant::now() + CHANNEL_OPEN_TIMEOUT;
-    let (mut listener, bound_port) = loop {
-        match session.channel_forward_listen(spec.bind_port, Some(&spec.bind_host), None) {
-            Ok(result) => break result,
-            Err(error) if is_would_block(&error) => {
-                if Instant::now() >= deadline || context.stopped() {
-                    return Err("Timed out asking the server to listen".to_string());
+    let (mut listener, bound_port) = {
+        let _open = context
+            .connection
+            .open_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            match session.channel_forward_listen(spec.bind_port, Some(&spec.bind_host), None) {
+                Ok(result) => break result,
+                Err(error) if is_would_block(&error) => {
+                    if Instant::now() >= deadline || context.stopped() {
+                        return Err("Timed out asking the server to listen".to_string());
+                    }
+                    thread::sleep(Duration::from_millis(10));
                 }
-                thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) => {
-                return Err(format!(
-                    "The server refused to listen on {}:{} ({}). Ports below 1024 need root, \
-                     and other hosts need GatewayPorts in sshd_config.",
-                    spec.bind_host, spec.bind_port, error
-                ));
+                Err(error) => {
+                    return Err(format!(
+                        "The server refused to listen on {}:{} ({}). Ports below 1024 need root, \
+                         and other hosts need GatewayPorts in sshd_config.",
+                        spec.bind_host, spec.bind_port, error
+                    ));
+                }
             }
         }
     };

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager};
 
 use crate::ssh::local_fs::{modify_app_settings, read_app_settings};
 use crate::ssh::session::config_dir;
@@ -97,9 +97,10 @@ fn start(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Stops the server, if running, and removes its endpoint file.
+/// Stops the server, if running, cancels pending approvals, and removes its endpoint file.
 pub fn stop(app: &AppHandle) {
     let state = app.state::<McpState>();
+    approval::cancel_all_pending(app, &state.approvals);
     let handle = state.server.lock().ok().and_then(|mut slot| slot.take());
     if let Some(handle) = handle {
         handle.stop();
@@ -137,20 +138,27 @@ pub fn get_mcp_status(app: AppHandle) -> McpStatus {
 
 /// Saves the settings and starts or stops the server to match.
 #[tauri::command]
-pub fn update_mcp_settings(
+pub async fn update_mcp_settings(
     app: AppHandle,
-    state: State<'_, McpState>,
     settings: McpSettings,
 ) -> Result<McpStatus, String> {
-    modify_app_settings(|saved| saved.mcp = Some(settings.clone()))?;
-    if let Ok(mut slot) = state.settings.lock() {
-        *slot = settings.clone();
-    }
-    let error = if settings.enabled {
-        start(&app).err()
-    } else {
-        stop(&app);
-        None
-    };
-    Ok(status(&app, error))
+    tauri::async_runtime::spawn_blocking(move || {
+        modify_app_settings(|saved| saved.mcp = Some(settings.clone()))?;
+        let state = app.state::<McpState>();
+        if let Ok(mut slot) = state.settings.lock() {
+            *slot = settings.clone();
+        }
+        if !settings.enabled || !settings.allow_actions {
+            approval::cancel_all_pending(&app, &state.approvals);
+        }
+        let error = if settings.enabled {
+            start(&app).err()
+        } else {
+            stop(&app);
+            None
+        };
+        Ok(status(&app, error))
+    })
+    .await
+    .map_err(|error| format!("MCP settings task failed: {error}"))?
 }

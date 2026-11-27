@@ -164,6 +164,7 @@ pub fn run() {
                 *slot = ssh::system_monitor::load_persisted_settings();
             }
             state.alerts.set_settings(alerts::load_persisted_settings());
+            ssh::sftp::cleanup_default_drag_out_cache();
             llm::load_into_state(&state);
             llm::monitor::start(app.handle().clone(), llm::monitor_context(&state));
             mcp::restore(app.handle());
@@ -173,8 +174,11 @@ pub fn run() {
         .expect("failed to build GpuTerm")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
-                app.state::<AppState>().llm_monitor.stop();
+                let state = app.state::<AppState>();
+                state.llm_monitor.stop();
                 mcp::stop(app);
+                ssh::terminal::shutdown_all(&state);
+                ssh::sftp::cleanup_default_drag_out_cache();
             }
         });
 }

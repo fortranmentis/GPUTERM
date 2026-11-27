@@ -24,8 +24,6 @@
 
 set -u
 
-INPUT=$(cat)
-
 # The agent process id lets GpuTerm attribute usage to the right session when
 # several are running. Walk up from this script until a `claude` process is
 # found; if the chain is exec'd away, the field is simply omitted.
@@ -62,13 +60,17 @@ PYTHON=$(command -v python3 || command -v python) || {
 # Fixed location: this is the path GpuTerm's collector reads.
 SNAPSHOT_DIR="$HOME/.cache/gputerm/agent-status/claude"
 
-# The payload travels in the environment because the interpreter itself is fed
-# on stdin.
-GPUTERM_PAYLOAD="$INPUT" AGENT_PID="${AGENT_PID:-}" SNAPSHOT_DIR="$SNAPSHOT_DIR" "$PYTHON" - <<'GPUTERM_STATUSLINE'
+# Pass the script via -c so the hook JSON flows directly on stdin without
+# exposing prompts in /proc/<pid>/environ or hitting ARG_MAX.
+AGENT_PID="${AGENT_PID:-}" SNAPSHOT_DIR="$SNAPSHOT_DIR" "$PYTHON" -c '
 import json
 import os
+import re
 import sys
 import time
+
+SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
 
 # Whitelist of what may leave the session. Everything else in the hook payload
 # stays where it is.
@@ -79,8 +81,16 @@ def pick(source, keys):
     return picked or None
 
 
+def is_safe_session_id(value):
+    return (
+        isinstance(value, str)
+        and value not in (".", "..")
+        and SESSION_ID_RE.match(value) is not None
+    )
+
+
 try:
-    payload = json.loads(os.environ.get("GPUTERM_PAYLOAD") or "")
+    payload = json.loads(sys.stdin.read() or "")
 except Exception:
     print("")
     sys.exit(0)
@@ -95,7 +105,7 @@ limits = payload.get("rate_limits") if isinstance(payload.get("rate_limits"), di
 
 snapshot = {"captured_at": int(time.time())}
 session_id = payload.get("session_id")
-if isinstance(session_id, str) and session_id:
+if is_safe_session_id(session_id):
     snapshot["session_id"] = session_id
 cwd = payload.get("cwd") or (payload.get("workspace") or {}).get("current_dir")
 if isinstance(cwd, str) and cwd:
@@ -145,12 +155,19 @@ directory = os.environ["SNAPSHOT_DIR"]
 
 
 def write_atomically(target, value):
-    # Written to a sibling temp file first so GpuTerm never reads a partial
-    # document mid-write.
-    temporary = target + ".tmp"
-    with open(temporary, "w") as handle:
-        json.dump(value, handle, separators=(",", ":"))
-    os.replace(temporary, target)
+    # Written to a unique per-process sibling temp file first so GpuTerm never
+    # reads a partial document mid-write and concurrent sessions do not race.
+    temporary = "{}.tmp.{}.{}".format(target, os.getpid(), os.urandom(4).hex())
+    try:
+        with open(temporary, "w") as handle:
+            json.dump(value, handle, separators=(",", ":"))
+        os.replace(temporary, target)
+    except Exception:
+        try:
+            os.remove(temporary)
+        except Exception:
+            pass
+        raise
 
 
 if snapshot.get("session_id"):
@@ -160,10 +177,10 @@ if snapshot.get("session_id"):
             os.path.join(directory, snapshot["session_id"] + ".json"), snapshot
         )
         # The 5-hour and weekly windows are account-wide, and Claude only
-        # includes them after a session's first API response. Publishing them to
-        # one fixed file keeps short-lived sessions - which write quota-less
-        # snapshots - from crowding the only useful reading out of the reader's
-        # newest-files window. Absent limits leave the account file untouched.
+        # includes them after the first API response. Publishing them to one
+        # fixed file keeps short-lived sessions - which write quota-less
+        # snapshots - from crowding the only useful reading out of the newest
+        # files window. Absent limits leave the account file untouched.
         if snapshot.get("rate_limits"):
             write_atomically(
                 os.path.join(directory, ACCOUNT_SNAPSHOT_NAME),
@@ -211,4 +228,4 @@ total_cost = cost.get("total_cost_usd")
 if isinstance(total_cost, (int, float)):
     parts.append("${:.2f}".format(total_cost))
 print(" · ".join(parts))
-GPUTERM_STATUSLINE
+'

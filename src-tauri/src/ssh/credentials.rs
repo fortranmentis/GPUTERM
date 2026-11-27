@@ -553,8 +553,38 @@ fn write_credential_index(path: &Path, known: &HashSet<String>) -> Result<(), St
     write_json_file(path, &ids, "credential metadata")
 }
 
-/// Writes JSON through a 0600 temp file, fsync and rename so a crash cannot
-/// leave a truncated or half-written config behind.
+/// Atomically replaces `to` with `from` on the same volume, overwriting any
+/// existing destination file without a delete-then-rename window.
+pub(crate) fn replace_file_atomically(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        };
+
+        let from_wide: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+        let to_wide: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: Both buffers are NUL-terminated UTF-16 slices that remain
+        // valid for the duration of the Win32 call.
+        unsafe {
+            MoveFileExW(
+                PCWSTR(from_wide.as_ptr()),
+                PCWSTR(to_wide.as_ptr()),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        }
+        .map_err(|_| std::io::Error::last_os_error())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        fs::rename(from, to)
+    }
+}
+
+/// Writes JSON through a 0600 temp file, fsync and atomic replace so a crash
+/// cannot leave a truncated or half-written config behind.
 pub(crate) fn write_json_file(
     path: &Path,
     value: &impl Serialize,
@@ -614,14 +644,7 @@ pub(crate) fn write_json_file(
     })?;
     drop(temp_file);
 
-    #[cfg(target_os = "windows")]
-    if path.exists() {
-        fs::remove_file(path).map_err(|error| {
-            let _ = fs::remove_file(&temp_path);
-            format!("Failed to replace {} {}: {}", label, path.display(), error)
-        })?;
-    }
-    fs::rename(&temp_path, path).map_err(|error| {
+    replace_file_atomically(&temp_path, path).map_err(|error| {
         let _ = fs::remove_file(&temp_path);
         format!("Failed to finalize {} {}: {}", label, path.display(), error)
     })

@@ -483,6 +483,12 @@ pub fn drop_ops_session(ops: &OpsSessions, session_id: &str) {
     }
 }
 
+pub fn drop_all_ops_sessions(ops: &OpsSessions) {
+    if let Ok(mut map) = ops.lock() {
+        map.clear();
+    }
+}
+
 pub fn profile_from_request(request: &SessionConnectRequest) -> SessionProfile {
     normalize_profile(SessionProfile {
         id: request

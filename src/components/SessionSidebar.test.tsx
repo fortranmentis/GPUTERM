@@ -575,3 +575,84 @@ describe("SessionSidebar editing a saved profile", () => {
     expect(screen.getByLabelText("GpuTerm key")).toBeInTheDocument();
   });
 });
+
+describe("SessionSidebar deleting a saved profile", () => {
+  beforeEach(() => {
+    mockInvoke.mockReset();
+    mockConfirm.mockReset();
+    mockInvoke.mockImplementation((command) => {
+      if (command === "delete_session") {
+        return Promise.resolve([bastionProfile]);
+      }
+      return Promise.resolve([]);
+    });
+    useSessionStore.setState({
+      sessions: [savedProfile, bastionProfile],
+      activeSessionId: null,
+      connectedSessionIds: [],
+      terminalIdsBySession: {},
+      message: null,
+    });
+  });
+
+  it("asks for confirmation and cancels cleanly when declined", async () => {
+    mockConfirm.mockResolvedValue(false);
+
+    render(<SessionSidebar />);
+    fireEvent.click(screen.getByTitle(/(connect|show) lab-a100$/i));
+    fireEvent.click(screen.getByRole("button", { name: "Delete lab-a100" }));
+
+    await waitFor(() => expect(mockConfirm).toHaveBeenCalledTimes(1));
+    expect(mockConfirm).toHaveBeenCalledWith(
+      expect.stringContaining("lab-a100"),
+      expect.objectContaining({
+        title: "Delete lab-a100?",
+        kind: "warning",
+        okLabel: "Delete",
+      }),
+    );
+    expect(mockInvoke).not.toHaveBeenCalledWith("delete_session", expect.anything());
+    expect(useSessionStore.getState().sessions).toHaveLength(2);
+  });
+
+  it("deletes the saved profile only after confirmation", async () => {
+    mockConfirm.mockResolvedValue(true);
+
+    render(<SessionSidebar />);
+    fireEvent.click(screen.getByTitle(/(connect|show) lab-a100$/i));
+    fireEvent.click(screen.getByRole("button", { name: "Delete lab-a100" }));
+
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("delete_session", {
+        id: "profile-1",
+      }),
+    );
+    expect(useSessionStore.getState().sessions).toEqual([bastionProfile]);
+    expect(useSessionStore.getState().message).toEqual({
+      kind: "success",
+      text: "Session deleted",
+    });
+  });
+
+  it("warns about closing an active connection when deleting a connected host", async () => {
+    mockConfirm.mockResolvedValue(true);
+    useSessionStore.setState({
+      activeSessionId: "profile-1",
+      connectedSessionIds: ["profile-1"],
+    });
+
+    render(<SessionSidebar />);
+    fireEvent.click(screen.getByTitle(/(connect|show) lab-a100$/i));
+    fireEvent.click(screen.getByRole("button", { name: "Delete lab-a100" }));
+
+    await waitFor(() => expect(mockConfirm).toHaveBeenCalledTimes(1));
+    expect(mockConfirm.mock.calls[0][0]).toContain("active connection");
+    await waitFor(() =>
+      expect(mockInvoke).toHaveBeenCalledWith("delete_session", {
+        id: "profile-1",
+      }),
+    );
+    expect(useSessionStore.getState().connectedSessionIds).toEqual([]);
+    expect(useSessionStore.getState().activeSessionId).toBeNull();
+  });
+});

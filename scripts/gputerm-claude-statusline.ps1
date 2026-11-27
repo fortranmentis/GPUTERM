@@ -12,14 +12,31 @@ $ErrorActionPreference = "Stop"
 # session snapshots exist.
 $AccountSnapshotName = "account.json"
 
+function Test-SafeSessionId([string]$Value) {
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $false
+    }
+    if ($Value -eq "." -or $Value -eq "..") {
+        return $false
+    }
+    return $Value -match '^[A-Za-z0-9._-]+$'
+}
+
 function Write-SnapshotFile([string]$Target, $Value) {
-    # Written to a sibling temporary file first so GpuTerm never reads a partial
-    # document mid-write.
-    $Temporary = $Target + ".tmp"
+    # Written to a unique per-process sibling temporary file first so GpuTerm
+    # never reads a partial document mid-write and concurrent sessions do not race.
+    $Nonce = [Guid]::NewGuid().ToString("N").Substring(0, 8)
+    $Temporary = "{0}.tmp.{1}.{2}" -f $Target, $PID, $Nonce
     $Encoded = $Value | ConvertTo-Json -Compress -Depth 8
     $Utf8 = New-Object System.Text.UTF8Encoding($false)
-    [IO.File]::WriteAllText($Temporary, $Encoded, $Utf8)
-    Move-Item -LiteralPath $Temporary -Destination $Target -Force
+    try {
+        [IO.File]::WriteAllText($Temporary, $Encoded, $Utf8)
+        Move-Item -LiteralPath $Temporary -Destination $Target -Force
+    }
+    catch {
+        Remove-Item -LiteralPath $Temporary -Force -ErrorAction SilentlyContinue
+        throw
+    }
 }
 
 function Get-Field($Object, [string]$Name) {
@@ -76,8 +93,10 @@ try {
     $Snapshot = [ordered]@{ captured_at = $CapturedAt }
 
     $SessionId = Get-Field $Payload "session_id"
-    if (-not [string]::IsNullOrWhiteSpace([string]$SessionId)) {
-        $Snapshot["session_id"] = [string]$SessionId
+    $SafeSessionId = $null
+    if ($null -ne $SessionId -and (Test-SafeSessionId ([string]$SessionId))) {
+        $SafeSessionId = [string]$SessionId
+        $Snapshot["session_id"] = $SafeSessionId
     }
 
     $Workspace = Get-Field $Payload "workspace"
@@ -139,14 +158,14 @@ try {
         $Snapshot["rate_limits"] = $PickedLimits
     }
 
-    if (-not [string]::IsNullOrWhiteSpace([string]$SessionId)) {
+    if ($null -ne $SafeSessionId) {
         $UserHome = [Environment]::GetFolderPath("UserProfile")
         if ([string]::IsNullOrWhiteSpace($UserHome)) {
             $UserHome = $HOME
         }
         $Directory = Join-Path $UserHome ".cache\gputerm\agent-status\claude"
         New-Item -ItemType Directory -Force -Path $Directory | Out-Null
-        Write-SnapshotFile (Join-Path $Directory ("{0}.json" -f $SessionId)) $Snapshot
+        Write-SnapshotFile (Join-Path $Directory ("{0}.json" -f $SafeSessionId)) $Snapshot
 
         # The 5-hour and weekly windows are account-wide, and Claude only
         # includes them after a session's first API response. Publishing them to
@@ -157,7 +176,7 @@ try {
             $Account = [ordered]@{
                 scope        = "account"
                 captured_at  = $Snapshot["captured_at"]
-                session_id   = $SessionId
+                session_id   = $SafeSessionId
                 rate_limits  = $Snapshot["rate_limits"]
             }
             Write-SnapshotFile (Join-Path $Directory $AccountSnapshotName) $Account

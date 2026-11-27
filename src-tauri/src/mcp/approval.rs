@@ -100,6 +100,29 @@ fn deliver(pending: &PendingApprovals, request_id: &str, approved: bool) -> Resu
         .map_err(|_| "That request has already expired".to_string())
 }
 
+/// Drains all waiting approvals, sending `false` to every caller, and returns
+/// the canceled request ids.
+pub(crate) fn drain_pending(pending: &PendingApprovals) -> Vec<String> {
+    let drained: Vec<(String, SyncSender<bool>)> = match pending.lock() {
+        Ok(mut map) => map.drain().collect(),
+        Err(_) => return Vec::new(),
+    };
+    let mut ids = Vec::with_capacity(drained.len());
+    for (request_id, sender) in drained {
+        let _ = sender.send(false);
+        ids.push(request_id);
+    }
+    ids
+}
+
+/// Cancels every waiting approval request and notifies the main window to close
+/// its prompts.
+pub fn cancel_all_pending(app: &AppHandle, pending: &PendingApprovals) {
+    for request_id in drain_pending(pending) {
+        let _ = app.emit_to("main", APPROVAL_CLOSED_EVENT, &request_id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,5 +147,25 @@ mod tests {
         pending.lock().unwrap().insert("r2".into(), sender);
         drop(receiver);
         assert!(deliver(&pending, "r2", true).is_err());
+    }
+
+    #[test]
+    fn drain_pending_denies_all_waiting_requests_and_clears_map() {
+        let pending = PendingApprovals::default();
+        let (tx1, rx1) = mpsc::sync_channel(1);
+        let (tx2, rx2) = mpsc::sync_channel(1);
+        {
+            let mut map = pending.lock().unwrap();
+            map.insert("req-1".into(), tx1);
+            map.insert("req-2".into(), tx2);
+        }
+
+        let mut canceled = drain_pending(&pending);
+        canceled.sort();
+        assert_eq!(canceled, vec!["req-1".to_string(), "req-2".to_string()]);
+        assert_eq!(rx1.recv_timeout(Duration::from_millis(10)), Ok(false));
+        assert_eq!(rx2.recv_timeout(Duration::from_millis(10)), Ok(false));
+        assert!(pending.lock().unwrap().is_empty());
+        assert!(drain_pending(&pending).is_empty());
     }
 }

@@ -1,5 +1,5 @@
 use crate::ssh::session::{
-    open_ssh_session, target_for_active_session, with_ops_session, AppState, SshTarget,
+    config_dir, open_ssh_session, target_for_active_session, with_ops_session, AppState, SshTarget,
 };
 use serde::{Deserialize, Serialize};
 use ssh2::{FileStat, RenameFlags, Sftp};
@@ -173,6 +173,69 @@ pub async fn sftp_list_dir(
     .map_err(|error| format!("SFTP list task failed: {}", error))?
 }
 
+/// Returns the user-private root directory for native OS drag-out exports.
+pub(crate) fn drag_out_cache_root() -> PathBuf {
+    config_dir().join("drag-out")
+}
+
+/// Prunes expired exports from the default drag-out cache directory.
+pub(crate) fn cleanup_default_drag_out_cache() {
+    cleanup_drag_out_cache(&drag_out_cache_root());
+}
+
+fn set_private_dir_permissions(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
+            format!(
+                "Failed to set private permissions on {}: {}",
+                path.display(),
+                error
+            )
+        })?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+fn create_drag_out_export_dir(cache_root: &Path) -> Result<PathBuf, String> {
+    fs::create_dir_all(cache_root).map_err(|error| {
+        format!(
+            "Failed to create SFTP drag cache {}: {}",
+            cache_root.display(),
+            error
+        )
+    })?;
+    set_private_dir_permissions(cache_root)?;
+    cleanup_drag_out_cache(cache_root);
+
+    let export_dir = cache_root.join(uuid::Uuid::new_v4().to_string());
+    fs::create_dir(&export_dir).map_err(|error| {
+        format!(
+            "Failed to create SFTP drag export {}: {}",
+            export_dir.display(),
+            error
+        )
+    })?;
+    set_private_dir_permissions(&export_dir)?;
+    Ok(export_dir)
+}
+
+fn create_download_part_file(path: &Path, private_permissions: bool) -> std::io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    if private_permissions {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = private_permissions;
+    options.open(path)
+}
+
 /// Reserves absolute, application-owned temporary paths for native OS drag-out.
 ///
 /// Finder, Explorer and Linux file managers can only receive real local paths;
@@ -190,24 +253,8 @@ pub fn sftp_create_drag_out_paths(
         return Err("Too many remote items selected for one drag".to_string());
     }
 
-    let cache_root = std::env::temp_dir().join("gputerm").join("drag-out");
-    fs::create_dir_all(&cache_root).map_err(|error| {
-        format!(
-            "Failed to create SFTP drag cache {}: {}",
-            cache_root.display(),
-            error
-        )
-    })?;
-    cleanup_drag_out_cache(&cache_root);
-
-    let export_dir = cache_root.join(uuid::Uuid::new_v4().to_string());
-    fs::create_dir(&export_dir).map_err(|error| {
-        format!(
-            "Failed to create SFTP drag export {}: {}",
-            export_dir.display(),
-            error
-        )
-    })?;
+    let cache_root = drag_out_cache_root();
+    let export_dir = create_drag_out_export_dir(&cache_root)?;
 
     reserve_drag_out_paths(&export_dir, remote_paths).inspect_err(|_| {
         let _ = fs::remove_dir_all(&export_dir);
@@ -427,12 +474,14 @@ fn download_path(
     }
 
     let total_bytes = remote_stat.size.unwrap_or(0);
+    let token = transfer_token(request.transfer_id.as_deref());
     let mut transferred_bytes = 0;
     emit_progress(&app, &request, "download", transferred_bytes, Some(total_bytes), false, None, None);
     let result = download_remote_file(
         &sftp,
         remote_path,
         Path::new(&request.local_path),
+        &token,
         &app,
         &request,
         Some(total_bytes),
@@ -535,28 +584,27 @@ fn transfer_dir(
         if upload {
             ensure_remote_directory(sftp, remote_root)?;
             for dir in &plan.dirs {
+                check_transfer_canceled(cancel)?;
                 ensure_remote_directory(sftp, &join_remote(remote_root, dir))?;
             }
         } else {
             ensure_local_directory(local_root)?;
             for dir in &plan.dirs {
-                ensure_local_directory(&join_local(local_root, dir))?;
+                check_transfer_canceled(cancel)?;
+                ensure_local_directory(&join_local_download(local_root, dir))?;
             }
         }
 
-        let mut files = Vec::new();
-        for (relative, size) in plan.files {
-            let exists = if upload {
-                sftp.lstat(&join_remote(remote_root, &relative)).is_ok()
-            } else {
-                fs::symlink_metadata(join_local(local_root, &relative)).is_ok()
-            };
-            if exists && request.keep_existing {
-                summary.skipped_existing.push(relative);
-            } else {
-                files.push((relative, size));
-            }
-        }
+        let filtered =
+            filter_planned_files(plan.files, request.keep_existing, cancel, |relative| {
+                if upload {
+                    sftp.lstat(&join_remote(remote_root, relative)).is_ok()
+                } else {
+                    fs::symlink_metadata(join_local_download(local_root, relative)).is_ok()
+                }
+            })?;
+        let files = filtered.files;
+        summary.skipped_existing = filtered.skipped_existing;
 
         total_bytes = Some(files.iter().map(|(_, size)| *size).sum::<u64>());
         folder.files_total = files.len() as u64;
@@ -568,15 +616,16 @@ fn transfer_dir(
             folder.files_done = index as u64;
             folder.current_file = Some(relative.clone());
             let remote = join_remote(remote_root, relative);
-            let local = join_local(local_root, relative);
             if upload {
+                let local = join_local(local_root, relative);
                 upload_file(
                     sftp, &local, &remote, &token, app, request, total_bytes, cancel,
                     &mut transferred_bytes, Some(&folder),
                 )?;
             } else {
+                let local = join_local_download(local_root, relative);
                 download_remote_file(
-                    sftp, &remote, &local, app, request, total_bytes, cancel,
+                    sftp, &remote, &local, &token, app, request, total_bytes, cancel,
                     &mut transferred_bytes, Some(&folder),
                 )?;
             }
@@ -595,6 +644,44 @@ fn transfer_dir(
         .unwrap_or(0);
     finish_transfer(app, request, operation, transferred_bytes, total_bytes, result, Some(&folder))?;
     outcome
+}
+
+#[derive(Debug)]
+struct FilteredPlanFiles {
+    files: Vec<(String, u64)>,
+    skipped_existing: Vec<String>,
+}
+
+fn filter_planned_files<F>(
+    planned: Vec<(String, u64)>,
+    keep_existing: bool,
+    cancel: Option<&AtomicBool>,
+    mut exists_check: F,
+) -> Result<FilteredPlanFiles, String>
+where
+    F: FnMut(&str) -> bool,
+{
+    if !keep_existing {
+        check_transfer_canceled(cancel)?;
+        return Ok(FilteredPlanFiles {
+            files: planned,
+            skipped_existing: Vec::new(),
+        });
+    }
+    let mut files = Vec::with_capacity(planned.len());
+    let mut skipped_existing = Vec::new();
+    for (relative, size) in planned {
+        check_transfer_canceled(cancel)?;
+        if exists_check(&relative) {
+            skipped_existing.push(relative);
+        } else {
+            files.push((relative, size));
+        }
+    }
+    Ok(FilteredPlanFiles {
+        files,
+        skipped_existing,
+    })
 }
 
 /// Uploads one local file through a remote part file.
@@ -727,11 +814,26 @@ fn transfer_token(transfer_id: Option<&str>) -> String {
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
 }
 
+/// `.{name}.{token}.gputerm-part` next to `local_path`, keeping concurrent
+/// downloads of the same destination from colliding on one temp file.
+fn local_part_path(local_path: &Path, token: &str) -> PathBuf {
+    let name = local_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "download".to_string());
+    let part_name = format!(".{}.{token}{DOWNLOAD_PART_SUFFIX}", name);
+    match local_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(part_name),
+        _ => PathBuf::from(part_name),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn download_remote_file(
     sftp: &Sftp,
     remote_path: &Path,
     local_path: &Path,
+    token: &str,
     app: &AppHandle,
     request: &SftpTransferRequest,
     total_bytes: Option<u64>,
@@ -754,17 +856,8 @@ fn download_remote_file(
     }
 
     // Checked before any bytes move: a directory holding the destination name
-    // must not be deleted to land a file there.
-    if let Ok(metadata) = fs::symlink_metadata(local_path) {
-        if metadata.is_dir() && !metadata.file_type().is_symlink() {
-            return Err(format!(
-                "Cannot download {}: a directory of the same name already exists at {}. \
-                 Rename or remove it first.",
-                remote_path.display(),
-                local_path.display()
-            ));
-        }
-    }
+    // must not be replaced by a file.
+    ensure_not_local_directory(local_path)?;
 
     let mut remote_file = sftp.open(remote_path).map_err(|error| {
         format!(
@@ -773,9 +866,9 @@ fn download_remote_file(
             error
         )
     })?;
-    let part_path = PathBuf::from(format!("{}{}", local_path.display(), DOWNLOAD_PART_SUFFIX));
-    remove_local_entry_if_exists(&part_path)?;
-    let mut local_file = fs::File::create(&part_path).map_err(|error| {
+    let part_path = local_part_path(local_path, token);
+    let in_drag_cache = local_path.starts_with(drag_out_cache_root());
+    let mut local_file = create_download_part_file(&part_path, in_drag_cache).map_err(|error| {
         format!(
             "Failed to create local file {}: {}",
             part_path.display(),
@@ -799,9 +892,13 @@ fn download_remote_file(
         return Err(error);
     }
 
-    remove_local_entry_if_exists(local_path)?;
-    fs::rename(&part_path, local_path)
-        .map_err(|error| format!("Failed to finalize {}: {}", local_path.display(), error))
+    ensure_not_local_directory(local_path).inspect_err(|_| {
+        let _ = fs::remove_file(&part_path);
+    })?;
+    crate::ssh::credentials::replace_file_atomically(&part_path, local_path).map_err(|error| {
+        let _ = fs::remove_file(&part_path);
+        format!("Failed to finalize {}: {}", local_path.display(), error)
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -990,6 +1087,9 @@ fn list_remote_folder(sftp: &Sftp, path: &Path) -> Result<Listing, String> {
         .into_iter()
         .filter_map(|(path, stat)| {
             let name = path.file_name()?.to_string_lossy().into_owned();
+            if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
+                return None;
+            }
             // READDIR attributes describe the entry itself, so a symlink is
             // reported as one rather than as its target.
             let kind = match file_type(&stat) {
@@ -1019,6 +1119,18 @@ fn join_local(root: &Path, relative: &str) -> PathBuf {
         .split('/')
         .filter(|part| !part.is_empty())
         .fold(root.to_path_buf(), |path, part| path.join(part))
+}
+
+/// Joins a remote-originated relative path onto `root`, sanitizing every path
+/// segment so `\`, `:`, control characters, `.`/`..`, and Windows reserved
+/// device names cannot escape `root` or corrupt downloads.
+fn join_local_download(root: &Path, relative: &str) -> PathBuf {
+    relative
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .fold(root.to_path_buf(), |path, part| {
+            path.join(sanitize_drag_out_name(part))
+        })
 }
 
 fn remote_directory_entries(sftp: &Sftp, path: &Path) -> Result<Vec<(PathBuf, FileStat)>, String> {
@@ -1097,11 +1209,8 @@ fn ensure_local_directory(path: &Path) -> Result<(), String> {
     })
 }
 
-/// Clears a single file so a transfer can take its place. Directories are
-/// refused rather than removed: no transfer may delete a tree to free up a name,
-/// and the callers here only ever target a file or a `.gputerm-part` scratch
-/// path.
-fn remove_local_entry_if_exists(path: &Path) -> Result<(), String> {
+/// Refuses to replace an existing local directory with a downloaded file.
+fn ensure_not_local_directory(path: &Path) -> Result<(), String> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -1120,8 +1229,7 @@ fn remove_local_entry_if_exists(path: &Path) -> Result<(), String> {
             path.display()
         ));
     }
-    fs::remove_file(path)
-        .map_err(|error| format!("Failed to remove local file {}: {}", path.display(), error))
+    Ok(())
 }
 
 fn reserve_drag_out_paths(
@@ -1311,14 +1419,17 @@ fn file_type(stat: &FileStat) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_local_directory, join_local, join_remote, list_local_folder, plan_tree,
-        remove_local_entry_if_exists, remote_child_path, remote_part_path, reserve_drag_out_paths,
-        transfer_token, EntryKind, Listing,
+        create_download_part_file, create_drag_out_export_dir, drag_out_cache_root,
+        ensure_local_directory, ensure_not_local_directory, filter_planned_files, join_local,
+        join_local_download, join_remote, list_local_folder, local_part_path, plan_tree,
+        remote_child_path, remote_part_path, reserve_drag_out_paths, transfer_token, EntryKind,
+        Listing, TRANSFER_CANCELED,
     };
+    use crate::ssh::session::config_dir;
     use std::collections::HashMap;
-    use std::path::PathBuf;
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
     fn refuses_to_replace_a_local_directory_with_a_file() {
@@ -1327,7 +1438,7 @@ mod tests {
         fs::create_dir_all(occupied.join("nested")).expect("create occupied directory");
         fs::write(occupied.join("nested/keep.bin"), [7_u8]).expect("write nested file");
 
-        let error = remove_local_entry_if_exists(&occupied).expect_err("must refuse a directory");
+        let error = ensure_not_local_directory(&occupied).expect_err("must refuse a directory");
         assert!(error.contains("Refusing to replace the directory"), "{error}");
         // The tree the user already had is still there.
         assert!(occupied.join("nested/keep.bin").exists());
@@ -1350,18 +1461,42 @@ mod tests {
     }
 
     #[test]
-    fn clears_only_a_plain_file_in_the_way() {
+    fn allows_replacing_a_plain_file_or_missing_path() {
         let root = std::env::temp_dir().join(format!("gputerm-sftp-guard-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).expect("create test directory");
-        let stale = root.join("payload.gputerm-part");
-        fs::write(&stale, [9_u8]).expect("write stale part file");
+        let existing = root.join("payload.bin");
+        fs::write(&existing, [9_u8]).expect("write existing file");
 
-        remove_local_entry_if_exists(&stale).expect("stale part file is removable");
-        assert!(!stale.exists());
-        // A missing path is not an error.
-        remove_local_entry_if_exists(&stale).expect("missing path is a no-op");
+        ensure_not_local_directory(&existing).expect("plain file is replaceable");
+        ensure_not_local_directory(&root.join("missing.bin")).expect("missing path is allowed");
 
         fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn local_part_path_is_unique_per_token_beside_destination() {
+        let dest = Path::new("/tmp/downloads/weights.bin");
+        let p1 = local_part_path(dest, "tok-1");
+        let p2 = local_part_path(dest, "tok-2");
+        assert_eq!(p1, Path::new("/tmp/downloads/.weights.bin.tok-1.gputerm-part"));
+        assert_ne!(p1, p2);
+    }
+
+    #[test]
+    fn join_local_download_sanitizes_unsafe_segments() {
+        let root = Path::new("/tmp/dl");
+        assert_eq!(
+            join_local_download(root, "sub/normal.txt"),
+            root.join("sub").join("normal.txt")
+        );
+        assert_eq!(
+            join_local_download(root, r"..\escape/C:drive/CON/com1.txt/.."),
+            root.join(".._escape")
+                .join("C_drive")
+                .join("_CON")
+                .join("_com1.txt")
+                .join("remote-item")
+        );
     }
 
     type FakeFolder<'a> = (&'a str, &'a [(&'a str, EntryKind, u64)]);
@@ -1504,5 +1639,76 @@ mod tests {
         assert!(paths[2].local_path.ends_with("_CON"));
 
         fs::remove_dir_all(root).expect("remove drag path test directory");
+    }
+
+    #[test]
+    fn filter_planned_files_skips_exists_checks_when_overwriting() {
+        let planned = vec![("a.txt".to_string(), 10), ("b.txt".to_string(), 20)];
+        let mut checks = 0_usize;
+        let filtered = filter_planned_files(planned.clone(), false, None, |_| {
+            checks += 1;
+            true
+        })
+        .expect("overwrite filter succeeds");
+        assert_eq!(checks, 0);
+        assert_eq!(filtered.files, planned);
+        assert!(filtered.skipped_existing.is_empty());
+    }
+
+    #[test]
+    fn filter_planned_files_checks_existence_and_cancellation_when_keeping_existing() {
+        let planned = vec![
+            ("keep.txt".to_string(), 10),
+            ("new.txt".to_string(), 20),
+            ("later.txt".to_string(), 30),
+        ];
+        let filtered =
+            filter_planned_files(planned.clone(), true, None, |rel| rel == "keep.txt")
+                .expect("keep_existing filter succeeds");
+        assert_eq!(filtered.skipped_existing, vec!["keep.txt"]);
+        assert_eq!(
+            filtered.files,
+            vec![("new.txt".to_string(), 20), ("later.txt".to_string(), 30)]
+        );
+
+        let cancel = AtomicBool::new(false);
+        let mut checked = Vec::new();
+        let err = filter_planned_files(planned, true, Some(&cancel), |rel| {
+            checked.push(rel.to_string());
+            cancel.store(true, Ordering::SeqCst);
+            false
+        })
+        .expect_err("canceled filter must stop early");
+        assert_eq!(err, TRANSFER_CANCELED);
+        assert_eq!(checked, vec!["keep.txt"]);
+    }
+
+    #[test]
+    fn drag_out_cache_root_lives_under_app_config_dir_with_private_permissions() {
+        let default_root = drag_out_cache_root();
+        assert_eq!(default_root, config_dir().join("drag-out"));
+
+        let test_base =
+            std::env::temp_dir().join(format!("gputerm-drag-priv-{}", uuid::Uuid::new_v4()));
+        let cache_root = test_base.join("drag-out");
+        let export_dir =
+            create_drag_out_export_dir(&cache_root).expect("create private drag export dir");
+        assert_eq!(export_dir.parent(), Some(cache_root.as_path()));
+
+        let part_file = export_dir.join("secret.txt.gputerm-part");
+        let _file = create_download_part_file(&part_file, true).expect("create private part file");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let root_mode = fs::metadata(&cache_root).unwrap().permissions().mode() & 0o777;
+            let export_mode = fs::metadata(&export_dir).unwrap().permissions().mode() & 0o777;
+            let file_mode = fs::metadata(&part_file).unwrap().permissions().mode() & 0o777;
+            assert_eq!(root_mode, 0o700);
+            assert_eq!(export_mode, 0o700);
+            assert_eq!(file_mode, 0o600);
+        }
+
+        fs::remove_dir_all(test_base).expect("remove drag privacy test directory");
     }
 }

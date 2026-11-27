@@ -541,7 +541,10 @@ pub async fn terminal_resize(
 }
 
 #[tauri::command]
-pub fn disconnect_terminal_pane(state: State<AppState>, terminal_id: String) -> Result<(), String> {
+pub async fn disconnect_terminal_pane(
+    state: State<'_, AppState>,
+    terminal_id: String,
+) -> Result<(), String> {
     let handle = {
         let mut terminals = state
             .terminals
@@ -550,19 +553,35 @@ pub fn disconnect_terminal_pane(state: State<AppState>, terminal_id: String) -> 
         terminals.remove(&terminal_id)
     };
     if let Some(handle) = handle {
-        stop_terminal_handle(handle);
+        tauri::async_runtime::spawn_blocking(move || stop_terminal_handle(handle))
+            .await
+            .map_err(|error| format!("Terminal disconnect task failed: {}", error))?;
     }
     Ok(())
 }
 
 #[tauri::command]
-pub fn disconnect_terminal(state: State<AppState>, session_id: String) -> Result<(), String> {
-    stop_existing_session(&state, &session_id);
+pub async fn disconnect_terminal(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
+    let handles = detach_existing_session(&state, &session_id);
     // Passwords remain only in memory until GpuTerm exits so a disconnected
     // saved profile can reconnect on double-click without writing secrets to disk.
     if let Ok(mut active) = state.active_connections.lock() {
         active.remove(&session_id);
     }
+    let ops = Arc::clone(&state.ops_sessions);
+    let port_forwards = Arc::clone(&state.port_forwards);
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::ssh::session::drop_ops_session(&ops, &session_id);
+        port_forwards.stop_profile(&session_id);
+        for handle in handles {
+            stop_terminal_handle(handle);
+        }
+    })
+    .await
+    .map_err(|error| format!("Terminal disconnect task failed: {}", error))?;
     Ok(())
 }
 
@@ -1000,9 +1019,32 @@ pub(crate) fn teardown_session(state: &AppState, session_id: &str) {
     }
 }
 
-fn stop_existing_session(state: &AppState, session_id: &str) {
-    crate::ssh::session::drop_ops_session(&state.ops_sessions, session_id);
-    state.port_forwards.stop_profile(session_id);
+/// Tears down every active terminal/local PTY, port forward, telemetry poller,
+/// and pooled ops session when the application exits.
+pub(crate) fn shutdown_all(state: &AppState) {
+    if let Ok(mut stops) = state.telemetry_stops.lock() {
+        for (_, stop) in stops.drain() {
+            stop.store(true, Ordering::SeqCst);
+        }
+    }
+    if let Ok(mut active) = state.active_connections.lock() {
+        active.clear();
+    }
+    state.port_forwards.stop_all();
+    crate::ssh::session::drop_all_ops_sessions(&state.ops_sessions);
+    let handles: Vec<TerminalHandle> = if let Ok(mut terminals) = state.terminals.lock() {
+        terminals.drain().map(|(_, handle)| handle).collect()
+    } else {
+        Vec::new()
+    };
+    for handle in handles {
+        stop_terminal_handle(handle);
+    }
+}
+
+/// Removes in-memory state and terminal handles for `session_id` without
+/// performing blocking SSH/PTY teardown yet.
+fn detach_existing_session(state: &AppState, session_id: &str) -> Vec<TerminalHandle> {
     if let Ok(mut cache) = state.remote_os_cache.lock() {
         cache.remove(session_id);
     }
@@ -1024,7 +1066,7 @@ fn stop_existing_session(state: &AppState, session_id: &str) {
         }
     }
 
-    let handles = if let Ok(mut terminals) = state.terminals.lock() {
+    if let Ok(mut terminals) = state.terminals.lock() {
         let terminal_ids = terminals
             .iter()
             .filter_map(|(terminal_id, handle)| {
@@ -1037,8 +1079,13 @@ fn stop_existing_session(state: &AppState, session_id: &str) {
             .collect::<Vec<_>>()
     } else {
         Vec::new()
-    };
-    for handle in handles {
+    }
+}
+
+fn stop_existing_session(state: &AppState, session_id: &str) {
+    crate::ssh::session::drop_ops_session(&state.ops_sessions, session_id);
+    state.port_forwards.stop_profile(session_id);
+    for handle in detach_existing_session(state, session_id) {
         stop_terminal_handle(handle);
     }
 }

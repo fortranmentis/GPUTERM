@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import {
   FileInput,
   KeyRound,
@@ -335,6 +336,19 @@ export function SessionSidebar({ onClose }: { onClose?: () => void }) {
   const remove = async () => {
     if (!form.id) {
       setForm(blankForm);
+      return;
+    }
+    const label = form.name.trim() || form.host.trim() || "this host";
+    const isConnected = connectedSessionIds.includes(form.id);
+    const detail = isConnected
+      ? `The active connection to ${label} will be closed and its saved profile and credentials will be removed from this computer.`
+      : `The saved profile and stored credentials for ${label} will be removed from this computer.`;
+    const confirmed = await confirm(detail, {
+      title: `Delete ${label}?`,
+      kind: "warning",
+      okLabel: "Delete",
+    });
+    if (!confirmed) {
       return;
     }
     setBusy(true);

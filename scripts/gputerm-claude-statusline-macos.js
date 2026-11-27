@@ -37,6 +37,16 @@ function environmentValue(name) {
 }
 
 var ACCOUNT_SNAPSHOT_NAME = "account.json";
+var SESSION_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
+
+function isSafeSessionId(value) {
+  return (
+    typeof value === "string" &&
+    value !== "." &&
+    value !== ".." &&
+    SESSION_ID_PATTERN.test(value)
+  );
+}
 
 function statusDirectory(home) {
   return home + "/.cache/gputerm/agent-status/claude";
@@ -123,7 +133,7 @@ function run() {
     var limits = field(payload, "rate_limits") || {};
     var snapshot = { captured_at: Math.floor(Date.now() / 1000) };
     var sessionId = field(payload, "session_id");
-    if (typeof sessionId === "string" && sessionId) {
+    if (isSafeSessionId(sessionId)) {
       snapshot.session_id = sessionId;
     }
     var workspace = field(payload, "workspace") || {};

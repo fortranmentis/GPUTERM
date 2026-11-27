@@ -1608,11 +1608,25 @@ pub(crate) fn run_local_command_for(os: RemoteOs, command: &str) -> Result<Strin
     run_local_command_with_timeout(os, command, LOCAL_COMMAND_TIMEOUT)
 }
 
+fn spawn_pipe_reader<R: Read + Send + 'static>(
+    pipe: Option<R>,
+) -> thread::JoinHandle<std::io::Result<Vec<u8>>> {
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut reader) = pipe {
+            reader.read_to_end(&mut buf)?;
+        }
+        Ok(buf)
+    })
+}
+
 /// Runs a local collector with an upper bound on how long it may take.
 ///
 /// `Command::output` waits forever, so one wedged collector (a hung mount, a
 /// stuck PowerShell) would stall the telemetry thread for the life of the
-/// session. The child is killed once the budget is gone.
+/// session. The child is killed once the budget is gone. Stdout and stderr are
+/// drained concurrently on reader threads so large output cannot deadlock in
+/// the OS pipe buffer before `try_wait` observes exit.
 pub(crate) fn run_local_command_with_timeout(
     os: RemoteOs,
     command: &str,
@@ -1624,14 +1638,19 @@ pub(crate) fn run_local_command_with_timeout(
         .spawn()
         .map_err(|error| format!("failed to start local telemetry command: {}", error))?;
 
+    let stdout_reader = spawn_pipe_reader(child.stdout.take());
+    let stderr_reader = spawn_pipe_reader(child.stderr.take());
+
     let deadline = Instant::now() + timeout;
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
+                    let _ = stdout_reader.join();
+                    let _ = stderr_reader.join();
                     return Err(format!(
                         "local telemetry command timed out after {}s",
                         timeout.as_secs()
@@ -1641,21 +1660,30 @@ pub(crate) fn run_local_command_with_timeout(
             }
             Err(error) => {
                 let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
                 return Err(format!("local telemetry command failed: {}", error));
             }
         }
-    }
+    };
 
-    let output = child
-        .wait_with_output()
-        .map_err(|error| format!("local telemetry command failed: {}", error))?;
-    if !output.status.success() {
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| "local telemetry stdout reader panicked".to_string())?
+        .map_err(|error| format!("failed to read local telemetry stdout: {}", error))?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| "local telemetry stderr reader panicked".to_string())?
+        .map_err(|error| format!("failed to read local telemetry stderr: {}", error))?;
+
+    if !status.success() {
         return Err(non_zero_exit_error(
-            &String::from_utf8_lossy(&output.stderr),
-            output.status.code().unwrap_or(-1),
+            &String::from_utf8_lossy(&stderr),
+            status.code().unwrap_or(-1),
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(String::from_utf8_lossy(&stdout).into_owned())
 }
 
 fn local_collector_command(os: RemoteOs, command: &str) -> Command {
@@ -2746,5 +2774,28 @@ mod tests {
     fn parses_empty_who_output_as_no_sessions() {
         assert!(parse_who_output("").is_empty());
         assert!(parse_who_output("\n  \n").is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_command_drains_large_stdout_and_stderr_without_pipe_deadlock() {
+        let command = r#"awk 'BEGIN { s="0123456789abcdef0123456789abcdef"; for (i = 0; i < 4500; i++) { print s; print s > "/dev/stderr" } }'"#;
+        let output =
+            run_local_command_with_timeout(local_os(), command, Duration::from_secs(5))
+                .expect("large output command should not deadlock");
+        assert!(
+            output.len() > 128 * 1024,
+            "expected >128 KiB stdout, got {} bytes",
+            output.len()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_command_still_times_out_and_cleans_up() {
+        let error =
+            run_local_command_with_timeout(local_os(), "sleep 5", Duration::from_millis(150))
+                .expect_err("sleeping command should time out");
+        assert!(error.contains("timed out"), "{error}");
     }
 }

@@ -372,7 +372,7 @@ pub async fn db_status(state: State<'_, AppState>, id: String) -> Result<DbStatu
 /// Reads the password from stdin into a private file the client reads, so
 /// it never appears in an argument list.
 const PASSWORD_PREAMBLE: &str =
-    "IFS= read -r pw || true\numask 077\nt=$(mktemp) || exit 1\ntrap 'rm -f \"$t\"' EXIT\n";
+    "IFS= read -r pw || true\numask 077\nt=$(mktemp) || exit 1\ntrap 'rm -f \"$t\"' EXIT HUP INT TERM\n";
 
 const POSTGRES_SQL: &str = "SELECT current_setting('server_version'), \
 (SELECT count(*) FROM pg_stat_activity WHERE backend_type = 'client backend'), \

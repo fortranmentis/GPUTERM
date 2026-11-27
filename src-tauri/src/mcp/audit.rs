@@ -13,6 +13,8 @@ use crate::ssh::system_monitor::now_epoch_seconds;
 
 /// Past this size the log moves to `mcp-audit.log.1`, replacing the old one.
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
+/// Caps serialized arguments per entry so oversized junk cannot evict the log.
+const MAX_ARGUMENTS_BYTES: usize = 8 * 1024;
 
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -20,14 +22,32 @@ pub fn log_path() -> PathBuf {
     config_dir().join("mcp-audit.log")
 }
 
+/// Keeps `arguments` verbatim when small, or replaces it with a bounded
+/// UTF-8-safe summary when its serialized form exceeds `MAX_ARGUMENTS_BYTES`.
+fn capped_arguments(arguments: &Value) -> Value {
+    let serialized = arguments.to_string();
+    if serialized.len() <= MAX_ARGUMENTS_BYTES {
+        return arguments.clone();
+    }
+    let mut end = MAX_ARGUMENTS_BYTES;
+    while end > 0 && !serialized.is_char_boundary(end) {
+        end -= 1;
+    }
+    json!({
+        "truncated": true,
+        "originalBytes": serialized.len(),
+        "preview": &serialized[..end],
+    })
+}
+
 /// Records one call. `outcome` is "ok", "error" or "denied". Arguments are
-/// kept as sent (a command's text, a path); nothing a tool returns is.
+/// kept as sent (capped in size); nothing a tool returns is.
 pub fn record(client: &str, tool: &str, arguments: &Value, outcome: &str, error: Option<&str>) {
     let entry = json!({
         "at": now_epoch_seconds(),
         "client": client,
         "tool": tool,
-        "arguments": arguments,
+        "arguments": capped_arguments(arguments),
         "outcome": outcome,
         "error": error,
     });
@@ -80,5 +100,20 @@ mod tests {
             MAX_LOG_BYTES
         );
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn small_arguments_are_kept_and_oversized_arguments_are_truncated() {
+        let small = json!({ "host": "gpu-01", "command": "nvidia-smi" });
+        assert_eq!(capped_arguments(&small), small);
+
+        // Multi-byte UTF-8 payload exceeding MAX_ARGUMENTS_BYTES.
+        let huge = json!({ "junk": "한".repeat(MAX_ARGUMENTS_BYTES) });
+        let capped = capped_arguments(&huge);
+        assert_eq!(capped["truncated"], json!(true));
+        assert!(capped["originalBytes"].as_u64().unwrap() > MAX_ARGUMENTS_BYTES as u64);
+        let preview = capped["preview"].as_str().unwrap();
+        assert!(preview.len() <= MAX_ARGUMENTS_BYTES);
+        assert!(capped.to_string().len() < MAX_ARGUMENTS_BYTES + 256);
     }
 }
