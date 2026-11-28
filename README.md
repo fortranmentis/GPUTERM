@@ -26,7 +26,7 @@ Working on a remote GPU box usually means juggling an SSH client, an SFTP tool, 
 
 Almost nothing ever touches your servers: every metric comes from one-shot standard commands (`nvidia-smi`, `/proc`, `sysctl`, PowerShell CIM, …) over SSH, and no admin/root rights are required for the core metrics. The [three narrow exceptions](#faq) are an oversized Windows collector script, the opt-in Claude status-line helper, and LLM runtime monitoring — which runs no remote command at all.
 
-> **Status:** stable release — current patch **1.4.1**, following the first official desktop release 1.4.0. Prebuilt installers for Windows, macOS, and Linux are attached to [releases](https://github.com/fortranmentis/GPUTERM/releases); you can also build from source below. Official release status does not imply Apple notarization or a trusted Windows publisher signature; see the packaging notes.
+> **Status:** stable release — current patch **1.4.2**. Download the [official installers](https://github.com/fortranmentis/GPUTERM/releases/latest) for Windows, macOS, and Linux, or build from source below. Official release status does not imply Apple notarization or a trusted Windows publisher signature; see the packaging notes.
 
 ## Table of contents
 
@@ -104,7 +104,7 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 ### 📂 Folder sizes within a disk
 
 - Click a mount in the disk detail popover to inspect its immediate child folders, largest first. Drill into a folder, use breadcrumbs to return, or open the current location in SFTP where available. The detached disk window also supports browsing.
-- Scans are **on demand**, not part of periodic telemetry. Results stay in an in-memory per-session/folder cache until **Rescan**; cached measurements can become stale.
+- Scans are **on demand**, not part of periodic telemetry. Use **Cancel** while a scan is running; a collector that has already started may continue to its timeout. Results are cached in memory for five minutes (up to 100 session/folder entries). Use **Rescan** to refresh immediately.
 - Linux/macOS SSH hosts and local Linux/macOS terminals use `du -x -k -d 1` at low CPU priority (and idle I/O priority where `ionice` is available), without sudo. Remote scans open a dedicated SSH connection; only one scan per session runs at a time. Windows is not supported for folder sizes yet.
 - A 25-second host-side limit uses `timeout` or Perl when available, with a 35-second command budget. Truncated scans show lower bounds; permission errors, omitted smaller folders (top 200 displayed) and unknown totals are reported. This is allocated disk usage, not exact logical file size; other filesystems are not traversed. Very large trees, unusual filenames and live filesystem changes can limit accuracy.
 
@@ -141,6 +141,11 @@ Almost nothing ever touches your servers: every metric comes from one-shot stand
 - **Built-in MCP server** — turn on **MCP** at the bottom of the sidebar and Claude Code, Claude Desktop, Codex or Cursor can read the hosts you have connected: live telemetry, the last hour of history, free GPUs across hosts, GPU/top processes, containers, tmux sessions, directory listings, LLM runtimes and firing alerts. See [MCP server for AI assistants](#mcp-server-for-ai-assistants)
 - **Actions only with your approval** — with **Allow actions** on, `run_command`, `read_file` and `kill_process` each open a confirmation in GpuTerm (Deny by default). Loopback only, a per-start token, per-host hiding and an audit log
 - **In-app updates** — GpuTerm checks GitHub for a newer release and installs it from a signed update bundle after you press **Update**. See [Updates](#updates)
+
+### 🛠️ 1.4.2 performance and reliability
+
+- Linux and macOS telemetry batches collector commands and caches static host information per connection. Terminal output is grouped into fewer UI updates, and transfers keep reporting progress when the SFTP pane is closed.
+- Terminal search targets the active split. Links remain aligned after wide characters in terminal output. Local SFTP browsing follows directory symlinks and skips entries it cannot inspect rather than failing the entire listing.
 
 ### 🛠️ 1.4.1 reliability and access-control refinements
 

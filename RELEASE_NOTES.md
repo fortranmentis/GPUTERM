@@ -1,37 +1,31 @@
-# GpuTerm 1.4.1
+# GpuTerm 1.4.2
 
 ## Highlights
 
-- **Official maintenance release.** 1.4.1 remains a stable, non-prerelease GitHub release and Latest, with the existing signed-updater endpoint preserved.
-- **More consistent MCP host privacy and approvals.** Host-linked LLM runtimes and active alerts respect hidden-host settings. Actions re-check current settings after approval; disabling MCP/actions cancels pending requests. Audit argument size is bounded and `read_file` requires a regular file.
-- **More resilient SFTP transfers.** Private app-owned drag-out staging, safer local file replacement, fewer redundant remote checks during folder overwrites, and sanitized downloaded folder segments.
-- **Smoother lifecycle and monitoring.** MCP commands use a dedicated SSH session with interleaved stdout/stderr reads; local collectors drain both pipes concurrently. Disconnect/settings work no longer blocks the UI, profile deletion asks for confirmation, and app exit requests session/forward teardown.
+- **Lighter Linux and macOS telemetry.** Batch collector commands into non-login shell calls and cache static host information per connection. Coalesce terminal output into fewer UI updates.
+- **More reliable terminal splits and SFTP.** Search the active pane only, keep link positions accurate after wide characters, and retain transfer progress while the SFTP pane is closed.
+- **Cancelable folder-size scans.** Cancel an active scan or reuse cached results for up to five minutes. Local browsing follows directory symlinks and tolerates broken or unreadable entries.
 
 ## Fixes
 
-- Apply hidden-host filtering to LLM summaries and active alerts, and revalidate action permissions after approval rather than relying only on the original request state.
-- Avoid pipe-buffer stalls in local commands and approved MCP commands with large stdout/stderr. Keep command work off shared operations connections.
-- Stage SFTP drag-out exports under the application configuration directory with Unix 0700/0600 permissions and best-effort pruning of exports older than 24 hours at startup, export preparation and exit. Use platform atomic replacement for local downloads/vault updates, including `MoveFileExW` on Windows.
-- Avoid redundant remote `lstat` calls for overwrite folder transfers; sanitize nested download names and preserve clearer errors/part-file recovery information on remote finalize failure.
-- Validate Claude status-line session IDs, remove `GPUTERM_PAYLOAD` environment transport and reduce predictable temporary-file races across the platform helpers.
-- Serialize remote-forward listener setup with the connection's channel-open lock; strengthen DB temporary-file cleanup traps and confirmation before saved-host deletion.
-- Document access-control changes, local drag-out staging and status-line helper updates in the English and Korean READMEs.
+- Clean up terminal link providers, resize listeners, and closed-pane state; keep Ctrl+F working as expected on non-macOS platforms.
+- Limit concurrent SFTP drag-out work, stabilize drag listeners, and send terminal/transfer events only to the main window.
+- Avoid stale web-service polling results after disconnect and duplicate container fetches per session. Recognize Podman and nerdctl in web-service discovery and redact credentials and query parameters in TensorBoard log-directory URLs.
+- Move blocking connection/channel setup off forwarding accept loops and preserve client half-close behavior. Prevent simultaneous requests from opening duplicate shared operations connections on a cold cache.
+- Apply the remote-only check to MCP process termination; expose a visibility toggle for connected local hosts. Prune obsolete hidden-profile entries and protect deletion of profiles used by database instances.
+- Serialize saved LLM instance writes, check pinned forward port collisions, normalize trailing slashes for disk scans, and avoid exponential backtracking in SSH config wildcard matching.
+- Split large SSH, agent monitoring, terminal, SFTP and stylesheet modules. Enforce the React hook dependency rule as an ESLint error and expand regression coverage.
 
 ## Validation
 
-- GitHub CI checks the frontend and Rust test suites, TypeScript, ESLint, Clippy and the declared Rust minimum. Native packaging builds the production frontend on each platform.
-- Automated coverage includes MCP filtering/approval rechecks and stream draining, SFTP path/cache/permission behavior, status-line validation and snapshot writes, and profile-deletion confirmation.
-- Native GitHub runners build Windows EXE, Debian DEB, Linux AppImage and Apple Silicon DMG. Checksums and signed update bundles are published with `latest.json`; the macOS bundle is fully ad-hoc signed inside-out and verified again from its mounted DMG.
-- Final verification downloads published assets, checks SHA-256 and package versions, validates the DMG/app signatures and updater signatures/trusted comments, rejects a tampered digest, and compares release/updater manifests and source notes. Stable/Latest flags and source/tag/workflow revisions are checked separately.
+- The local frontend suite passed 403 tests. GitHub CI checks the frontend, Rust backend, TypeScript, ESLint, Clippy, and the declared Rust minimum. Installer builds also compile the production frontend.
+- Added regression coverage for terminal links, folder-size cancellation/cache, session and web-service stores, container and database monitoring, updater behavior, snippets and SFTP panels.
+- GitHub Actions builds Windows NSIS EXE, Apple Silicon DMG, Debian DEB and Linux AppImage. The Mac workflow ad-hoc signs nested code and the entire app bundle, then mounts the final DMG and verifies its enclosed app with `codesign --verify --deep --strict`.
 
 ## Notes
 
-- Existing 1.4.0 profiles and encrypted vaults retain their format. This patch does not silently install keys, enable MCP actions, change DB configuration or run user-approved remote operations during upgrade.
-- SFTP drag-out copies are plaintext local files, not encrypted vault entries. Unix mode restrictions do not protect against other processes under the same OS account; Windows uses inherited OS/account permissions. Cleanup is best-effort and prunes aged entries, not every fresh export immediately on exit.
-- Local atomic replacement does not guarantee atomic remote overwrites: SFTP-server capabilities may require unlink/rename fallback. On failed finalize after replacing a destination, inspect the reported remote part-file location before retrying.
-- Direct-URL LLM instances with no hidden SSH-profile association remain visible to MCP. Approval and regular-file checks are access-control refinements, not a command sandbox or a guarantee against every filesystem race.
-- Re-run Claude integration setup or reinstall the helper on each monitored host to deploy helper changes. Updating the desktop alone does not replace remote status-line files; existing custom status-line conflicts still need manual integration.
-- Automated tests use fixtures/mocks and limited controlled local processes. Live SSH/SFTP interoperability, Windows/Linux installed GUI behavior, native file-manager drag/drop, real DB/cluster operations and biometric hardware are not established by these tests. Platform-specific test counts can differ.
-- The Apple Silicon app is completely ad-hoc integrity-signed, not Developer ID signed or Apple-notarized; Windows installers lack a trusted publisher signature. Updater public-key signatures are separate from platform publisher trust. Private signing material remains in GitHub Secrets.
+- Cancel discards the pending result; a collector that has already started may continue to its timeout. Folder-size scanning still does not support Windows; cached results can be stale until expiry or rescan.
+- Existing installations continue using the signed updater channel; DEB users install updates manually. Ad-hoc signing verifies bundle integrity; it is not Apple Developer ID signing or notarization. The Windows installer does not carry a trusted publisher signature.
+- Automated and packaging tests do not establish live SSH compatibility, native drag-and-drop behavior, or normal operation on every GPU/host combination.
 
-**Full changelog:** https://github.com/fortranmentis/GPUTERM/compare/v1.4.0...v1.4.1
+**Full changelog:** https://github.com/fortranmentis/GPUTERM/compare/v1.4.1...v1.4.2
