@@ -16,6 +16,14 @@ export function useDatabaseMonitor(connectedProfileIds: string[]) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const readingsRef = useRef<Record<string, DbReading>>({});
   const inFlightRef = useRef(false);
+  const disposedRef = useRef(false);
+
+  useEffect(() => {
+    disposedRef.current = false;
+    return () => {
+      disposedRef.current = true;
+    };
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -43,10 +51,12 @@ export function useDatabaseMonitor(connectedProfileIds: string[]) {
     inFlightRef.current = true;
     try {
       for (const instance of reachable) {
+        if (disposedRef.current) break;
         const at = Date.now();
         let reading: DbReading;
         try {
           const status = await invoke<DbStatus>("db_status", { id: instance.id });
+          if (disposedRef.current) break;
           reading = {
             status,
             error: null,
@@ -54,6 +64,7 @@ export function useDatabaseMonitor(connectedProfileIds: string[]) {
             rate: dbRate(instance.kind, readingsRef.current[instance.id], status, at),
           };
         } catch (error) {
+          if (disposedRef.current) break;
           reading = { status: null, error: String(error), at, rate: null };
         }
         readingsRef.current = { ...readingsRef.current, [instance.id]: reading };

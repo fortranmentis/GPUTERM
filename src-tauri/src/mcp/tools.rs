@@ -888,6 +888,7 @@ fn read_file(app: &AppHandle, client: &str, args: &Value) -> ToolOutcome {
 
 fn kill_process(app: &AppHandle, client: &str, args: &Value) -> ToolOutcome {
     let profile = connected_host(app, args)?;
+    remote_only(&profile)?;
     let pid = optional_u64(args, "pid")?.ok_or("pid is required")?;
     let pid = u32::try_from(pid).map_err(|_| "pid is out of range".to_string())?;
     let force = match args.get("force") {

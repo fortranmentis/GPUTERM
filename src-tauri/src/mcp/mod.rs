@@ -136,6 +136,26 @@ pub fn get_mcp_status(app: AppHandle) -> McpStatus {
     status(&app, None)
 }
 
+/// Removes a deleted session id from `hidden_profiles` in memory and on disk.
+pub fn prune_hidden_profile(app: &AppHandle, profile_id: &str) {
+    let state = app.state::<McpState>();
+    let mut changed = false;
+    if let Ok(mut slot) = state.settings.lock() {
+        let before = slot.hidden_profiles.len();
+        slot.hidden_profiles.retain(|id| id != profile_id);
+        changed = slot.hidden_profiles.len() != before;
+    }
+    if changed {
+        if let Err(error) = modify_app_settings(|saved| {
+            if let Some(mcp) = saved.mcp.as_mut() {
+                mcp.hidden_profiles.retain(|id| id != profile_id);
+            }
+        }) {
+            eprintln!("GpuTerm: could not prune deleted profile from MCP settings: {error}");
+        }
+    }
+}
+
 /// Saves the settings and starts or stops the server to match.
 #[tauri::command]
 pub async fn update_mcp_settings(

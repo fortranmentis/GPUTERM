@@ -40,6 +40,7 @@ export function clientConfig(client: ClientId, executable: string) {
 
 export function McpSettingsDialog({ onClose }: { onClose: () => void }) {
   const sessions = useSessionStore((state) => state.sessions);
+  const connectedSessionIds = useSessionStore((state) => state.connectedSessionIds);
   const [status, setStatus] = useState<McpStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -109,7 +110,9 @@ export function McpSettingsDialog({ onClose }: { onClose: () => void }) {
   };
 
   const settings = status?.settings;
-  const remoteSessions = sessions.filter((profile) => !profile.isLocal);
+  const visibleSessions = sessions.filter(
+    (profile) => !profile.isLocal || connectedSessionIds.includes(profile.id),
+  );
   const clientInfo = CLIENTS.find((entry) => entry.id === client)!;
 
   return (
@@ -165,10 +168,10 @@ export function McpSettingsDialog({ onClose }: { onClose: () => void }) {
                 />
               </label>
             </div>
-            {remoteSessions.length > 0 && (
+            {visibleSessions.length > 0 && (
               <fieldset className="mcp-hosts">
                 <legend>Hosts clients can see</legend>
-                {remoteSessions.map((profile) => (
+                {visibleSessions.map((profile) => (
                   <label key={profile.id} className="mcp-host">
                     <input
                       type="checkbox"
@@ -178,7 +181,7 @@ export function McpSettingsDialog({ onClose }: { onClose: () => void }) {
                     />
                     <span className="mcp-host-name">{profile.name}</span>
                     <small>
-                      {profile.username}@{profile.host}
+                      {profile.isLocal ? "This computer" : `${profile.username}@${profile.host}`}
                     </small>
                   </label>
                 ))}

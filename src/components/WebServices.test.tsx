@@ -107,6 +107,29 @@ describe("WebServices", () => {
     expect(setSessions).toHaveBeenCalledWith([profile]);
   });
 
+  it("refuses to pin when the local bindPort collides with an existing saved forward", async () => {
+    const withClash: SessionProfile = {
+      ...profile,
+      forwards: [
+        {
+          id: "existing",
+          kind: "local",
+          bindHost: "127.0.0.1",
+          bindPort: 6006,
+          destHost: "10.0.0.99",
+          destPort: 9999,
+          enabled: true,
+        },
+      ],
+    };
+    render(<WebServices profile={withClash} connected />);
+    fireEvent.click(screen.getByRole("button", { name: "Forward port 6006 on every connect" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Local port 6006 is already used by another saved forward",
+    );
+    expect(mockInvoke).not.toHaveBeenCalledWith("save_profile_forwards", expect.anything());
+  });
+
   it("shows open errors and renders nothing while disconnected", async () => {
     mockInvoke.mockRejectedValue("Port 6006 is already in use");
     const { rerender } = render(<WebServices profile={profile} connected />);

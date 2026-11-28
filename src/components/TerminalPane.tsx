@@ -644,6 +644,28 @@ export function TerminalPane() {
     scheduleFit(60);
   }, [allTerminalIds, flushInput, linkHint, openTerminalLink, scheduleFit, visiblePaneIds]);
 
+  // Drop stale close notices once a pane is removed from the store so
+  // `closedPanes` never accumulates entries for gone terminals.
+  useEffect(() => {
+    setClosedPanes((current) => {
+      const keys = Object.keys(current);
+      if (keys.length === 0) {
+        return current;
+      }
+      const active = new Set(allTerminalIds);
+      const next: Record<string, string> = {};
+      let changed = false;
+      for (const key of keys) {
+        if (active.has(key)) {
+          next[key] = current[key];
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [allTerminalIds]);
+
   useEffect(() => {
     setFocusedTerminalId((current) =>
       current && visiblePaneIds.includes(current)

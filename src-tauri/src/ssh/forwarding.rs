@@ -455,6 +455,7 @@ fn launch(connection: &Arc<SshConnection>, spec: ForwardSpec, temporary: bool) -
         connection: Arc::clone(connection),
         spec,
         stop: Arc::clone(&rule.stop),
+        transport_lost: Arc::new(AtomicBool::new(false)),
         state: Arc::clone(&rule.state),
         active: Arc::clone(&rule.active),
         bytes: Arc::clone(&rule.bytes),
@@ -469,10 +470,12 @@ fn launch(connection: &Arc<SshConnection>, spec: ForwardSpec, temporary: bool) -
     rule
 }
 
+#[derive(Clone)]
 struct RuleContext {
     connection: Arc<SshConnection>,
     spec: ForwardSpec,
     stop: Arc<AtomicBool>,
+    transport_lost: Arc<AtomicBool>,
     state: Arc<Mutex<RuleState>>,
     active: Arc<AtomicUsize>,
     bytes: Arc<AtomicU64>,
@@ -493,22 +496,15 @@ impl RuleContext {
         self.stop.load(Ordering::SeqCst)
     }
 
+    fn transport_lost(&self) -> bool {
+        self.transport_lost.load(Ordering::SeqCst)
+    }
+
     fn finish(&self, outcome: Result<(), String>) {
         match outcome {
             Err(message) => self.set("error", Some(message), None),
             Ok(()) => self.set("stopped", None, None),
         }
-    }
-
-    /// Pumps one connection on its own thread, counting its bytes. `slot`
-    /// is the connection's place under the limit, held until the pump ends.
-    fn pump(&self, slot: CountGuard, channel: ssh2::Channel, socket: TcpStream) {
-        let stop = Arc::clone(&self.stop);
-        let bytes = Arc::clone(&self.bytes);
-        thread::spawn(move || {
-            let _slot = slot;
-            pump_channel_socket(socket, channel, &stop, Some(&bytes));
-        });
     }
 
     /// A place under the per-forward connection limit, or None when full.
@@ -545,6 +541,9 @@ fn run_listener(context: &RuleContext) -> Result<(), String> {
     let mut idle = IdleBackoff::for_accept_loop();
     let mut last_liveness_check = Instant::now();
     while !context.stopped() {
+        if context.transport_lost() {
+            return Err("The SSH connection was lost".to_string());
+        }
         let socket = match listener.accept() {
             Ok((socket, _)) => socket,
             Err(ref error) if error.kind() == ErrorKind::WouldBlock => {
@@ -566,46 +565,51 @@ fn run_listener(context: &RuleContext) -> Result<(), String> {
             drop(socket);
             continue;
         };
+        let worker = context.clone();
         if spec.kind == ForwardKind::Dynamic {
             // The handshake can wait on the client, so it runs off the accept loop.
-            let connection = Arc::clone(&context.connection);
-            let worker = RuleContext {
-                connection: Arc::clone(&connection),
-                spec: spec.clone(),
-                stop: Arc::clone(&context.stop),
-                state: Arc::clone(&context.state),
-                active: Arc::clone(&context.active),
-                bytes: Arc::clone(&context.bytes),
-            };
             // The slot moves with the handshake, so handshakes in progress
             // count against the limit too.
             thread::spawn(move || serve_socks(&worker, slot, socket));
-            continue;
+        } else {
+            // Hand off before opening the SSH direct-tcpip channel so a slow or
+            // timed-out channel open never stalls other incoming connections.
+            thread::spawn(move || serve_local(&worker, slot, socket));
         }
-
-        let host = spec.dest_host.as_deref().unwrap_or("127.0.0.1");
-        let port = spec.dest_port.unwrap_or(0);
-        match open_direct_channel(
-            &context.connection,
-            host,
-            port,
-            Instant::now() + CHANNEL_OPEN_TIMEOUT,
-        ) {
-            Ok(channel) => context.pump(slot, channel, socket),
-            Err(error) => {
-                drop(socket);
-                if !connection_answers(&context.connection, HOP_PROBE_TIMEOUT) {
-                    return Err("The SSH connection was lost".to_string());
-                }
-                // Per connection: the destination refused or is down.
-                context.set("listening", Some(error), None);
-            }
-        }
+    }
+    if context.transport_lost() {
+        return Err("The SSH connection was lost".to_string());
     }
     Ok(())
 }
 
+fn serve_local(context: &RuleContext, slot: CountGuard, socket: TcpStream) {
+    let _slot = slot;
+    let host = context.spec.dest_host.as_deref().unwrap_or("127.0.0.1");
+    let port = context.spec.dest_port.unwrap_or(0);
+    match open_direct_channel(
+        &context.connection,
+        host,
+        port,
+        Instant::now() + CHANNEL_OPEN_TIMEOUT,
+    ) {
+        Ok(channel) => {
+            pump_channel_socket(socket, channel, &context.stop, Some(&context.bytes));
+        }
+        Err(error) => {
+            drop(socket);
+            if !connection_answers(&context.connection, HOP_PROBE_TIMEOUT) {
+                context.transport_lost.store(true, Ordering::SeqCst);
+                return;
+            }
+            // Per connection: the destination refused or is down.
+            context.set("listening", Some(error), None);
+        }
+    }
+}
+
 fn serve_socks(context: &RuleContext, slot: CountGuard, mut socket: TcpStream) {
+    let _slot = slot;
     if socket.set_nonblocking(false).is_err()
         || socket
             .set_read_timeout(Some(SOCKS_HANDSHAKE_TIMEOUT))
@@ -629,7 +633,7 @@ fn serve_socks(context: &RuleContext, slot: CountGuard, mut socket: TcpStream) {
                 return;
             }
             let _ = socket.set_read_timeout(None);
-            context.pump(slot, channel, socket);
+            pump_channel_socket(socket, channel, &context.stop, Some(&context.bytes));
         }
         Err(_) => {
             let _ = socket.write_all(&socks5_reply(SOCKS_HOST_UNREACHABLE));
@@ -695,13 +699,32 @@ fn run_remote(context: &RuleContext) -> Result<(), String> {
         let Some(slot) = context.try_reserve() else {
             continue;
         };
-        match connect_local(&destination) {
-            Ok(socket) => context.pump(slot, channel, socket),
-            Err(error) => context.set("listening", Some(error), None),
-        }
+        let worker = context.clone();
+        let dest = destination.clone();
+        // Hand off before connecting locally so a slow local connect never
+        // stalls other incoming forwarded channels on the accept loop.
+        thread::spawn(move || serve_remote(&worker, slot, channel, &dest));
     }
     // Dropping `listener` cancels the forward on the server.
     Ok(())
+}
+
+fn serve_remote(
+    context: &RuleContext,
+    slot: CountGuard,
+    mut channel: ssh2::Channel,
+    destination: &str,
+) {
+    let _slot = slot;
+    match connect_local(destination) {
+        Ok(socket) => {
+            pump_channel_socket(socket, channel, &context.stop, Some(&context.bytes));
+        }
+        Err(error) => {
+            let _ = channel.close();
+            context.set("listening", Some(error), None);
+        }
+    }
 }
 
 fn connect_local(destination: &str) -> Result<TcpStream, String> {

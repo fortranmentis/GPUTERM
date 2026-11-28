@@ -42,7 +42,7 @@ const LINUX_SCAN: &str = r#"if command -v ss >/dev/null 2>&1; then ss -tlnp 2>/d
 ps -u "$(id -u)" -o pid=,args= 2>/dev/null | cut -c1-400 | sed 's/^/P /'
 d="${JUPYTER_RUNTIME_DIR:-$HOME/.local/share/jupy""ter/runtime}"
 for f in "$d"/jpserver-*.json "$d"/nbserver-*.json; do [ -f "$f" ] && printf 'J %s\n' "$(tr -d '\n' < "$f")"; done
-if command -v docker >/dev/null 2>&1; then docker ps -q 2>/dev/null | head -n 50 | xargs -r docker inspect --format '{{.Name}}|{{.Config.Image}}|{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}|{{range $p, $v := .Config.ExposedPorts}}{{$p}} {{end}}' 2>/dev/null | sed 's/^/D /'; fi
+for rt in docker podman nerdctl; do if command -v "$rt" >/dev/null 2>&1; then "$rt" ps -q 2>/dev/null | head -n 50 | xargs -r "$rt" inspect --format '{{.Name}}|{{.Config.Image}}|{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}|{{range $p, $v := .Config.ExposedPorts}}{{$p}} {{end}}' 2>/dev/null | sed 's/^/D /'; break; fi; done
 true"#;
 
 const MAC_SCAN: &str = r#"lsof -nP -a -u "$(id -u)" -iTCP -sTCP:LISTEN -F pn 2>/dev/null | awk '/^p/{p=substr($0,2)} /^n/{print "M "p" "substr($0,2)}'
@@ -497,7 +497,10 @@ fn parse_scan(output: &str) -> Vec<WebService> {
         };
         for (host, port) in ports {
             let (path, detail) = match kind {
-                WebServiceKind::Tensorboard => ("/".to_string(), flag_value(args, "--logdir")),
+                WebServiceKind::Tensorboard => (
+                    "/".to_string(),
+                    flag_value(args, "--logdir").map(|raw| scrub_logdir(&raw)),
+                ),
                 WebServiceKind::Jupyter => (
                     jupyter_path(runtime),
                     runtime.and_then(|runtime| runtime.root_dir.clone()),
@@ -541,6 +544,36 @@ fn parse_scan(output: &str) -> Vec<WebService> {
 
     services.sort_by_key(|service| (service.kind, service.port));
     services
+}
+
+/// Strips embedded credentials (`://user:pass@`) and query strings (such as
+/// `?token=...` or signed-URL parameters) from TensorBoard `--logdir` URIs so
+/// secrets never surface in UI or MCP metadata.
+fn scrub_uri_segment(segment: &str) -> String {
+    let mut cleaned = segment.to_string();
+    if let Some(scheme_end) = cleaned.find("://") {
+        let after_scheme = scheme_end + 3;
+        let authority_end = cleaned[after_scheme..]
+            .find(['/', '?', '#'])
+            .map(|offset| after_scheme + offset)
+            .unwrap_or(cleaned.len());
+        if let Some(at_offset) = cleaned[after_scheme..authority_end].rfind('@') {
+            cleaned.replace_range(after_scheme..after_scheme + at_offset + 1, "");
+        }
+        if let Some(query_start) = cleaned.find('?') {
+            cleaned.truncate(query_start);
+        }
+    } else if cleaned.contains('?') {
+        cleaned = without_token(&cleaned);
+    }
+    cleaned
+}
+
+fn scrub_logdir(raw: &str) -> String {
+    raw.split(',')
+        .map(scrub_uri_segment)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// `streamlit run app.py` → `app.py`.
@@ -1000,5 +1033,37 @@ P 11 python -m ipykernel_launcher
         assert_eq!(without_token("/?token=abc"), "/");
         assert_eq!(without_token("/lab?a=1&token=abc&b=2"), "/lab?a=1&b=2");
         assert_eq!(without_token("/tree"), "/tree");
+    }
+
+    #[test]
+    fn linux_scan_supports_docker_podman_and_nerdctl() {
+        assert!(LINUX_SCAN.contains("for rt in docker podman nerdctl;"));
+    }
+
+    #[test]
+    fn tensorboard_logdir_scrubs_credentials_and_tokens() {
+        assert_eq!(scrub_logdir("runs/exp42"), "runs/exp42");
+        assert_eq!(
+            scrub_logdir("s3://access:secret@my-bucket/runs"),
+            "s3://my-bucket/runs"
+        );
+        assert_eq!(
+            scrub_logdir("https://user:pass@storage.example.com/logs?token=abc123&sig=xyz"),
+            "https://storage.example.com/logs"
+        );
+        assert_eq!(
+            scrub_logdir("a:https://u:p@host/dir?token=1,b:runs/local"),
+            "a:https://host/dir,b:runs/local"
+        );
+        assert_eq!(scrub_logdir("/runs/exp?token=secret&x=1"), "/runs/exp?x=1");
+        assert_eq!(scrub_logdir("/home/me@lab/runs"), "/home/me@lab/runs");
+
+        let output = "\
+L LISTEN 0 128 127.0.0.1:6006 0.0.0.0:* users:((\"tensorboard\",pid=4100,fd=12))
+P 4100 tensorboard --logdir=https://alice:s3cr3t@bucket.lab/exp?token=tok123 --port 6006
+";
+        let services = parse_scan(output);
+        let tb = find(&services, 6006, "localhost");
+        assert_eq!(tb.detail.as_deref(), Some("https://bucket.lab/exp"));
     }
 }

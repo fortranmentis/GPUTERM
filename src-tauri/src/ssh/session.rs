@@ -48,8 +48,9 @@ fn lock_known_hosts() -> Result<std::sync::MutexGuard<'static, ()>, String> {
 /// Shared per-session SSH connections reused for short operations
 /// (directory listings, stat calls, resource details). `ssh2::Session` is
 /// internally synchronized but operations on one session must be serialized,
-/// hence the per-entry mutex.
-pub type OpsSessions = Arc<Mutex<HashMap<String, Arc<Mutex<SshConnection>>>>>;
+/// hence the per-entry mutex. Holding `Option<SshConnection>` inside the slot
+/// mutex also serializes cold-cache connection creation per session.
+pub type OpsSessions = Arc<Mutex<HashMap<String, Arc<Mutex<Option<SshConnection>>>>>>;
 pub type AgentQuotaRefreshes = Arc<Mutex<HashMap<String, HashSet<String>>>>;
 
 fn is_false(value: &bool) -> bool {
@@ -268,6 +269,7 @@ pub fn save_profile_forwards(
 
 #[tauri::command]
 pub async fn delete_session(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     id: String,
 ) -> Result<Vec<SessionProfile>, String> {
@@ -276,9 +278,15 @@ pub async fn delete_session(
     let profiles = tauri::async_runtime::spawn_blocking(move || {
         let _write_guard = lock_profiles()?;
         let mut profiles = read_profiles()?;
-        ensure_profile_unreferenced(&id, &profiles, &crate::llm::instance::read_instances()?)?;
+        ensure_profile_unreferenced(
+            &id,
+            &profiles,
+            &crate::llm::instance::read_instances()?,
+            &crate::ssh::db_monitor::list_db_instances()?,
+        )?;
         profiles.retain(|profile| profile.id != id);
         write_profiles(&profiles)?;
+        crate::mcp::prune_hidden_profile(&app, &id);
         // Vault clean-up is best effort: a locked or not-yet-initialized vault
         // must not make profile deletion impossible. Any leftover entry is
         // unreachable once the profile is gone.
@@ -299,12 +307,14 @@ pub async fn delete_session(
     Ok(profiles)
 }
 
-/// Refuses to delete a profile that another profile uses as its jump host or
-/// an LLM instance tunnels through; deleting it would leave dangling ids.
+/// Refuses to delete a profile that another profile uses as its jump host, an
+/// LLM instance tunnels through, or a database monitor relies on; deleting it
+/// would leave dangling ids.
 fn ensure_profile_unreferenced(
     id: &str,
     profiles: &[SessionProfile],
     instances: &[LlmInstance],
+    db_instances: &[crate::ssh::db_monitor::DbInstance],
 ) -> Result<(), String> {
     let dependents = profiles
         .iter()
@@ -326,6 +336,17 @@ fn ensure_profile_unreferenced(
         return Err(format!(
             "The LLM runtime(s) {} tunnel through this session. Change or remove them before deleting it.",
             instances.join(", ")
+        ));
+    }
+    let databases = db_instances
+        .iter()
+        .filter(|instance| instance.profile_id == id)
+        .map(|instance| instance.name.clone())
+        .collect::<Vec<_>>();
+    if !databases.is_empty() {
+        return Err(format!(
+            "The database monitor(s) {} use this session. Remove them before deleting it.",
+            databases.join(", ")
         ));
     }
     Ok(())
@@ -437,43 +458,51 @@ pub fn with_ops_session<T>(
     timeout_ms: u32,
     f: impl FnOnce(&Session) -> Result<T, String>,
 ) -> Result<T, String> {
-    let existing = {
-        let map = ops
-            .lock()
-            .map_err(|_| "Operations connection state is unavailable".to_string())?;
-        map.get(&target.session_id).cloned()
-    };
-
-    if let Some(entry) = existing {
-        if let Ok(connection) = entry.lock() {
-            connection.session.set_timeout(timeout_ms);
-            // Cheap liveness probe before running a possibly non-idempotent
-            // operation: it needs a reply from the server, so a dead tunnel
-            // fails here and is replaced below.
-            let alive =
-                connection_answers(&connection, Duration::from_millis(timeout_ms.into()));
-            if alive {
-                return f(&connection.session);
-            }
-        }
-        if let Ok(mut map) = ops.lock() {
-            map.remove(&target.session_id);
-        }
-    }
-
-    let connection = open_ssh_session(target)?;
-    connection.session.set_keepalive(true, 15);
-    connection.session.set_timeout(timeout_ms);
-    let entry = Arc::new(Mutex::new(connection));
-    {
+    let slot = {
         let mut map = ops
             .lock()
             .map_err(|_| "Operations connection state is unavailable".to_string())?;
-        map.insert(target.session_id.clone(), Arc::clone(&entry));
-    }
-    let connection = entry
+        Arc::clone(
+            map.entry(target.session_id.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(None))),
+        )
+    };
+
+    let mut guard = slot
         .lock()
         .map_err(|_| "Operations connection is unavailable".to_string())?;
+
+    if let Some(connection) = guard.as_ref() {
+        connection.session.set_timeout(timeout_ms);
+        // Cheap liveness probe before running a possibly non-idempotent
+        // operation: it needs a reply from the server, so a dead tunnel
+        // fails here and is replaced below.
+        if connection_answers(connection, Duration::from_millis(timeout_ms.into())) {
+            return f(&connection.session);
+        }
+        *guard = None;
+    }
+
+    let connection = match open_ssh_session(target) {
+        Ok(connection) => connection,
+        Err(error) => {
+            // Only evict the empty slot if the map still points to this exact
+            // entry and no other caller is waiting on it.
+            if let Ok(mut map) = ops.lock() {
+                if map
+                    .get(&target.session_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &slot))
+                    && Arc::strong_count(&slot) == 2
+                {
+                    map.remove(&target.session_id);
+                }
+            }
+            return Err(error);
+        }
+    };
+    connection.session.set_keepalive(true, 15);
+    connection.session.set_timeout(timeout_ms);
+    let connection = guard.insert(connection);
     f(&connection.session)
 }
 
@@ -972,31 +1001,105 @@ fn run_tunnel_forwarder(listener: TcpListener, mut channel: Channel, stop: Arc<A
     pump_channel_socket(socket, channel, &stop, None);
 }
 
+trait SocketIo {
+    fn set_nonblocking_io(&mut self) -> std::io::Result<()>;
+    fn read_bytes(&mut self, buf: &mut [u8]) -> std::io::Result<usize>;
+    fn write_bytes(&mut self, buf: &[u8]) -> std::io::Result<usize>;
+    fn shutdown_write(&mut self);
+}
+
+impl SocketIo for TcpStream {
+    fn set_nonblocking_io(&mut self) -> std::io::Result<()> {
+        self.set_nonblocking(true)
+    }
+
+    fn read_bytes(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.read(buf)
+    }
+
+    fn write_bytes(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.write(buf)
+    }
+
+    fn shutdown_write(&mut self) {
+        let _ = self.shutdown(std::net::Shutdown::Write);
+    }
+}
+
+trait ChannelIo {
+    fn read_bytes(&mut self, buf: &mut [u8]) -> std::io::Result<usize>;
+    fn write_bytes(&mut self, buf: &[u8]) -> std::io::Result<usize>;
+    fn is_eof(&self) -> bool;
+    fn send_channel_eof(&mut self) -> Result<(), ErrorKind>;
+    fn close_channel(&mut self);
+}
+
+impl ChannelIo for Channel {
+    fn read_bytes(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.read(buf)
+    }
+
+    fn write_bytes(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.write(buf)
+    }
+
+    fn is_eof(&self) -> bool {
+        self.eof()
+    }
+
+    fn send_channel_eof(&mut self) -> Result<(), ErrorKind> {
+        self.send_eof().map_err(|error| {
+            if is_would_block(&error) {
+                ErrorKind::WouldBlock
+            } else {
+                ErrorKind::Other
+            }
+        })
+    }
+
+    fn close_channel(&mut self) {
+        let _ = self.close();
+    }
+}
+
 /// Pumps bytes between one loopback socket and one direct-tcpip channel until
-/// either side closes or the stop flag is set.
+/// the channel closes or the stop flag is set, preserving local half-close
+/// (`socket.read() == Ok(0)` → `channel.send_eof()`, then keep draining
+/// remote-to-local bytes until the channel hits EOF).
 ///
 /// Both the session and the socket must already be nonblocking: a blocking read
 /// on a `Channel` holds the `Session` mutex across the syscall and would stall
 /// every other channel on the same connection.
 pub(crate) fn pump_channel_socket(
     socket: TcpStream,
-    mut channel: Channel,
+    channel: Channel,
+    stop: &AtomicBool,
+    bytes: Option<&std::sync::atomic::AtomicU64>,
+) {
+    pump_socket_and_channel(socket, channel, stop, bytes);
+}
+
+fn pump_socket_and_channel(
+    mut socket: impl SocketIo,
+    mut channel: impl ChannelIo,
     stop: &AtomicBool,
     bytes: Option<&std::sync::atomic::AtomicU64>,
 ) {
     use std::sync::atomic::Ordering;
 
-    if socket.set_nonblocking(true).is_err() {
-        let _ = channel.close();
+    if socket.set_nonblocking_io().is_err() {
+        channel.close_channel();
         return;
     }
 
-    let mut socket = socket;
     let mut to_channel: Vec<u8> = Vec::new();
     let mut to_socket: Vec<u8> = Vec::new();
     let mut buffer = [0_u8; 32 * 1024];
     let mut idle_sleep = Duration::from_millis(2);
     let max_sleep = Duration::from_millis(15);
+    let mut socket_eof = false;
+    let mut channel_eof_sent = false;
+    let mut channel_eof = false;
 
     loop {
         if stop.load(Ordering::SeqCst) {
@@ -1005,9 +1108,12 @@ pub(crate) fn pump_channel_socket(
         let mut progressed = false;
 
         // Socket -> channel (only read more once the pending buffer is flushed).
-        if to_channel.is_empty() {
-            match socket.read(&mut buffer) {
-                Ok(0) => break,
+        if !socket_eof && to_channel.is_empty() {
+            match socket.read_bytes(&mut buffer) {
+                Ok(0) => {
+                    socket_eof = true;
+                    progressed = true;
+                }
                 Ok(count) => {
                     to_channel.extend_from_slice(&buffer[..count]);
                     progressed = true;
@@ -1018,7 +1124,7 @@ pub(crate) fn pump_channel_socket(
             }
         }
         if !to_channel.is_empty() {
-            match channel.write(&to_channel) {
+            match channel.write_bytes(&to_channel) {
                 Ok(0) => {}
                 Ok(count) => {
                     to_channel.drain(..count);
@@ -1032,13 +1138,26 @@ pub(crate) fn pump_channel_socket(
                 Err(_) => break,
             }
         }
+        if socket_eof && to_channel.is_empty() && !channel_eof_sent {
+            match channel.send_channel_eof() {
+                Ok(()) => {
+                    channel_eof_sent = true;
+                    progressed = true;
+                }
+                Err(ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
+                Err(_) => {
+                    channel_eof_sent = true;
+                }
+            }
+        }
 
         // Channel -> socket.
-        if to_socket.is_empty() {
-            match channel.read(&mut buffer) {
+        if !channel_eof && to_socket.is_empty() {
+            match channel.read_bytes(&mut buffer) {
                 Ok(0) => {
-                    if channel.eof() {
-                        break;
+                    if channel.is_eof() {
+                        channel_eof = true;
+                        progressed = true;
                     }
                 }
                 Ok(count) => {
@@ -1051,7 +1170,7 @@ pub(crate) fn pump_channel_socket(
             }
         }
         if !to_socket.is_empty() {
-            match socket.write(&to_socket) {
+            match socket.write_bytes(&to_socket) {
                 Ok(0) => {}
                 Ok(count) => {
                     to_socket.drain(..count);
@@ -1065,6 +1184,10 @@ pub(crate) fn pump_channel_socket(
                 Err(_) => break,
             }
         }
+        if channel_eof && to_socket.is_empty() {
+            socket.shutdown_write();
+            break;
+        }
 
         if progressed {
             idle_sleep = Duration::from_millis(2);
@@ -1074,7 +1197,7 @@ pub(crate) fn pump_channel_socket(
         }
     }
 
-    let _ = channel.close();
+    channel.close_channel();
 }
 
 // ---------------------------------------------------------------------------
@@ -2615,11 +2738,123 @@ mod tests {
     }
 
     #[test]
-    fn refuses_to_delete_a_profile_used_as_a_jump_host() {
+    fn refuses_to_delete_a_profile_used_as_a_jump_host_or_by_db_monitor() {
         let profiles = vec![profile("jump", None), profile("gpu", Some("jump"))];
-        let error = ensure_profile_unreferenced("jump", &profiles, &[]).unwrap_err();
+        let error = ensure_profile_unreferenced("jump", &profiles, &[], &[]).unwrap_err();
         assert!(error.contains("gpu"), "{error}");
-        assert!(ensure_profile_unreferenced("gpu", &profiles, &[]).is_ok());
+        assert!(ensure_profile_unreferenced("gpu", &profiles, &[], &[]).is_ok());
+
+        let db = crate::ssh::db_monitor::DbInstance {
+            id: "db-1".to_string(),
+            name: "prod-pg".to_string(),
+            kind: crate::ssh::db_monitor::DbKind::Postgres,
+            profile_id: "gpu".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 5432,
+            user: "postgres".to_string(),
+            database: String::new(),
+            has_password: false,
+        };
+        let db_error = ensure_profile_unreferenced("gpu", &profiles, &[], &[db]).unwrap_err();
+        assert!(db_error.contains("prod-pg"), "{db_error}");
+    }
+
+    #[test]
+    fn pump_socket_and_channel_preserves_local_half_close() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        struct MockSocket {
+            incoming: Vec<u8>,
+            written: Vec<u8>,
+            write_shutdown: bool,
+        }
+
+        impl SocketIo for &mut MockSocket {
+            fn set_nonblocking_io(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+
+            fn read_bytes(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.incoming.is_empty() {
+                    return Ok(0);
+                }
+                let count = self.incoming.len().min(buf.len());
+                buf[..count].copy_from_slice(&self.incoming[..count]);
+                self.incoming.drain(..count);
+                Ok(count)
+            }
+
+            fn write_bytes(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.written.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn shutdown_write(&mut self) {
+                self.write_shutdown = true;
+            }
+        }
+
+        struct HalfCloseMockChannel {
+            received: Vec<u8>,
+            eof_sent: bool,
+            response: Vec<u8>,
+            closed: bool,
+        }
+
+        impl ChannelIo for &mut HalfCloseMockChannel {
+            fn read_bytes(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if !self.eof_sent {
+                    return Err(std::io::Error::new(ErrorKind::WouldBlock, "waiting for eof"));
+                }
+                if self.response.is_empty() {
+                    return Ok(0);
+                }
+                let count = self.response.len().min(buf.len());
+                buf[..count].copy_from_slice(&self.response[..count]);
+                self.response.drain(..count);
+                Ok(count)
+            }
+
+            fn write_bytes(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.received.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn is_eof(&self) -> bool {
+                self.eof_sent && self.response.is_empty()
+            }
+
+            fn send_channel_eof(&mut self) -> Result<(), ErrorKind> {
+                self.eof_sent = true;
+                Ok(())
+            }
+
+            fn close_channel(&mut self) {
+                self.closed = true;
+            }
+        }
+
+        let stop = AtomicBool::new(false);
+        let bytes = AtomicU64::new(0);
+        let mut socket = MockSocket {
+            incoming: b"hello".to_vec(),
+            written: Vec::new(),
+            write_shutdown: false,
+        };
+        let mut channel = HalfCloseMockChannel {
+            received: Vec::new(),
+            eof_sent: false,
+            response: b"world".to_vec(),
+            closed: false,
+        };
+        pump_socket_and_channel(&mut socket, &mut channel, &stop, Some(&bytes));
+
+        assert_eq!(channel.received, b"hello");
+        assert!(channel.eof_sent);
+        assert!(channel.closed);
+        assert_eq!(socket.written, b"world");
+        assert!(socket.write_shutdown);
+        assert_eq!(bytes.load(Ordering::Relaxed), 10);
     }
 
     #[test]

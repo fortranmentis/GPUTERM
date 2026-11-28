@@ -13,14 +13,46 @@ import { formatFileSize } from "../utils/formatBytes";
 
 type CacheEntry = { sizes: DirectorySizes; at: number };
 
+export const DIRECTORY_SIZE_CACHE_TTL_MS = 5 * 60 * 1000;
+const MAX_CACHE_ENTRIES = 100;
+
 /**
  * Scans already made, per session and folder, so stepping back up does not
- * run `du` again. Lives for the app session; Rescan replaces an entry.
+ * run `du` again. Bounded by TTL and entry cap, and cleared on disconnect.
  */
 const sizeCache = new Map<string, CacheEntry>();
 
-export function clearDirectorySizeCache() {
-  sizeCache.clear();
+function getCachedEntry(key: string): CacheEntry | null {
+  const cached = sizeCache.get(key);
+  if (!cached) return null;
+  if (Date.now() - cached.at > DIRECTORY_SIZE_CACHE_TTL_MS) {
+    sizeCache.delete(key);
+    return null;
+  }
+  return cached;
+}
+
+function setCachedEntry(key: string, entry: CacheEntry) {
+  sizeCache.delete(key);
+  sizeCache.set(key, entry);
+  while (sizeCache.size > MAX_CACHE_ENTRIES) {
+    const oldestKey = sizeCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    sizeCache.delete(oldestKey);
+  }
+}
+
+export function clearDirectorySizeCache(sessionId?: string) {
+  if (!sessionId) {
+    sizeCache.clear();
+    return;
+  }
+  const prefix = `${sessionId}:`;
+  for (const key of [...sizeCache.keys()]) {
+    if (key.startsWith(prefix)) {
+      sizeCache.delete(key);
+    }
+  }
 }
 
 function parentOf(path: string, root: string) {
@@ -54,8 +86,8 @@ export function DirectorySizesView({
   onOpenInSftp?: (path: string) => void;
 }) {
   const [path, setPath] = useState(root);
-  const [entry, setEntry] = useState<CacheEntry | null>(
-    () => sizeCache.get(`${sessionId}:${root}`) ?? null,
+  const [entry, setEntry] = useState<CacheEntry | null>(() =>
+    getCachedEntry(`${sessionId}:${root}`),
   );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -66,7 +98,7 @@ export function DirectorySizesView({
   const load = useCallback(
     async (target: string, force: boolean) => {
       const key = `${sessionId}:${target}`;
-      const cached = sizeCache.get(key);
+      const cached = getCachedEntry(key);
       const request = ++requestRef.current;
       setPath(target);
       setError(null);
@@ -80,7 +112,7 @@ export function DirectorySizesView({
       try {
         const sizes = await invoke<DirectorySizes>("directory_sizes", { sessionId, path: target });
         const next = { sizes, at: Date.now() };
-        sizeCache.set(key, next);
+        setCachedEntry(key, next);
         if (request === requestRef.current) setEntry(next);
       } catch (loadError) {
         if (request === requestRef.current) setError(String(loadError));

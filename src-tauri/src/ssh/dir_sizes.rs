@@ -68,8 +68,9 @@ if [ ! -d "$p" ]; then echo "E Not a directory: $p"; exit 0; fi
 e=$(mktemp "${{TMPDIR:-/tmp}}/gputerm-du.XXXXXX") || {{ echo "E Could not create private scan error file"; exit 0; }}
 trap 'rm -f "$e"' 0
 set -- sh -c 'exec du -x -k -d 1 -- "$1" 2>"$2"' sh "$p" "$e"
+if command -v stdbuf >/dev/null 2>&1; then set -- stdbuf -oL "$@"; fi
 if command -v ionice >/dev/null 2>&1 && ionice -c3 true 2>/dev/null; then set -- ionice -c3 nice -n 19 "$@"; else set -- nice -n 19 "$@"; fi
-if command -v timeout >/dev/null 2>&1; then set -- timeout {limit} "$@"; elif command -v perl >/dev/null 2>&1; then set -- perl -e 'alarm shift; exec @ARGV; exit 127' {limit} "$@"; fi
+if command -v timeout >/dev/null 2>&1; then set -- timeout -k 3 {limit} "$@"; elif command -v perl >/dev/null 2>&1; then set -- perl -e 'alarm shift; exec @ARGV; exit 127' {limit} "$@"; fi
 "$@" | sort -rn | awk 'NR<={keep}{{print}} END{{print "N " NR}}'
 echo "X $(wc -l < "$e" | tr -d ' ')"
 rm -f "$e""#,
@@ -325,7 +326,8 @@ X 0
         assert!(script.starts_with("p='/data/it'\\''s here'"));
         assert!(script.contains("du -x -k -d 1 -- \"$1\" 2>\"$2\""));
         assert!(script.contains("sh \"$p\" \"$e\""));
-        assert!(script.contains("timeout 25"));
+        assert!(script.contains("stdbuf -oL"));
+        assert!(script.contains("timeout -k 3 25"));
         assert!(script.contains("NR<=201"));
         assert!(script.contains("mktemp"));
         assert!(script.contains("trap 'rm -f \"$e\"' 0"));

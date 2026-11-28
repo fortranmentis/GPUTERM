@@ -1,7 +1,11 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { clearDirectorySizeCache, DirectorySizesView } from "./DirectorySizesView";
+import {
+  clearDirectorySizeCache,
+  DIRECTORY_SIZE_CACHE_TTL_MS,
+  DirectorySizesView,
+} from "./DirectorySizesView";
 import type { DirectorySizes } from "../types/dirSizes";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -79,5 +83,33 @@ describe("DirectorySizesView", () => {
     mockInvoke.mockRejectedValue("A folder size scan is still running on this host.");
     render(<DirectorySizesView sessionId="gpu" root="/data" onBack={() => {}} />);
     expect(await screen.findByRole("alert")).toHaveTextContent("still running");
+  });
+
+  it("expires cached entries after TTL and clears only the disconnected session", async () => {
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    try {
+      const { unmount } = render(<DirectorySizesView sessionId="gpu" root="/data" onBack={() => {}} />);
+      expect(await screen.findByText("datasets")).toBeInTheDocument();
+      unmount();
+
+      const second = render(<DirectorySizesView sessionId="other" root="/data" onBack={() => {}} />);
+      expect(await screen.findByText("datasets")).toBeInTheDocument();
+      second.unmount();
+      expect(mockInvoke).toHaveBeenCalledTimes(2);
+
+      // Clearing only "gpu" leaves "other" cached.
+      clearDirectorySizeCache("gpu");
+      const otherAgain = render(<DirectorySizesView sessionId="other" root="/data" onBack={() => {}} />);
+      expect(await screen.findByText("datasets")).toBeInTheDocument();
+      expect(mockInvoke).toHaveBeenCalledTimes(2);
+      otherAgain.unmount();
+
+      // Advancing past TTL forces a fresh scan for "other".
+      nowSpy.mockReturnValue(1_000_000 + DIRECTORY_SIZE_CACHE_TTL_MS + 1);
+      render(<DirectorySizesView sessionId="other" root="/data" onBack={() => {}} />);
+      await waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(3));
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 });

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { clearDirectorySizeCache } from "../components/DirectorySizesView";
 import { useSessionStore } from "../stores/sessionStore";
 
 /**
@@ -28,6 +29,7 @@ export function useDisconnectSession() {
       // while the IPC call is in flight, and acting on the pre-await snapshot
       // would show a session that is no longer connected.
       const state = useSessionStore.getState();
+      clearDirectorySizeCache(id);
       removeConnectedSession(id);
       if (state.activeSessionId === id) {
         const remaining = state.connectedSessionIds.filter(

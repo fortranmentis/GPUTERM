@@ -82,7 +82,7 @@ export function WebServices({ profile, connected }: { profile: SessionProfile; c
     try {
       await action();
     } catch (actionError) {
-      setError(String(actionError));
+      setError(actionError instanceof Error ? actionError.message : String(actionError));
     } finally {
       setBusy(null);
     }
@@ -96,13 +96,24 @@ export function WebServices({ profile, connected }: { profile: SessionProfile; c
       if (existing) {
         forwards = saved.filter((rule) => rule.id !== existing.id);
       } else {
+        // A privileged remote port cannot be reused here without root.
+        const bindPort = service.port >= 1024 ? service.port : service.port + 8000;
+        const clash = saved.find(
+          (rule) =>
+            (rule.kind === "local" || rule.kind === "dynamic") &&
+            rule.bindPort === bindPort,
+        );
+        if (clash) {
+          throw new Error(
+            `Local port ${bindPort} is already used by another saved forward. Remove or change it in Port forwards first.`,
+          );
+        }
         const spec = await invoke<ForwardSpec>("validate_forward", {
           spec: {
             id: "",
             kind: "local",
             bindHost: "127.0.0.1",
-            // A privileged remote port cannot be reused here without root.
-            bindPort: service.port >= 1024 ? service.port : service.port + 8000,
+            bindPort,
             destHost: service.host,
             destPort: service.port,
             enabled: true,

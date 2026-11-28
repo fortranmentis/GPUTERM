@@ -22,7 +22,7 @@ pub mod triton;
 pub mod tunnel;
 pub mod vllm;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
 
@@ -34,6 +34,16 @@ use instance::{
     read_instances, sanitize_instance, upsert, vault_key, write_instances, LlmInstance,
 };
 use monitor::{now_epoch_seconds, LlmTelemetryPayload};
+
+/// Serializes read-modify-write of `llm_instances.json` so concurrent saves,
+/// toggles and deletes cannot overwrite each other.
+static LLM_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock_instances() -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    LLM_WRITE_LOCK
+        .lock()
+        .map_err(|_| "LLM instance storage is unavailable".to_string())
+}
 
 /// Loads the registered instances into shared state at startup.
 pub fn load_into_state(state: &AppState) {
@@ -56,29 +66,32 @@ pub fn load_into_state(state: &AppState) {
 /// no API key, so the payload is safe to broadcast.
 pub const INSTANCES_CHANGED_EVENT: &str = "llm-instances-changed";
 
-/// Writes the list to disk, swaps it into shared state so the poller picks the
-/// change up on its next tick, and tells every window about it.
-fn persist(
+/// Swaps the saved list into shared state so the poller picks the change up on
+/// its next tick, and tells every window about it. Disk writes happen inside
+/// `spawn_blocking` under `LLM_WRITE_LOCK` before calling this.
+fn publish_instances(
     app: &AppHandle,
     state: &AppState,
     instances: Vec<LlmInstance>,
-) -> Result<Vec<LlmInstance>, String> {
-    write_instances(&instances)?;
+) -> Vec<LlmInstance> {
     if let Ok(mut slot) = state.llm_instances.lock() {
         *slot = instances.clone();
     }
     state.llm_monitor.request_refresh();
     let _ = app.emit(INSTANCES_CHANGED_EVENT, &instances);
-    Ok(instances)
+    instances
 }
 
 /// Reads the registered list from disk, so a file that failed to parse at
 /// startup is reported to the user instead of looking like an empty list.
 #[tauri::command]
 pub async fn list_llm_instances(state: State<'_, AppState>) -> Result<Vec<LlmInstance>, String> {
-    let instances = tauri::async_runtime::spawn_blocking(read_instances)
-        .await
-        .map_err(|error| format!("Loading LLM instances failed: {}", error))??;
+    let instances = tauri::async_runtime::spawn_blocking(|| {
+        let _guard = lock_instances()?;
+        read_instances()
+    })
+    .await
+    .map_err(|error| format!("Loading LLM instances failed: {}", error))??;
     if let Ok(mut slot) = state.llm_instances.lock() {
         *slot = instances.clone();
     }
@@ -101,6 +114,7 @@ pub async fn save_llm_instance(
     let credentials = state.credentials.clone();
 
     let (instances, key_error) = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock_instances()?;
         // Read from disk rather than the in-memory copy: if the file failed to
         // parse at startup that copy is empty, and writing it back would delete
         // every other instance. An unreadable file must fail the save loudly.
@@ -111,6 +125,7 @@ pub async fn save_llm_instance(
         // so its unit tests need no profile file.
         validate_tunnel_profile(instance.ssh_profile_id.as_deref())?;
         upsert(&mut instances, instance, now)?;
+        write_instances(&instances)?;
 
         let key_error = match api_key {
             Some(key) if key.trim().is_empty() => credentials.clear_password(&vault_key(&id)).err(),
@@ -122,7 +137,7 @@ pub async fn save_llm_instance(
     .await
     .map_err(|error| format!("Saving the LLM instance failed: {}", error))??;
 
-    let saved = persist(&app, &state, instances)?;
+    let saved = publish_instances(&app, &state, instances);
     // The instance itself is saved either way; a locked vault only means the key
     // could not be stored, and the user needs to be told which happened.
     if let Some(error) = key_error {
@@ -138,15 +153,24 @@ pub async fn delete_llm_instance(
     id: String,
 ) -> Result<Vec<LlmInstance>, String> {
     let credentials = state.credentials.clone();
-    let mut instances = read_instances()?;
-    instances.retain(|instance| instance.id != id);
+    let instances = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock_instances()?;
+        let mut instances = read_instances()?;
+        instances.retain(|instance| instance.id != id);
+        write_instances(&instances)?;
 
-    // Best effort, matching profile deletion: a locked vault must not make
-    // removal impossible, and the orphaned entry is unreachable regardless.
-    if let Err(error) = credentials.clear_password(&vault_key(&id)) {
-        eprintln!("GpuTerm: could not clear the stored API key for a deleted LLM instance: {error}");
-    }
-    persist(&app, &state, instances)
+        // Best effort, matching profile deletion: a locked vault must not make
+        // removal impossible, and the orphaned entry is unreachable regardless.
+        if let Err(error) = credentials.clear_password(&vault_key(&id)) {
+            eprintln!(
+                "GpuTerm: could not clear the stored API key for a deleted LLM instance: {error}"
+            );
+        }
+        Ok::<_, String>(instances)
+    })
+    .await
+    .map_err(|error| format!("Deleting the LLM instance failed: {}", error))??;
+    Ok(publish_instances(&app, &state, instances))
 }
 
 #[tauri::command]
@@ -156,13 +180,20 @@ pub async fn set_llm_instance_enabled(
     id: String,
     enabled: bool,
 ) -> Result<Vec<LlmInstance>, String> {
-    let mut instances = read_instances()?;
-    let Some(instance) = instances.iter_mut().find(|instance| instance.id == id) else {
-        return Err("That LLM instance no longer exists".to_string());
-    };
-    instance.enabled = enabled;
-    instance.updated_at = now_epoch_seconds();
-    persist(&app, &state, instances)
+    let instances = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = lock_instances()?;
+        let mut instances = read_instances()?;
+        let Some(instance) = instances.iter_mut().find(|instance| instance.id == id) else {
+            return Err("That LLM instance no longer exists".to_string());
+        };
+        instance.enabled = enabled;
+        instance.updated_at = now_epoch_seconds();
+        write_instances(&instances)?;
+        Ok::<_, String>(instances)
+    })
+    .await
+    .map_err(|error| format!("Updating the LLM instance failed: {}", error))??;
+    Ok(publish_instances(&app, &state, instances))
 }
 
 /// Rejects a tunnel profile that cannot serve as one, with the specific reason.
@@ -194,11 +225,11 @@ pub async fn test_llm_instance(
     api_key: Option<String>,
 ) -> Result<RuntimeStatus, String> {
     let instance = sanitize_instance(instance)?;
-    validate_tunnel_profile(instance.ssh_profile_id.as_deref())?;
     let credentials = state.credentials.clone();
     let active = Arc::clone(&state.active_connections);
 
     tauri::async_runtime::spawn_blocking(move || {
+        validate_tunnel_profile(instance.ssh_profile_id.as_deref())?;
         let key = match api_key {
             Some(key) if !key.trim().is_empty() => Some(key),
             // Fall back to the saved key so testing an edit does not require

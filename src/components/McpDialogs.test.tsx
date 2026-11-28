@@ -115,6 +115,34 @@ describe("McpSettingsDialog", () => {
     );
   });
 
+  it("shows a connected local host so users can hide local telemetry from MCP", async () => {
+    useSessionStore.setState({
+      sessions: [
+        { id: "p1", name: "gpu-01", host: "10.0.0.1", port: 22, username: "ubuntu" },
+        { id: "local-1", name: "Local terminal", host: "localhost", port: 0, username: "local", isLocal: true },
+        { id: "local-off", name: "Disconnected local", host: "localhost", port: 0, username: "local", isLocal: true },
+      ],
+      connectedSessionIds: ["local-1"],
+    });
+    invoke.mockImplementation((command: string, args?: { settings: McpStatus["settings"] }) =>
+      Promise.resolve(
+        command === "update_mcp_settings" ? status(args!.settings, args!.settings.enabled) : status(),
+      ),
+    );
+    render(<McpSettingsDialog onClose={() => undefined} />);
+
+    const localBox = await screen.findByRole("checkbox", { name: /Local terminal/ });
+    expect(screen.getByText("This computer")).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /Disconnected local/ })).not.toBeInTheDocument();
+
+    fireEvent.click(localBox);
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("update_mcp_settings", {
+        settings: { enabled: false, allowActions: false, hiddenProfiles: ["local-1"] },
+      }),
+    );
+  });
+
   it("shows a ready-to-paste configuration per client", async () => {
     invoke.mockResolvedValue(status({ enabled: true }, true));
     render(<McpSettingsDialog onClose={() => undefined} />);
