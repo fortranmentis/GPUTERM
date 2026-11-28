@@ -85,6 +85,32 @@ describe("DirectorySizesView", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("still running");
   });
 
+  it("cancels an in-flight scan and resets loading state", async () => {
+    let resolveScan!: (value: DirectorySizes) => void;
+    mockInvoke.mockImplementation((command) => {
+      if (command === "directory_sizes") {
+        return new Promise<DirectorySizes>((resolve) => {
+          resolveScan = resolve;
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    render(<DirectorySizesView sessionId="gpu" root="/data" onBack={() => {}} />);
+    const cancelButton = await screen.findByRole("button", { name: "Cancel" });
+    fireEvent.click(cancelButton);
+
+    expect(mockInvoke).toHaveBeenCalledWith("cancel_directory_sizes", { sessionId: "gpu" });
+    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Rescan this folder" })).not.toBeDisabled();
+
+    // Resolving the stale scan after cancellation must not populate or cache the view.
+    resolveScan(listings["/data"]);
+    await waitFor(() => {
+      expect(screen.queryByText("datasets")).not.toBeInTheDocument();
+    });
+  });
+
   it("expires cached entries after TTL and clears only the disconnected session", async () => {
     const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
     try {

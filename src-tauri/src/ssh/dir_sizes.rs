@@ -8,7 +8,9 @@
 //! so a slow `du` never holds up the shared operations connection that the
 //! other popovers wait on.
 
-use std::collections::HashSet;
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
@@ -29,9 +31,12 @@ const COMMAND_BUDGET_SECS: u64 = 35;
 const MAX_ENTRIES: usize = 200;
 const MAX_PATH_LEN: usize = 4096;
 
-/// Sessions with a scan in flight. One at a time per host keeps repeated
-/// clicks from stacking up `du` processes on the server.
-static RUNNING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+/// Sessions with a scan in flight and their cancellation flags. One at a time
+/// per host keeps repeated clicks from stacking up `du` processes on the server.
+static RUNNING: LazyLock<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+const CANCELED_ERROR: &str = "Folder size scan canceled";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -182,14 +187,64 @@ fn validate_path_for_os(os: RemoteOs, path: &str, is_local: bool) -> Result<Stri
 }
 
 /// Releases the per-session slot however the scan ends.
-struct RunningGuard(String);
+struct RunningGuard {
+    session_id: String,
+    cancel_flag: Arc<AtomicBool>,
+}
 
 impl Drop for RunningGuard {
     fn drop(&mut self) {
         if let Ok(mut running) = RUNNING.lock() {
-            running.remove(&self.0);
+            if running
+                .get(&self.session_id)
+                .is_some_and(|flag| Arc::ptr_eq(flag, &self.cancel_flag))
+            {
+                running.remove(&self.session_id);
+            }
         }
     }
+}
+
+fn register_running_scan(session_id: &str) -> Result<(RunningGuard, Arc<AtomicBool>), String> {
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let mut running = RUNNING
+        .lock()
+        .map_err(|_| "Folder size state is unavailable".to_string())?;
+    match running.entry(session_id.to_string()) {
+        Entry::Occupied(_) => Err(
+            "A folder size scan is still running on this host. Try again when it finishes."
+                .to_string(),
+        ),
+        Entry::Vacant(slot) => {
+            slot.insert(Arc::clone(&cancel_flag));
+            Ok((
+                RunningGuard {
+                    session_id: session_id.to_string(),
+                    cancel_flag: Arc::clone(&cancel_flag),
+                },
+                cancel_flag,
+            ))
+        }
+    }
+}
+
+fn check_canceled(cancel_flag: &AtomicBool) -> Result<(), String> {
+    if cancel_flag.load(Ordering::Acquire) {
+        Err(CANCELED_ERROR.to_string())
+    } else {
+        Ok(())
+    }
+}
+
+#[tauri::command]
+pub fn cancel_directory_sizes(session_id: String) -> Result<(), String> {
+    let running = RUNNING
+        .lock()
+        .map_err(|_| "Folder size state is unavailable".to_string())?;
+    if let Some(flag) = running.get(&session_id) {
+        flag.store(true, Ordering::Release);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -210,27 +265,18 @@ pub async fn directory_sizes(
     } else {
         Some(target_for_active_session(&state, &session_id)?)
     };
-    {
-        let mut running = RUNNING
-            .lock()
-            .map_err(|_| "Folder size state is unavailable".to_string())?;
-        if !running.insert(session_id.clone()) {
-            return Err(
-                "A folder size scan is still running on this host. Try again when it finishes."
-                    .to_string(),
-            );
-        }
-    }
-    let guard = RunningGuard(session_id.clone());
+    let (guard, cancel_flag) = register_running_scan(&session_id)?;
     let os_cache = Arc::clone(&state.remote_os_cache);
 
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = guard;
+        check_canceled(&cancel_flag)?;
         let (normalized_path, output) = match target {
             None => {
                 let os = local_os();
                 let normalized_path = validate_path_for_os(os, &path, true)?;
                 let script = scan_script(&normalized_path);
+                check_canceled(&cancel_flag)?;
                 let output = run_local_command_with_timeout(
                     os,
                     &script,
@@ -240,9 +286,11 @@ pub async fn directory_sizes(
             }
             Some(target) => {
                 let connection = open_ssh_session(&target)?;
+                check_canceled(&cancel_flag)?;
                 let os = resolve_remote_os(&os_cache, &target.session_id, &connection.session);
                 let normalized_path = validate_path_for_os(os, &path, false)?;
                 let script = scan_script(&normalized_path);
+                check_canceled(&cancel_flag)?;
                 let output = run_remote_command_with_budget(
                     &connection.session,
                     &script,
@@ -251,6 +299,7 @@ pub async fn directory_sizes(
                 (normalized_path, output)
             }
         };
+        check_canceled(&cancel_flag)?;
         parse_sizes(&normalized_path, &output)
     })
     .await
@@ -383,6 +432,28 @@ X 0
             validate_path_for_os(RemoteOs::Linux, "/data/", false).unwrap(),
             "/data"
         );
+    }
+
+    #[test]
+    fn cancel_marks_in_flight_scan_and_guard_clears_slot() {
+        let session_id = format!("cancel-test-{}", std::process::id());
+        let (guard, flag) = register_running_scan(&session_id).unwrap();
+        assert!(check_canceled(&flag).is_ok());
+
+        // Second concurrent scan for the same session is rejected.
+        assert!(register_running_scan(&session_id).is_err());
+
+        // Canceling flags the in-flight scan.
+        cancel_directory_sizes(session_id.clone()).unwrap();
+        assert_eq!(check_canceled(&flag).unwrap_err(), CANCELED_ERROR);
+
+        // Dropping the guard releases the slot so a subsequent scan can register.
+        drop(guard);
+        let (_next_guard, next_flag) = register_running_scan(&session_id).unwrap();
+        assert!(check_canceled(&next_flag).is_ok());
+
+        // Canceling an unknown session is a no-op.
+        cancel_directory_sizes(format!("missing-{}", std::process::id())).unwrap();
     }
 
     #[cfg(unix)]

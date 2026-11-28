@@ -111,9 +111,10 @@ export function DirectorySizesView({
       setLoading(true);
       try {
         const sizes = await invoke<DirectorySizes>("directory_sizes", { sessionId, path: target });
+        if (request !== requestRef.current) return;
         const next = { sizes, at: Date.now() };
         setCachedEntry(key, next);
-        if (request === requestRef.current) setEntry(next);
+        setEntry(next);
       } catch (loadError) {
         if (request === requestRef.current) setError(String(loadError));
       } finally {
@@ -122,6 +123,14 @@ export function DirectorySizesView({
     },
     [sessionId],
   );
+
+  const handleCancel = useCallback(() => {
+    requestRef.current += 1;
+    setLoading(false);
+    void invoke("cancel_directory_sizes", { sessionId }).catch(() => {
+      // Best-effort cancellation; backend scan may have already finished.
+    });
+  }, [sessionId]);
 
   useEffect(() => {
     void load(root, false);
@@ -191,10 +200,15 @@ export function DirectorySizesView({
 
       <div className="dir-sizes-status">
         {loading ? (
-          <span>
-            <LoaderCircle size={12} className="spin" /> Measuring folders… large trees can take up
-            to 30 seconds.
-          </span>
+          <>
+            <span>
+              <LoaderCircle size={12} className="spin" /> Measuring folders… large trees can take up
+              to 30 seconds.
+            </span>
+            <button className="ghost-button compact" type="button" onClick={handleCancel}>
+              Cancel
+            </button>
+          </>
         ) : sizes ? (
           <span>
             {sizes.totalBytes != null ? `${formatFileSize(sizes.totalBytes)} in total · ` : ""}

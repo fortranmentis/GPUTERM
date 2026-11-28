@@ -35,7 +35,7 @@ use ssh::forwarding::{
 use ssh::snippets::{delete_snippet, list_snippets, save_snippet};
 use ssh::ssh_config::{import_ssh_config, preview_ssh_config};
 use ssh::system_monitor::{get_telemetry_settings, update_telemetry_settings};
-use ssh::dir_sizes::directory_sizes;
+use ssh::dir_sizes::{cancel_directory_sizes, directory_sizes};
 use ssh::tmux::{kill_tmux_session, list_tmux_sessions};
 use ssh::web_services::{open_link, open_web_service, scan_web_services};
 use ssh::terminal::{
@@ -89,6 +89,7 @@ pub fn run() {
             disconnect_terminal,
             list_tmux_sessions,
             directory_sizes,
+            cancel_directory_sizes,
             scan_web_services,
             open_web_service,
             open_link,

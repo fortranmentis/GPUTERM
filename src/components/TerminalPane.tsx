@@ -17,16 +17,10 @@ import { SearchAddon } from "@xterm/addon-search";
 import { Terminal, type IDisposable } from "@xterm/xterm";
 import {
   ArrowLeft,
-  ChevronDown,
-  ChevronUp,
   Columns2,
   KeyRound,
   Laptop,
   LoaderCircle,
-  PanelBottom,
-  PanelLeft,
-  PanelRight,
-  PanelTop,
   PlugZap,
   Plus,
   RefreshCw,
@@ -37,6 +31,9 @@ import {
 } from "lucide-react";
 import { useSessionStore } from "../stores/sessionStore";
 import { useDisconnectSession } from "../hooks/useDisconnectSession";
+import { useStableStringArray } from "../hooks/useStableStringArray";
+import { SplitPlacementControls } from "./terminal/SplitPlacementControls";
+import { TerminalSearchBar } from "./terminal/TerminalSearchBar";
 import {
   appendPendingOutput,
   clearPendingOutput,
@@ -138,71 +135,6 @@ function tmuxNameError(name: string): string | null {
   return null;
 }
 
-type SplitPlacementControlsProps = {
-  placement: TerminalSplitPlacement;
-  ratio: number;
-  onPlacementChange: (placement: TerminalSplitPlacement) => void;
-  onRatioChange: (ratio: number) => void;
-};
-
-function SplitPlacementControls({
-  placement,
-  ratio,
-  onPlacementChange,
-  onRatioChange,
-}: SplitPlacementControlsProps) {
-  const placements: Array<{
-    value: TerminalSplitPlacement;
-    label: string;
-    icon: typeof PanelLeft;
-  }> = [
-    { value: "left", label: "Left", icon: PanelLeft },
-    { value: "right", label: "Right", icon: PanelRight },
-    { value: "top", label: "Top", icon: PanelTop },
-    { value: "bottom", label: "Bottom", icon: PanelBottom },
-  ];
-
-  return (
-    <div className="terminal-split-options">
-      <fieldset>
-        <legend>New pane position</legend>
-        <div className="terminal-split-placement-grid">
-          {placements.map((option) => {
-            const Icon = option.icon;
-            return (
-              <button
-                key={option.value}
-                type="button"
-                className={placement === option.value ? "selected" : ""}
-                aria-pressed={placement === option.value}
-                aria-label={`Place new pane ${option.label.toLowerCase()}`}
-                onClick={() => onPlacementChange(option.value)}
-              >
-                <Icon size={15} />
-                {option.label}
-              </button>
-            );
-          })}
-        </div>
-      </fieldset>
-      <label className="terminal-split-ratio">
-        <span>
-          New pane size <output>{ratio}%</output>
-        </span>
-        <input
-          type="range"
-          min="20"
-          max="80"
-          step="5"
-          value={ratio}
-          aria-label="New pane size"
-          onChange={(event) => onRatioChange(Number(event.target.value))}
-        />
-      </label>
-    </div>
-  );
-}
-
 function createTerminal(appearance: TerminalAppearance): Terminal {
   return new Terminal({
     cursorBlink: true,
@@ -223,18 +155,6 @@ function isClosedChannelError(error: unknown) {
     message.includes("channel is not open") ||
     message.includes("no active terminal")
   );
-}
-
-/** Keeps the previous array reference while its ordered string items are unchanged. */
-function useStableStringArray(items: string[]): string[] {
-  const ref = useRef<string[]>(items);
-  if (
-    ref.current.length !== items.length ||
-    ref.current.some((item, index) => item !== items[index])
-  ) {
-    ref.current = items;
-  }
-  return ref.current;
 }
 
 export function TerminalPane() {
@@ -1408,68 +1328,14 @@ export function TerminalPane() {
           ref={(element) => registerTerminalHost(terminalId, element)}
         />
         {visible && searchOpen && terminalId === focusedTerminalId && (
-          <div
-            className="terminal-search-bar"
-            role="search"
-            onMouseDown={(event) => event.stopPropagation()}
-          >
-            <input
-              ref={searchInputRef}
-              value={searchQuery}
-              type="search"
-              autoFocus
-              aria-label="Search terminal output"
-              placeholder="Find in terminal"
-              onChange={(event) => {
-                setSearchQuery(event.target.value);
-                runSearch(event.target.value, "next");
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  runSearch(searchQuery, event.shiftKey ? "previous" : "next");
-                } else if (event.key === "Escape") {
-                  event.preventDefault();
-                  closeSearch();
-                }
-              }}
-            />
-            <span className="terminal-search-status" aria-live="polite">
-              {searchQuery === ""
-                ? ""
-                : searchMatches == null
-                  ? "…"
-                  : searchMatches.total === 0
-                    ? "No matches"
-                    : `${searchMatches.current}/${searchMatches.total}`}
-            </span>
-            <button
-              type="button"
-              aria-label="Previous match"
-              title="Previous match (Shift+Enter)"
-              disabled={searchQuery === ""}
-              onClick={() => runSearch(searchQuery, "previous")}
-            >
-              <ChevronUp size={14} />
-            </button>
-            <button
-              type="button"
-              aria-label="Next match"
-              title="Next match (Enter)"
-              disabled={searchQuery === ""}
-              onClick={() => runSearch(searchQuery, "next")}
-            >
-              <ChevronDown size={14} />
-            </button>
-            <button
-              type="button"
-              aria-label="Close search"
-              title="Close search (Escape)"
-              onClick={closeSearch}
-            >
-              <X size={14} />
-            </button>
-          </div>
+          <TerminalSearchBar
+            inputRef={searchInputRef}
+            query={searchQuery}
+            matches={searchMatches}
+            onQueryChange={setSearchQuery}
+            onSearch={runSearch}
+            onClose={closeSearch}
+          />
         )}
         {visible && closedPanes[terminalId] && (
           <div className="terminal-pane-closed" role="status">
