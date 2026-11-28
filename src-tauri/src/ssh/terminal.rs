@@ -1487,11 +1487,15 @@ fn resize_remote_pty_nonblocking(
 mod tests {
     use super::{
         apply_typed_password, drain_utf8_stream, fill_stored_credentials, is_closed_channel_error,
-        is_ssh_would_block, open_local_terminal_with_shell, pty_size, write_all_nonblocking,
+        is_ssh_would_block, pty_size, write_all_nonblocking,
     };
+    #[cfg(unix)]
+    use super::open_local_terminal_with_shell;
     use crate::ssh::credentials::{CredentialStore, MemoryCredentialStore};
     use crate::ssh::session::SshTarget;
-    use std::io::{Error, ErrorKind, Read, Write};
+    use std::io::{Error, ErrorKind, Write};
+    #[cfg(unix)]
+    use std::io::Read;
 
     #[test]
     fn a_password_typed_at_sign_in_goes_to_its_hop() {

@@ -11,6 +11,8 @@ use std::fs;
 #[cfg(any(target_os = "macos", windows))]
 use std::io::Write;
 use std::path::Path;
+#[cfg(windows)]
+use std::path::PathBuf;
 #[cfg(any(target_os = "macos", windows))]
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
