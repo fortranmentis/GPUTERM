@@ -20,6 +20,7 @@
 
 - The local frontend suite passed 403 tests. GitHub CI checks the frontend, Rust backend, TypeScript, ESLint, Clippy, and the declared Rust minimum. Installer builds also compile the production frontend.
 - Added regression coverage for terminal links, folder-size cancellation/cache, session and web-service stores, container and database monitoring, updater behavior, snippets and SFTP panels.
+- Restrict status-line test imports to macOS and Windows so the Linux Clippy check does not flag unused imports.
 - GitHub Actions builds Windows NSIS EXE, Apple Silicon DMG, Debian DEB and Linux AppImage. The Mac workflow ad-hoc signs nested code and the entire app bundle, then mounts the final DMG and verifies its enclosed app with `codesign --verify --deep --strict`.
 
 ## Notes

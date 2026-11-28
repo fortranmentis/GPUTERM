@@ -4,14 +4,19 @@ use super::statusline::*;
 use super::types::*;
 use super::*;
 use crate::ssh::system_monitor::{local_os, native_remote_path, remote_join};
+#[cfg(any(target_os = "macos", windows))]
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
+#[cfg(any(target_os = "macos", windows))]
 use std::io::Write;
 use std::path::Path;
+#[cfg(any(target_os = "macos", windows))]
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+#[cfg(any(target_os = "macos", windows))]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 
 /// Fixed clock for the parsers, well ahead of the fixture reset timestamps.
